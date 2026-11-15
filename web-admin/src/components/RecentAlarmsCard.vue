@@ -73,15 +73,13 @@ defineEmits(['retry'])
 </script>
 
 <style scoped>
-/* 父视图的 scoped 样式不穿透子组件内部元素，此处自带同值定义 */
+/* 父视图的 scoped 样式不穿透子组件内部元素；字体排印取 global.css 的
+   .card-header 基类，此处只保留本卡片额外的布局/字号/颜色 */
 .card-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  font-family: var(--xf-font-display);
-  font-weight: 600;
   font-size: var(--xf-font-size-base);
-  letter-spacing: var(--xf-tracking-wide);
   color: var(--xf-gray-800);
 }
 

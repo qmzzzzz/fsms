@@ -15,6 +15,8 @@
  * 并区分"保尾"与"保头"这两种 `$slice` 写法（第 3 条用例是唯一的杀手）。
  */
 
+// P2-21：仿同目录 PREV_ENV 模式，套件结束后把 env 归还，避免泄漏到同 worker 后续套件
+const PREV_ENV = { INSPECTION_EXECUTION_LOG_CAP: process.env.INSPECTION_EXECUTION_LOG_CAP };
 process.env.INSPECTION_EXECUTION_LOG_CAP = '3'; // 必须早于 require：服务在模块加载期读它
 
 const mongoose = require('mongoose');
@@ -79,6 +81,10 @@ describe('executionLog 封顶：保尾、可数、四条路径都带上', () => 
     await Inspection.deleteMany({ title: new RegExp(`^${TAG}`) }).catch(() => {});
     await User.deleteMany({ _id: { $in: [OWNER, REVIEWER] } }).catch(() => {});
     if (mongoose.connection.readyState !== 0) await mongoose.connection.close();
+    for (const [key, prev] of Object.entries(PREV_ENV)) {
+      if (prev === undefined) delete process.env[key];
+      else process.env[key] = prev;
+    }
   });
 
   test('新建的巡检计数从 0 起（字段默认值，不是 undefined）', async () => {

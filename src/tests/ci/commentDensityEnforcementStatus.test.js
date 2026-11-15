@@ -60,7 +60,7 @@ describe('注释密度脚本的强制状态声明', () => {
     expect(cd.ENFORCEMENT.enable).toMatch(/--check/);
   });
 
-  test('--check 的退出码与 evaluate() 判定一致（今天实测 exit 1：确有回退）', () => {
+  test('--check 的退出码与 evaluate() 判定一致（当前树必须通过；历史实测到过 exit 1 的回退事件，已由 commentDensityRatchet 的"当前树必须过"收口）', () => {
     const baseline = JSON.parse(fs.readFileSync(cd.BASELINE_PATH, 'utf8'));
     const verdict = cd.evaluate(baseline, cd.production());
     const r = spawnSync(

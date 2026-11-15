@@ -92,13 +92,23 @@ else
   # `|| true` 是必需的：set -e + pipefail 下 grep 无匹配会让赋值命令替换直接结束脚本，
   # 那样下面那个 -z 分支永远走不到（一道写在那里却不可能执行的分支，和死代码同罪）。
   EXPECTED_HASH=$(grep -oE '[0-9a-f]{64}' "$CHECKSUM_FILE" | head -1 || true)
-  ACTUAL_HASH=$(sha256sum "$BACKUP_FILE" | grep -oE '[0-9a-f]{64}' | head -1 || true)
+  # 跨平台取 sha256：sha256sum 是 GNU coreutils 的名字，BSD/macOS 用 shasum -a 256 或 openssl dgst。
+  # 按序探测第一个可用者；都不可用或读不出 ⇒ 下面的判据 fail-closed（缺哪个工具在报错里点名）。
+  if command -v sha256sum >/dev/null 2>&1; then
+    ACTUAL_HASH=$(sha256sum -- "$BACKUP_FILE" 2>/dev/null | grep -oE '[0-9a-f]{64}' | head -1 || true)
+  elif command -v shasum >/dev/null 2>&1; then
+    ACTUAL_HASH=$(shasum -a 256 -- "$BACKUP_FILE" 2>/dev/null | grep -oE '[0-9a-f]{64}' | head -1 || true)
+  elif command -v openssl >/dev/null 2>&1; then
+    ACTUAL_HASH=$(openssl dgst -sha256 -- "$BACKUP_FILE" 2>/dev/null | grep -oE '[0-9a-f]{64}' | head -1 || true)
+  else
+    ACTUAL_HASH=''
+  fi
   if [ ${#EXPECTED_HASH} -ne 64 ]; then
     echo "Error: 校验和文件里解析不出 sha256（期望 64 位十六进制）：$CHECKSUM_FILE" >&2
     exit 1
   fi
   if [ -z "$ACTUAL_HASH" ]; then
-    echo "Error: 无法为归档计算 sha256（sha256sum 不可用或文件不可读）：$BACKUP_FILE" >&2
+    echo "Error: 无法为归档计算 sha256（sha256sum / shasum -a 256 / openssl dgst -sha256 均不可用，或文件不可读）：$BACKUP_FILE" >&2
     exit 1
   fi
   if [ "$EXPECTED_HASH" != "$ACTUAL_HASH" ]; then

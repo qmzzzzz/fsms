@@ -20,8 +20,8 @@
  *   - `scripts/generate-secrets.js`：`--output ./secrets` 与末尾裸 `--out` 都取不到目录
  *     ⇒ 静默走"打印到 stdout"分支，把全套密钥（含 EC 私钥 PEM）装进终端历史/CI 日志，
  *     而操作者以为已经落成 0600 文件。
- * 同族另三个只带 `--apply` 的脚本（fix-token-blacklist-index / sync-audit-indexes /
- * revoke-user-sessions）仍接受未知参数，但它们的降级方向是**干跑**（安全侧），故未一并整改。
+ * 同族另两个只带 `--apply` 的脚本（fix-token-blacklist-index / sync-audit-indexes）仍接受未知参数
+ * （降级方向是干跑，安全侧）；revoke-user-sessions 已补齐：--apply+--yes 双确认 + 未知参数拒绝。
  */
 
 const fs = require('fs');
@@ -320,5 +320,43 @@ describe('scripts/migrate-pii-encryption.js：拼错档位不得退化为全量�
     expect(r.status).toBe(0);
     expect(r.stdout).toContain('LOADED');
     expect(r.stderr).not.toMatch(/mongodb:\/\/|ECONNREFUSED/);
+  });
+});
+
+describe('revoke-user-sessions.js：--apply 需 --yes 双确认 + 未知参数拒绝（2026-11-15 审计）', () => {
+  const SCRIPT = path.join(ROOT, 'scripts', 'revoke-user-sessions.js');
+  const run = (args) =>
+    spawnSync(process.execPath, [SCRIPT, ...args], {
+      cwd: ROOT,
+      encoding: 'utf8',
+      timeout: 15000,
+      env: { ...process.env, MONGODB_URI: 'mongodb://127.0.0.1:1/arg_probe_db' },
+    });
+
+  test('--aply 手误按未知参数拒绝（退出码 2），不得静默降级成演练', () => {
+    const r = run(['someuser', '--aply', '--yes']);
+    expect(r.status).toBe(2);
+    expect(`${r.stderr}${r.stdout}`).toContain('未知参数');
+    expect(`${r.stderr}${r.stdout}`).toContain('--aply');
+  });
+
+  test('--apply 不带 --yes ⇒ 拒绝执行（破坏性操作双确认）', () => {
+    const r = run(['someuser', '--apply']);
+    expect(r.status).toBe(2);
+    expect(`${r.stderr}${r.stdout}`).toContain('--yes');
+  });
+
+  test('用户名缺失或多个 ⇒ 拒绝（恰好一个）', () => {
+    for (const args of [[], ['a', 'b']]) {
+      const r = run(args);
+      expect({ args, status: r.status }).toEqual({ args, status: 2 });
+      expect(`${r.stderr}${r.stdout}`).toContain('用户名');
+    }
+  });
+
+  test('未知开关（--force）拒绝', () => {
+    const r = run(['someuser', '--force']);
+    expect(r.status).toBe(2);
+    expect(`${r.stderr}${r.stdout}`).toContain('--force');
   });
 });

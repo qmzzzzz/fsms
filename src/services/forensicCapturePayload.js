@@ -3,6 +3,7 @@
 
 const codec = require('./forensicCaptureCodec');
 const logger = require('../utils/logger');
+const metrics = require('../utils/metrics');
 const { readPositiveNumberEnv } = require('../utils/envNumber');
 const { sanitizeAuditBody, sanitizeAuditQuery } = require('../models/auditLogSanitizer');
 const { digestOf } = require('../utils/passwordHistory');
@@ -59,6 +60,31 @@ const isPasswordKey = (key) => {
   );
 };
 
+const getForensicPepper = () => {
+  try {
+    return require('../config').hmacSecret || '';
+  } catch {
+    return process.env.HMAC_SECRET || '';
+  }
+};
+
+let noPepperLogged = false;
+const forensicSecretDigest = (secretText) => {
+  if (!getForensicPepper()) {
+    if (!noPepperLogged) {
+      noPepperLogged = true;
+      logger.error(
+        'HMAC_SECRET 未配置：取证口令摘要不可用（不落无盐 sha256，hmac 记 null）——口令类字段只保留长度，请尽快配置强密钥'
+      );
+    }
+    try {
+      metrics.incSecurityAlert('forensic_digest_no_pepper', 'medium');
+    } catch {}
+    return { len: secretText.length, hmac: null };
+  }
+  return { len: secretText.length, hmac: digestOf(secretText) }; // P2-05：缺 pepper 时上方降级为 {len,hmac:null}——无盐 sha256 等于可爆破的口令等价物，宁缺毋假
+};
+
 /** 6 层脱敏 + 口令键 {len,hmac}：先由单源 sanitizeAuditBody 产出掩码树，再按原树补回口令摘要（它只给 '***'，拿不到长度）。 */
 const sanitizeBodyForForensic = (body, depth = 0) => {
   if (depth > MAX_SANITIZE_DEPTH) return DEPTH_EXCEEDED;
@@ -74,15 +100,11 @@ const sanitizeBodyForForensic = (body, depth = 0) => {
       const rawVal = raw[key];
       // 口令键优先：单源名单不含 passwd/pwd 这类别名，此处按 §1.4 升级成 { len, hmac }（只存长度与带 pepper 的摘要），不是放宽脱敏。
       if (SECRET_LIST_KEYS.has(normalizeKey(key)) && Array.isArray(rawVal)) {
-        next[key] = rawVal.map((one) => {
-          const text = String(one);
-          return { len: text.length, hmac: digestOf(text) };
-        });
+        next[key] = rawVal.map((one) => forensicSecretDigest(String(one)));
         continue;
       }
       if ((typeof rawVal === 'string' || typeof rawVal === 'number') && isPasswordKey(key)) {
-        const secretText = String(rawVal);
-        next[key] = { len: secretText.length, hmac: digestOf(secretText) };
+        next[key] = forensicSecretDigest(String(rawVal));
         continue;
       }
       next[key] = upgrade(rawVal, next[key], level + 1);

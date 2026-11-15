@@ -151,7 +151,7 @@ async function applyBan({
   // 票据的 cidr 是**单条**网段：requestBan 只收 normalizeCIDR 通过的单一 CIDR（逗号串 parseCIDR 即 null → 出票前就被 unparsable_cidr 拒掉），
   // 此处的 split(',').slice(0, MAX_BATCH) 是不可达的死分支——批量语义（MAX_BATCH）只在 banRecommended 的簇列表上真实存在。按单条展开，批量形状留给唯一真实的批量入口。
   const targets = [ticket.cidr];
-  const judged = await ticketJudgementRefusal({ ticket, typedConfirm, targets, operatorIp });
+  const judged = await ticketJudgementRefusal({ ticket, typedConfirm, targets, operatorIp, now });
   if (judged) {
     await writeBackTicket(ticket); // 敲错不消耗（ADR-018 ③）：票据原样写回剩余 TTL
     return judged;
@@ -194,11 +194,19 @@ async function applyBan({
   return { ok: true, cidr: ticket.cidr, bannedCount, results };
 }
 
-/** 消耗票据之前的三条判据（都不消耗票：打错字只是没确认，环境变了还能重试）。后两条必须在落库时刻重跑——取票与落库是两个时刻（ip-list 侧就在写入时刻现取，此处同尺） */
-async function ticketJudgementRefusal({ ticket, typedConfirm, targets, operatorIp }) {
+/** 消耗票据之前的判据（都不消耗票：打错字只是没确认，环境变了还能重试）。全部判据在落库时刻现取现判——取票与落库是两个时刻（ip-list 侧就在写入时刻现取，此处同尺）；白名单覆盖与段内真实业务流量两条护栏同样在确认时刻复核，否则取票后新上的白名单/新出现的业务流量有最长 CONFIRM_TTL_MS 的绕过窗 */
+async function ticketJudgementRefusal({
+  ticket,
+  typedConfirm,
+  targets,
+  operatorIp,
+  now = new Date(),
+}) {
   if (needsTypedConfirmation(ticket.cidr) && !typedConfirmMatches(typedConfirm, ticket.cidr)) {
     return refuse(CODES.typed_confirmation_required, { cidr: ticket.cidr });
   }
+  const whites = await ipListService.findCoveringEntries(ticket.cidr, 'white');
+  if (whites.length) return refuse(CODES.whitelist_covers, { cidr: ticket.cidr });
   // 写入之前先看一次并集（与 requestBan 顺序一致）：名单可能在取票后被改成整族；先判就不会写完再删、也就不会删到别人的条目
   const prospective = cidrUnionCoversAll([
     ...(await ipListService.listActiveEntryIps('black')),
@@ -215,6 +223,8 @@ async function ticketJudgementRefusal({ ticket, typedConfirm, targets, operatorI
   if (operatorIp && targets.some((one) => entryCovers(one, operatorIp))) {
     return refuse(CODES.operator_inside, { cidr: ticket.cidr });
   }
+  const live = await liveTraffic.segmentHasLiveTraffic({ cidr: ticket.cidr, now });
+  if (live.live) return refuse(CODES.live_traffic_inside, { cidr: ticket.cidr });
   return null;
 }
 

@@ -39,9 +39,6 @@ jest.mock('@sentry/node', () => ({
     errorHandler: jest.fn(() => 'ERR_HANDLER'),
   },
 }));
-jest.mock('mongoose', () => ({
-  connection: { db: { collection: jest.fn() } },
-}));
 
 // ============================ ApiError =======================================
 describe('ApiError 工厂与默认值（补 22% 分支）', () => {
@@ -188,6 +185,11 @@ describe('httpPostJson.postJson 零依赖客户端分支（补 14% 分支）', (
 
 // ============================ autoIncrement =================================
 describe('autoIncrement 插件编号生成分支（补 50% 分支）', () => {
+  // mongoose 替身只在本 describe 生效（doMock 不提升，describe 末尾 dontMock 收回）：
+  // 本文件只有 autoIncrement 需要 connection.db.collection，顶层 mock 作用域过宽。
+  jest.doMock('mongoose', () => ({
+    connection: { db: { collection: jest.fn() } },
+  }));
   const mongoose = require('mongoose');
   const plugin = require('../../plugins/autoIncrement');
 
@@ -275,6 +277,8 @@ describe('autoIncrement 插件编号生成分支（补 50% 分支）', () => {
     expect(nextSave.mock.calls[0][0]).toBeInstanceOf(Error);
     expect(nextValidate.mock.calls[0][0]).toBeInstanceOf(Error);
   });
+
+  jest.dontMock('mongoose'); // 替身作用域到此为止：后续 describe（captcha/sentry/rateLimit）回到真 mongoose
 });
 
 // ===================== captchaService 清理定时器 =============================

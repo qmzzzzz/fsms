@@ -8,6 +8,42 @@
 
 ## [未发布]
 
+### 修复：2026-11-15 全仓审计报告 P2×36 + P3 全量修复落地（2026-11-15）
+
+> 来源：`AUDIT-REPORT-2026-11-15.md`（P2 36 项、P3 181 项）。本条为该轮修复批次的
+> 汇总登记，覆盖后端服务/中间件、前端视图、部署资产与文档/根配置、CI/CD 与数据库
+> 迁移各域；逐项判据见各域契约测试与对应文件内注释。
+
+- **部署与 systemd（P2-31）**：`fsms-access-review.service` 弃用 DynamicUser、改预建
+  专用低权账号 `fsms-review` 并收紧 `ProtectSystem=strict`——DynamicUser 的即弃 UID
+  读不到 0600 的 `./secrets/*`，生产口径（.env 只配 `*_FILE`）下权限复核服务每轮
+  EACCES，逼运维把明文 URI 写回 .env；配套在 `secret-rotation.md` 增补宿主侧低权
+  服务消费 secret 的属组化口径（0640 组可读，仅限点名的那一份）。
+- **蓝绿口径（P2-32）**：`rollback-drill.md` §2 改写为引用 `hot-upgrade.md` 的既定
+  机制并加显著勘误注记——实际实现是 blue=`app`（127.0.0.1:3000）、green=`app-green`
+  （127.0.0.1:3001）、upstream 切流，旧文的颜色/端口/机制均与实现相反。
+- **compose**：`mongo-rs-init` 的 root/应用口令改经环境变量前缀注入（口令不进
+  argv，与 mongo healthcheck 的 P2-17 口径一致）；两个内网网络以 ipam 钉死子网
+  （fire-safety-net=172.28.0.0/16、data-net=172.29.0.0/16），`TRUSTED_PROXY_CIDRS`
+  的正确取值不再随部署机漂移；`LOGIN_ENCRYPT_STRICT` 默认改 `true`（本 compose 即
+  宿主 nginx TLS 终结拓扑，浏览器有 secure context，纯 HTTP 内网部署需显式关回）；
+  secrets 头注释与 `file: ./secrets/*` 的实际路径口径统一。
+- **文档与根配置**：部署路径统一为 `/opt/fsms`（清除 `/opt/xf`、`/srv/fsms` 漂移）；
+  `UPGRADE_HISTORY_LIMIT` 代理侧模板与应用默认统一为 10；nginx HSTS preload 三处
+  默认不下发（启用条件保留）；取证日志 awk 速查配方改按结构取位（多跳 XFF 含空格
+  不再字段错位）；`.env.example` 补 `FSMS_SECRETS_DIR`（README 上线清单必填项）；
+  `.dockerignore` 删除被 `**/*.md`/`**/*.txt` 完全覆盖的裸 `*.md`/`*.txt` 两行；
+  README 快速开始按 shell 拆分 bash / PowerShell 代码块；package.json 三处
+  `--audit-level=high` 统一为 `moderate`（与 CI / SECURITY.md 2026-09-16 起的基线
+  一致）。
+- **文档规范**：`docs/architecture.md` 新增两条工程纪律——「路由级 consumeValidation
+  是校验结果唯一消费口径，控制器不再重复 validationResult」与「文本类门禁必须同时
+  交付正对照 + 洗白自证（变异实测证明有牙）」；`docs/threat-model.md` 残余风险 #3
+  （logShipper DNS rebinding）更新为已于 2026-10-31 由 `pinnedLookup` 收口；
+  `deploy-workflow-rehearsal.md` 补 staging dry-run 规程与「以工作流实际定义为准」
+  边界，`rollback-drill-record.md` 显式声明「完整回滚演练与 RTO 验证尚未真实执行」；
+  本文件六个缺日期小节按 git 提交日期/内容推断补齐。
+
 ### 修复：取证溯源「触发说明 / 状态码 / 他的 IP 池」三处不显示（2026-11-04）
 
 > 安全分析 · 取证溯源读面实测：时间线的「触发说明」「状态码」两列恒渲染 `-`；按 IP 溯源
@@ -913,7 +949,7 @@ token 数腿 ⇒ 各自用例以 rc=0 的 fail-open 复现变红；还原后所�
   夹具改为「第 N 次调用失败，N=1..8」逐条注入，并加一条反向对照：把 `&&` 换成分号的**历史形态**
   喂进同一夹具，第 2 条失败必须被静默吞掉（证明本闸抓得住它）。
 - **正则判别力为零**：`hotUpgradeQueueContract.test.js:135` 的 `/…(?: &&)?$/m` 对「有/没有 `&&`」都真。
-  改成必需的 `&&，并补一条前提自证：整块 8 条命令之间必须恰好 7 个`&&`。
+  改成必需的 `&&`，并补一条前提自证：整块 8 条命令之间必须恰好 7 个 `&&`。
 
 - **`test -n "$MONGOD"` 无判据**：`.github/workflows/ci.yml:137/:508` 的这行删掉后整族仍绿，
   而「provision 退出 0 但什么都没打印」正是该步骤自述的头号危害（空值让 MongoBinary 回落到
@@ -1672,7 +1708,7 @@ token 数腿 ⇒ 各自用例以 rc=0 的 fail-open 复现变红；还原后所�
 | #   | 缺陷（读源码确认，非推断）                                                                                                                                                            | 改法                                                                                                                                                                 | 门禁（行为级，不是 grep）                                                                                                                                                                                                                                                                      |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | ①   | `backup-mongo.sh` 在 `case` **之前**无条件 `mktemp + 写入含口令的 URI`，而 docker 传输（默认）从头到尾没人读它 ⇒ 每次备份都在宿主盘上留一份 0600 明文口令                             | 配置文件挪进 `local` 分支按需创建；docker 分支只经 stdin 送 `uri:` 行                                                                                                | `backupFailureArtifactHygiene` C.1：docker 跑完 `"$TMPDIR"/*` 里**一个** `^uri: ` 结构的文件都没有；反向对照 local 恰好探到 1 个                                                                                                                                                               |
-| ②   | 备份侧容器内路径写死 `/tmp/.mongodump-backup`，且 `cat`/`printf` 不判返回码（与 peer 已修的恢复侧同源）                                                                               | `mktemp` + 每步 `                                                                                                                                                    |                                                                                                                                                                                                                                                                                                | { rm -f "$cfg"; exit 1; }` | C.1 的 `DOCKER .*exec -T mongo sh -c` 自证 + 断言 argv 上没有口令字面量 |
+| ②   | 备份侧容器内路径写死 `/tmp/.mongodump-backup`，且 `cat`/`printf` 不判返回码（与 peer 已修的恢复侧同源）                                                                               | `mktemp` + 每步 `\|\|` 判返回码（`cat > "$cfg" \|\| { rm -f "$cfg"; exit 1; }`）                                                                                     | C.1 的 `DOCKER .*exec -T mongo sh -c` 自证 + 断言 argv 上没有口令字面量                                                                                                                                                                                                                        |
 | ③   | `BACKUP_OFFSITE_CMD` 含换行/回车时按"一条命令"解析只执行**第一行**，却把整份配置回显成 `Offsite copy completed` ⇒ 多行 env、CRLF 写的 env、误粘两条命令三种现场都记账为"异地副本已做" | 执行前拒绝（一条都不跑），并把 `\\r` 的 CRLF 出路点名                                                                                                                | C.2 三腿：多行/内嵌 `\\r` ⇒ rc≠0 且桩一次都没被调用、归档不被动；尾随单个换行 ⇒ 仍放行且回显文本逐字节等于那条命令（正向对照，防过度收紧）                                                                                                                                                     |
 | ④   | `generate-secrets.js` 逐个收紧密钥文件时**丢弃返回值**，且目录级复核不通过也只 `console.log` 后 `exit 0` ⇒ `generate-secrets … && 下一步` 在密钥仍可被本机其他用户读写时继续推进      | 收返回值聚合成 `fileFailures` 点名清单；`check.tightened && fileFailures.length === 0` 之外一律 **非零退出**；产物保留不删（内容有效，毁掉只会把运维推向手搓随机值） | `filePermissionEnforcementAndVerify` 新 describe 5 腿：`node -r <preload>` 把 `src/utils/filePermission` 顶成可编程桩（真实宿主造不出"icacls 被拒"），目录失败/复核失败/仅文件失败三档各钉 rc=1 + stderr 点名 + 成功文案缺席；**前世版腿**：删掉返回值检查的副本在同一份桩下 rc=0 还打印成功行 |
 
@@ -3186,12 +3222,12 @@ DataMasking.maskPhone(obj.phone)` 后 **`delete obj.phone`**。四个管理员�
 - **暴力破解自动封禁判据只看 IP 维度**（总账 R-H2）：`checkBruteForce` 此前以 `max(userFailures, ipFailures)` 达标即封禁**当前请求 IP**——分布式撞单账号时把可能只贡献了 1 次失败的 IP（NAT 出口后的无辜用户/受害者本人）封 1 小时。现改为告警与审计照发（双维度都是真实攻击信号，审计 body 含双维度计数），封禁仅在 `ipFailures` 达阈值时执行
 - **wellKnownRoutes 三个限流器接入共享存储**（总账 P-9）：`/csp-report`、`/client-errors`、`/.well-known/security.txt` 的限流计数从每实例独立 MemoryStore 改为 `makeSharedStore`（无 Redis 时行为不变），多副本部署下攻击者不再能对每个副本各刷满一份配额
 
-### 测试基线
+### 测试基线（2026-09-30）
 
 - 后端：477 个套件 / 4583 个用例文件（2026-09-30 按文件数与 `test()/it()` 声明数实测；此前记的「130 套件 / 1736 例」与 `jest.config.js` 注释里的「280 套 / 3300+ 例」均已失真一个台阶）
 - 覆盖率阈值：全局 br 79 / fn 87 / ln 91 / st 91，另 36 个安全关键文件单独设阈；**不复写实时覆盖率数值**——要当前数字看 `npm run test:coverage` 的输出，写死即立刻失真
 
-### 新增
+### 新增（2026-08-29）
 
 - `roleService` / `userService` 服务层：控制器不再直连 Model，跨角色与用户的 RBAC 数据访问统一收口。
 - 审计链 v3 换钥工具：`rotate:audit-chain-v3` 支持存量链全量重签、dry-run 预检与 HMAC 校验。
@@ -3203,7 +3239,7 @@ DataMasking.maskPhone(obj.phone)` 后 **`delete obj.phone`**。四个管理员�
 - 架构文档：`docs/architecture.md` 提供系统架构图、登录时序图、ER 图与部署拓扑图（Mermaid）（H-3）
 - 本 CHANGELOG 建档（H-1）
 
-### 修复
+### 修复（2026-09-11）
 
 - CI 密钥扫描恢复可用：`gitleaks-action` v2 → v3（v2 目标运行时 Node 20 将于 2026-09-16 从 GitHub runner 移除后无条件失效），并修正 `.gitleaksignore` 指纹——原指纹绑定的提交哈希与当前仓库历史不匹配，导致 3 处测试常量（`src/tests/constants.js` 的假密钥、`src/tests/utils/totp.test.js` 的 RFC 4226 官方向量）被重复上报为泄漏；改绑首提交 `7f92537`，行号按该提交版本登记（AES 测试密钥在该版本为第 29 行，现行为 30）
 
@@ -3213,7 +3249,7 @@ DataMasking.maskPhone(obj.phone)` 后 **`delete obj.phone`**。四个管理员�
 
 > 本仓库此前无 CHANGELOG，本条为 1.0.0 的追溯性汇总，依据 README、代码现状与 2026-08-23 ~ 08-29 的修复批次留档整理。
 
-### 新增
+### 新增（2026-08-29）
 
 - **RBAC 权限管控**：菜单 / 按钮 / 接口三级权限模型；内置 5 个角色（超级管理员、安全管理员、消防主管、普通消防员、访客）；角色 `level` 决定数据范围（≥9 全部 / ≥7 本部门 / ≥5 仅本人）；内置角色权限每次启动自动对账收敛
 - **设备管理**：消防设备台账、状态变更、维护记录、报废处理、到期设备定时扫描与提醒（每日一次）
@@ -3226,7 +3262,7 @@ DataMasking.maskPhone(obj.phone)` 后 **`delete obj.phone`**。四个管理员�
 - **可观测性**：`/metrics` 端点（QPS / 延迟直方图 / 错误 / 安全计数）、winston 日志轮转、Sentry 可选接入
 - **部署**：Docker 三阶段构建（非 root 运行、HEALTHCHECK）、Docker Compose（secrets 文件注入、资源限额、日志轮转）、GitHub Actions CI（Node 18/20/22 矩阵）
 
-### 安全
+### 安全（2026-08-29）
 
 - 登录口令经 ECDH（P-256/P-384）+ HKDF-SHA-256 + AES-256-GCM 信封加密传输，附时间戳窗口与一次性 nonce 防重放；不支持 WebCrypto 的环境自动降级明文兼容轨
 - 密钥支持 `*_FILE` 文件注入（Docker secrets）；生产启动强校验拦截弱密钥 / 危险配置（`validate.js`）
@@ -3236,7 +3272,7 @@ DataMasking.maskPhone(obj.phone)` 后 **`delete obj.phone`**。四个管理员�
 - 容器加固：`resources.limits`（app 1g/1.5cpu、mongo 2g/2cpu）、json-file 日志轮转（20m×5）、`no-new-privileges`、app 容器 `cap_drop ALL`、NODE_OPTIONS 堆上限与限额对齐（R-4）
 - 覆盖率棘轮门禁：安全关键模块（security/auth/rbac/tokenBlacklist/encryption/auditChain 等）单独设阈，只升不降
 
-### 修复
+### 修复（2026-08-29）
 
 以下为 2026-08-23 ~ 08-29 各批次已核实闭环的修复（详见 `deliverables/待优化项总清单-2026-08-29.md` 第四节）：
 

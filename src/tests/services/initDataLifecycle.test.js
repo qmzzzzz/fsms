@@ -565,7 +565,7 @@ describe('initData 启动播种与安全对账', () => {
       expect(await rolePermCodes('GUEST')).toEqual(GUEST_CODES);
     });
 
-    test('B7 对账判定取自播种定义，篡改数据库 isBuiltIn 字段不能豁免收敛', async () => {
+    test('B9 对账判定取自播种定义，篡改数据库 isBuiltIn 字段不能豁免收敛', async () => {
       await resetDb();
       await initPermissions();
       // 模拟直连数据库把 GUEST 的 isBuiltIn 改成 false 以逃避启动期对账

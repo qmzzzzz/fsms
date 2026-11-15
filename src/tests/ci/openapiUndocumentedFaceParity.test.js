@@ -1,22 +1,21 @@
 'use strict';
 
 /**
- * 未文档面（豁免面）的**状态码**与**理由**闸（第 24 轮）
+ * 原未文档面（豁免面）的**状态码**与**理由**闸（第 24 轮；2026-11-15 P2-12 起转为入册证据台账）
  *
- * 与同目录 openapiStatusParity.test.js 的分工（一份取数、不设第二把尺子）：
- *   · 那份管**业务面双向一致**：文档声明的成功码 == 实现静态可见的成功码，且
- *     「实现有、文档无」的端点必须登记在它的台账里（成员集合由它维护）。
- *   · 本份只管**未文档面的两个更细的洞**——它那份判据在这两点上是空的：
+ * 历史：这 8 条端点曾「有实现无文档」，本闸当时盯住它们的码与理由两个洞：
+ *   ① 台账理由只要求「非空白」，「POST /csp-report，恒回 204」没有任何字被机器读过——
+ *      把实现从 204 改成 200，理由还是成立的文字，台账照样绿；
+ *   ② 理由不指向证据：写「恒回 204」却不要求任何文件里真的出现过这个端点路径。
  *
- *     ① 台账理由只要求「非空白」。于是「POST /csp-report，恒回 204」这句话里**没有任何
- *        一个字被机器读过**：把实现从 204 改成 200，理由还是成立的文字，台账照样绿。
- *        这正是 Lead 点名的反向漂移面：wellKnownRoutes.js:99,153 两个 204 端点
- *        「有实现无文档」，而它们的**码**此前没有任何判据盯着。
- *     ② 理由不指向证据：写「恒回 204」却不要求任何文件里真的出现过这个端点路径。
+ * P2-12 把它们全部按真实实现补进 openapi.json 后，「未文档化成员集合」清空，
+ * 但本文件不随之作废：理由列（why）与证据列（evidence）保留，判据改为——
+ *   · D0：实现面 == 文档面（undocumentedEndpoints 为空），且台账成员全部在 spec 中；
+ *   · D1/D2：每条成员的码与证据文件字面照旧逐条核对（防实现漂移、防证据腐化）。
  *
  * 取数复用 helpers/statusParityContract（与业务面闸同一份前缀/处理器解析）。
- * 本闸**不**自己维护成员台账：成员集合由那份台账定义，这里只补「每条成员的码」
- * 与「每条成员的理由 + 证据」。两份成员台账会立刻互相漂移。
+ * 「实现有、文档无」的成员总闸在 openapiStatusParity.test.js #3（其台账已清空），
+ * 本文件不设第二份成员台账。
  */
 
 const fs = require('fs');
@@ -34,13 +33,13 @@ const SPEC = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/docs/openapi.json')
 const ROUTE_OPS = buildRouteOps();
 
 /**
- * 未文档面的**码**与**依据**。
+ * 原未文档面成员的**码**与**依据**（已入册台账：成员已从「未文档化清单」移除，理由列保留）。
  *
  * codes 是「这个端点成功时会发哪些码」的**可核对声明**——不是描述，是判据输入：
  * 由 D1 与实现静态可见的成功码逐条比对。只收 2xx/3xx（失败码不在本闸范围）。
  * evidence 必须是一个真实文件，且文件里要出现该端点的路径字面（D2 核对）。
  */
-const UNDOCUMENTED_FACE = [
+const REGISTERED_FACE = [
   {
     key: 'GET /readyz',
     codes: [200],
@@ -93,16 +92,27 @@ const UNDOCUMENTED_FACE = [
 
 const opOf = (key) => ROUTE_OPS.find((o) => `${o.method} ${normalizePath(o.path)}` === key) || null;
 
-describe('未文档面的状态码与理由', () => {
-  test('D0 成员集合与业务面闸的未文档集合一致（不设第二份成员台账）', () => {
+describe('原未文档面（已入册）的状态码与理由', () => {
+  test('D0 实现面 == 文档面（无未文档端点），且台账成员全部在 spec 中', () => {
     const actual = undocumentedEndpoints(SPEC, ROUTE_OPS);
-    expect(actual).toEqual(UNDOCUMENTED_FACE.map((e) => e.key).sort());
+    expect(actual).toEqual([]);
+    const documented = new Set(
+      Object.entries(SPEC.paths).flatMap(([p, item]) =>
+        Object.keys(item).map((m) => `${m.toUpperCase()} ${p}`)
+      )
+    );
+    for (const entry of REGISTERED_FACE) {
+      expect({ key: entry.key, documented: documented.has(entry.key) }).toEqual({
+        key: entry.key,
+        documented: true,
+      });
+    }
   });
 
   test('D1 每条声明的成功码 == 实现静态可见的成功码（204 改 200 必须红）', () => {
     const violations = [];
     let verified = 0;
-    for (const entry of UNDOCUMENTED_FACE) {
+    for (const entry of REGISTERED_FACE) {
       const op = opOf(entry.key);
       const impl = op ? implOf(op) : null;
       if (!impl || impl.codes.length === 0) {
@@ -128,7 +138,7 @@ describe('未文档面的状态码与理由', () => {
 
   test('D2 每条的理由够长，且证据文件里真的写着该端点的路径', () => {
     const violations = [];
-    for (const entry of UNDOCUMENTED_FACE) {
+    for (const entry of REGISTERED_FACE) {
       if (entry.why.length < 40) violations.push(`${entry.key}：理由太短`);
       const file = path.join(ROOT, entry.evidence);
       if (!fs.existsSync(file)) {
@@ -143,8 +153,8 @@ describe('未文档面的状态码与理由', () => {
     expect(violations).toEqual([]);
   });
 
-  test('D3 判据非空转：未文档面规模与已核对条数都成规模', () => {
-    expect(UNDOCUMENTED_FACE.length).toBeGreaterThanOrEqual(8);
+  test('D3 判据非空转：入册台账规模与已核对条数都成规模', () => {
+    expect(REGISTERED_FACE.length).toBeGreaterThanOrEqual(8);
     expect(ROUTE_OPS.length).toBeGreaterThan(120);
   });
 });

@@ -223,13 +223,33 @@ describe('permissionHelper 分支补齐', () => {
       expect(node.children).toEqual([expect.objectContaining({ code: 'phgaptwo:*' })]);
     });
 
-    test('权限查询故障 → 返回空树而非抛错', async () => {
+    test('权限查询故障 → 留 error 日志+计数并向上抛错（不再与"无权限"同形，审计 2026-11-15）', async () => {
+      const logger = require('../../utils/logger');
+      const metrics = require('../../utils/metrics');
+      const errorSpy = jest.spyOn(logger, 'error').mockImplementation(() => {});
       const spy = jest.spyOn(Permission, 'find').mockImplementation(() => {
-        throw new Error('db down (故障注入)');
+        throw new Error('db down');
+      });
+      // 先让指标端自身抛错：计数失败不得吞掉原始错误（两臂都要覆盖）
+      const metricBoom = jest.spyOn(metrics, 'incSecurityAlert').mockImplementation(() => {
+        throw new Error('metrics down');
       });
       try {
-        await expect(helper.getMenuTree(users.full._id)).resolves.toEqual([]);
+        await expect(helper.getMenuTree(users.full._id)).rejects.toThrow('db down');
+        expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('获取菜单树失败'));
+        expect(metricBoom).toHaveBeenCalledWith('menu_tree_failure', 'medium');
+        // 指标端健康时同样只计数、不改变拒绝行为
+        metricBoom.mockRestore();
+        const metricSpy = jest.spyOn(metrics, 'incSecurityAlert').mockImplementation(() => {});
+        try {
+          await expect(helper.getMenuTree(users.full._id)).rejects.toThrow('db down');
+          expect(metricSpy).toHaveBeenCalledWith('menu_tree_failure', 'medium');
+        } finally {
+          metricSpy.mockRestore();
+        }
       } finally {
+        errorSpy.mockRestore();
+        metricBoom.mockRestore();
         spy.mockRestore();
       }
     });

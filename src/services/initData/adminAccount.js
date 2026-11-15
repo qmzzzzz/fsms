@@ -42,13 +42,18 @@ function persistInitialPassword(adminPassword) {
 
   const fs = require('fs');
   const pwdFile = initialPasswordFile.filePath();
+  const tmpFile = `${pwdFile}.tmp-${process.pid}-${Date.now()}`;
   try {
     fs.writeFileSync(
-      pwdFile,
+      tmpFile,
       `username: ${getSuperAdminUsername()}\npassword: ${adminPassword}\n`,
       { mode: 0o600 }
     );
+    fs.renameSync(tmpFile, pwdFile); // P3：先落 0600 临时文件再 rename 落位，最终路径出现明文前内容已完整，缩短未加固窗口
   } catch (e) {
+    try {
+      fs.unlinkSync(tmpFile);
+    } catch {}
     // 修复：文件写入失败时绝不将密码明文输出到 stdout/日志
     // （容器环境 stdout 会被日志驱动持久化，等同密码泄露）。
     // 只提示可操作的恢复途径；密码仅存在于内存，进程退出即丢失。

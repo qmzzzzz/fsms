@@ -243,21 +243,31 @@ describe('createOriginCheck 中间件', () => {
     // 两份字面量不是相同，只是今天恰好相等：一侧加个前端端口，另一侧静默不一致，
     // 且只在 development 复现。现由 utils/constants.js 的 DEV_CORS_ORIGINS 作唯一来源，
     // 这条用例把"唯一"钉成机器判据——判据本身可证伪（见最后的反向对照）。
+    // 2026-11-15：app.js 的解析/兜底/归一化改经 config/corsOrigins 单源（WS 侧同源），
+    // 故 app.js 的"引用唯一来源"判据改为 require config/corsOrigins。
     const fs = require('fs');
     const path = require('path');
     const LITERAL = /https?:\/\/(localhost|127\.0\.0\.1):(3001|5173)/;
     const consumers = {
-      'src/app.js': path.resolve(__dirname, '../../app.js'),
-      'src/middleware/originCheck.js': path.resolve(__dirname, '../../middleware/originCheck.js'),
+      'src/app.js': {
+        abs: path.resolve(__dirname, '../../app.js'),
+        singleSource: /require\([^)]*['"][^'"]*config\/corsOrigins['"]\)/,
+        uses: /devCorsFallback|DEV_CORS_ORIGINS/,
+      },
+      'src/middleware/originCheck.js': {
+        abs: path.resolve(__dirname, '../../middleware/originCheck.js'),
+        singleSource: /require\([^)]*['"][^'"]*utils\/constants['"]\)/,
+        uses: /DEV_CORS_ORIGINS/,
+      },
     };
-    for (const [rel, abs] of Object.entries(consumers)) {
+    for (const [rel, { abs, singleSource, uses }] of Object.entries(consumers)) {
       const src = fs.readFileSync(abs, 'utf8');
       expect({ rel, inlinedLiteral: LITERAL.test(src) }).toEqual({
         rel,
         inlinedLiteral: false,
       });
-      expect(src).toMatch(/require\([^)]*['"][^'"]*utils\/constants['"]\)/);
-      expect(src).toMatch(/DEV_CORS_ORIGINS/);
+      expect(src).toMatch(singleSource);
+      expect(src).toMatch(uses);
     }
     // 前提自证：清单真的存在于唯一来源里（否则上面"处处无字面量"可能只是因为
     // 兜底整个被删了——那也是恒真，但不是我们想要的状态）

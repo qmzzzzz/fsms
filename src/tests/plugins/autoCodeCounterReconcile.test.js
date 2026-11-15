@@ -194,3 +194,51 @@ describe('autoIncrement 计数器丢失后的自愈', () => {
     }
   });
 });
+
+describe('非 ASCII 前缀：$substrBytes 偏移必须按 UTF-8 字节（审计 2026-11-15）', () => {
+  const CN_PREFIX = '设备'; // 6 个 UTF-8 字节、2 个 UTF-16 码元——旧实现按 .length 算偏移必错位
+  const CN_COUNTER_ID = `cncode_${CN_PREFIX}`;
+  const cnCodeOf = (seq) => `${CN_PREFIX}-${String(seq).padStart(PAD, '0')}`;
+
+  const cnSchema = new mongoose.Schema(
+    { code: { type: String, required: true, unique: true } },
+    { collection: 'autocode_probe_cn', versionKey: false }
+  );
+  cnSchema.plugin(autoIncrement, {
+    field: 'code',
+    counterPrefix: 'cncode',
+    seqPadding: PAD,
+    generatePrefix: () => CN_PREFIX,
+  });
+  let CnProbe;
+  let cnCounters;
+
+  beforeAll(async () => {
+    if (mongoose.connection.readyState === 0) {
+      await mongoose.connect(process.env.MONGODB_URI);
+    }
+    CnProbe = mongoose.model('AutoCodeProbeCn', cnSchema);
+    cnCounters = mongoose.connection.db.collection('counters');
+    await CnProbe.syncIndexes();
+  });
+
+  afterEach(async () => {
+    await CnProbe.deleteMany({}).catch(() => {});
+    await cnCounters.deleteMany({ _id: CN_COUNTER_ID }).catch(() => {});
+  });
+
+  test('正向对照：中文前缀的常规取号格式正确', async () => {
+    const doc = await CnProbe.create({});
+    expect(doc.code).toBe(cnCodeOf(1));
+  });
+
+  test('计数器丢失后新建：中文前缀下也必须续上存量最大编号（偏移按字节算）', async () => {
+    await CnProbe.collection.insertMany([{ code: cnCodeOf(1) }, { code: cnCodeOf(2) }]);
+    await cnCounters.deleteMany({ _id: CN_COUNTER_ID });
+    // 修复前：offset=2+1=3（UTF-16 长度），$substrBytes 从第 3 字节截出 '备-0001'，
+    // $toInt 失败/错值 ⇒ 对齐失败，创建撞唯一键；修复后：offset=6+1=7，截出 '0002'
+    const recovered = await CnProbe.create({});
+    expect(recovered.code).toBe(cnCodeOf(3));
+    expect(await CnProbe.countDocuments({})).toBe(3);
+  });
+});

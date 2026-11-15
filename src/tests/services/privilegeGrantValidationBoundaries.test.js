@@ -54,11 +54,14 @@ describe('clampDurationHours：有效期为闭区间整数小时', () => {
     }
   });
 
-  test('数字字符串按数值处理；小数在界内向下/向上取整到整数小时', () => {
+  test('数字字符串按数值处理；小数一律拒（报错文案是"整数"，不再四舍五入收小数）', () => {
     expect(clampDurationHours('2')).toBe(2);
     expect(clampDurationHours(' 3 ')).toBe(3);
-    expect(clampDurationHours(MIN_GRANT_HOURS + 0.2)).toBe(MIN_GRANT_HOURS);
-    expect(clampDurationHours(MAX_GRANT_HOURS - 0.4)).toBe(MAX_GRANT_HOURS); // 界内小数只在落库前取整
+    for (const bad of [MIN_GRANT_HOURS + 0.2, MAX_GRANT_HOURS - 0.4, 2.5]) {
+      expect(() => clampDurationHours(bad)).toThrow(
+        expect.objectContaining({ code: 'PRIVILEGE_DURATION_INVALID' })
+      );
+    }
   });
 });
 

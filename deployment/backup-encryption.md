@@ -64,14 +64,14 @@ gpg --armor --export "ops@example.net" > fsms-backup.pub
 
 ```bash
 # deploy.js 每次发布前自动走备份脚本；cron 另外跑每日全量：
-0 2 * * * cd /opt/xf && \
+0 2 * * * cd /opt/fsms && \
   BACKUP_GPG_RECIPIENT=ops@example.net \
   BACKUP_OFFSITE_CMD='rclone copy ./backups remote:fsms-backups' \
   MONGODB_URI_FILE=./secrets/mongodb_uri ./scripts/backup-mongo.sh ./backups
 ```
 
 > **这一行为什么必须写成 `./secrets/…` 而不是 `/run/secrets/…`**：cron 跑在**宿主机**上
-> （`cd /opt/xf`），而 `/run/secrets/<name>` 是容器内的挂载点，宿主机没有这个目录。
+> （`cd /opt/fsms`），而 `/run/secrets/<name>` 是容器内的挂载点，宿主机没有这个目录。
 > 两者都错过一次：写 `/run/secrets/…` 时文件读不到，写明文串则要求把生产凭据抄进 crontab。
 > 备份/恢复脚本经 `scripts/mongoUri.sh` 的 `mongo_hydrate_uri` 支持 `MONGODB_URI_FILE`，
 > 行为闸见 `src/tests/deploy/backupUriFile.test.js`（真跑 bash + 桩 mongodump）。
@@ -150,7 +150,7 @@ MONGODB_URI='<目标连接串>' ./scripts/restore-mongo.sh backups/fire-safety-b
 
 ```bash
 # 与备份脚本错开（备份 02:00，巡检 03:30）；产物完整性 + 异地副本探针 + 演练时效
-30 3 * * * cd /opt/xf && BACKUP_DIR=./backups BACKUP_OFFSITE_DIR=/mnt/offsite \
+30 3 * * * cd /opt/fsms && BACKUP_DIR=./backups BACKUP_OFFSITE_DIR=/mnt/offsite \
   node scripts/backup-integrity-patrol.js >> logs/backup-patrol.log 2>&1
 ```
 

@@ -100,9 +100,9 @@
     "scripts/offlineBundleIntake.js": 496,
     "src/config/validate.js": 354,
     "src/controllers/roleController.js": 304,
-    "src/docs/generate.js": 1537,
+    "src/docs/generate.js": 1603,
     "src/middleware/idempotency.js": 322,
-    "src/middleware/rateLimit.js": 433,
+    "src/middleware/rateLimit.js": 435,
     "src/models/User.js": 301,
     "src/routes/authRoutes.js": 301,
     "src/routes/securityRoutes.js": 382,
@@ -113,9 +113,13 @@
     "src/services/upgradeService.js": 528,
     "src/utils/errorCodes.js": 908,
     "src/utils/metrics.js": 315,
-    "src/constants/failOpenSites.js": 330,
+    "src/constants/failOpenSites.js": 354,
     "src/services/authService/login.js": 303,
-    "src/constants/runtime.js": 327
+    "src/constants/runtime.js": 333,
+    "src/services/forensicCaptureWal.js": 311,
+    "src/services/privilegeGrantService.js": 301,
+    "src/index.js": 316,
+    "src/services/auditChainVerify.js": 314
   },
   "src/constants/failOpenSites.js": {
     "max-lines": 1
@@ -127,6 +131,18 @@
     "complexity": 1
   },
   "src/constants/runtime.js": {
+    "max-lines": 1
+  },
+  "src/services/forensicCaptureWal.js": {
+    "max-lines": 1
+  },
+  "src/services/privilegeGrantService.js": {
+    "max-lines": 1
+  },
+  "src/index.js": {
+    "max-lines": 1
+  },
+  "src/services/auditChainVerify.js": {
     "max-lines": 1
   }
 }

@@ -288,7 +288,7 @@ async function refreshSession(refreshTokenRaw, ctx) {
   // 先做廉价校验（用户状态/IP 范围/密码修改时间/tokenVersion），
   // 最后一步才做原子消费——顺序反了会在重放检测之前就花掉一次黑名单写入
   const user = await User.findById(decoded.userId);
-  if (!user || user.status !== 'active') {
+  if (!user || user.status !== require('../../utils/constants').USER_STATUS.ACTIVE) {
     // 用户不存在/已停用：载荷里的 userId 无法对应到可信操作者，按匿名噪声不落审计
     return { outcome: 'INVALID' };
   }

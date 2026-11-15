@@ -283,6 +283,7 @@ describe('fail-open 台账完整性：信号站点必须被登记、登记必须
     const FORENSIC_TYPES = [
       'forensic_capture_write_failed',
       'forensic_capture_trigger_unavailable',
+      'forensic_digest_no_pepper',
     ];
     // 正向：台账真的登记着这两个类型（否则是给一个不存在的信号发告警），且专条点到了它们
     for (const t of FORENSIC_TYPES) {

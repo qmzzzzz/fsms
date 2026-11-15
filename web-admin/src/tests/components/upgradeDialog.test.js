@@ -14,12 +14,15 @@
  * 过真组件钉住，这里只钉 submit 对确认结果的处理逻辑）。
  */
 import { describe, test, expect, vi, afterEach } from 'vitest'
-import { mountComponent, click, flush } from '../helpers/componentHarness'
+import { mountComponent, click, flush, waitFor } from '../helpers/componentHarness'
 
 const h = vi.hoisted(() => ({
   triggerUpgrade: vi.fn(),
   encryptPassword: vi.fn(),
   confirm: vi.fn(),
+  // 默认「已处理」保持既有口径；服务端失败路径用例里按调用改写为 false，
+  // 让 catch 分支的兜底 ElMessage.error 真正可达
+  isHandledApiError: vi.fn(() => true),
   message: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() },
 }))
 
@@ -30,7 +33,7 @@ vi.mock('@/utils/api', () => ({
     },
   },
   isCanceledError: () => false,
-  isHandledApiError: () => true,
+  isHandledApiError: (...a) => h.isHandledApiError(...a),
 }))
 vi.mock('@/utils/loginCipher', () => ({
   encryptPassword: (...a) => h.encryptPassword(...a),
@@ -56,6 +59,7 @@ afterEach(() => {
   h.triggerUpgrade.mockReset()
   h.encryptPassword.mockReset()
   h.confirm.mockReset()
+  h.isHandledApiError.mockClear()
   // ElMessage 是模块级 mock：调用记录跨用例残留会把「第 N 次提示」断言带歪
   Object.values(h.message).forEach((fn) => fn.mockClear())
 })
@@ -65,7 +69,8 @@ const open = async () => {
   active = mountComponent(UpgradeDialog, {
     props: { modelValue: true, overview: null, onStarted: (job) => started.push(job) },
   })
-  await flush(8)
+  // 条件等待替代固定 flush 次数：对话框渲染出提交按钮即视为挂载完成
+  await waitFor(() => submitBtn(), { message: '升级对话框渲染出提交按钮' })
   return active
 }
 
@@ -78,7 +83,8 @@ const fillForm = async () => {
   image.dispatchEvent(new window.Event('input', { bubbles: true }))
   passwordInput().value = 'Aa1!current-password'
   passwordInput().dispatchEvent(new window.Event('input', { bubbles: true }))
-  await flush(3)
+  // 条件等待：v-model → canSubmit 链路落定的可观察终态是「提交按钮可用」
+  await waitFor(() => submitBtn() && !submitBtn().disabled, { message: '表单填写后提交可用' })
 }
 
 describe('UpgradeDialog 最终确认闸（G2）', () => {
@@ -88,7 +94,11 @@ describe('UpgradeDialog 最终确认闸（G2）', () => {
     await fillForm()
 
     click(submitBtn())
-    await flush(6)
+    // 条件等待：确认框弹出、随后取消路径走完（busy 复位）即视为链路落定
+    await waitFor(() => h.confirm.mock.calls.length === 1, { message: '最终确认框弹出' })
+    await waitFor(() => submitBtn().getAttribute('aria-busy') === 'false', {
+      message: '取消后提交态复位',
+    })
 
     // 确认框带新键文案（confirmTitle/confirmText/confirmOk）
     expect(h.confirm).toHaveBeenCalledTimes(1)
@@ -124,7 +134,11 @@ describe('UpgradeDialog 最终确认闸（G2）', () => {
     await fillForm()
 
     click(submitBtn())
-    await flush(8)
+    // 条件等待：任务入队（emit started）+ 进度面板上屏即视为提交链路落定
+    await waitFor(() => started.length === 1, { message: '升级任务入队并 emit started' })
+    await waitFor(() => document.body.querySelector('[data-testid="upgrade-progress"]'), {
+      message: '进入进度态',
+    })
 
     expect(h.encryptPassword).toHaveBeenCalledWith('Aa1!current-password', 'PASSWORD_CURRENT')
     expect(h.triggerUpgrade).toHaveBeenCalledTimes(1)
@@ -137,6 +151,35 @@ describe('UpgradeDialog 最终确认闸（G2）', () => {
     expect(started[0].state).toBe('queued')
     expect(document.body.querySelector('[data-testid="upgrade-progress"]')).toBeTruthy()
   })
+
+  test('服务端失败（triggerUpgrade reject）：错误提示、提交态复位、可重试', async () => {
+    h.confirm.mockResolvedValue(true)
+    h.encryptPassword.mockResolvedValue('ENC-STUB')
+    h.triggerUpgrade.mockRejectedValue(
+      Object.assign(new Error('registry unreachable'), { response: { status: 503 } })
+    )
+    // 本次拒绝按「未处理」口径走 catch 的兜底提示分支
+    h.isHandledApiError.mockReturnValueOnce(false)
+    await open()
+    await fillForm()
+
+    click(submitBtn())
+    await waitFor(() => h.triggerUpgrade.mock.calls.length === 1, { message: '首次提交已发出' })
+    await waitFor(() => submitBtn().getAttribute('aria-busy') === 'false', {
+      message: '失败后提交态复位',
+    })
+    expect(h.message.error).toHaveBeenCalledTimes(1)
+    expect(h.message.error.mock.calls[0][0]).toBe('请求失败')
+
+    // 失败不锁死入口：重新填入口令后可再次提交（重试可行）
+    await fillForm()
+    click(submitBtn())
+    await waitFor(() => h.triggerUpgrade.mock.calls.length === 2, { message: '重试提交已发出' })
+    await waitFor(() => submitBtn().getAttribute('aria-busy') === 'false', {
+      message: '重试结束后提交态复位',
+    })
+    expect(h.triggerUpgrade).toHaveBeenCalledTimes(2)
+  })
 })
 
 describe('UpgradeDialog 口令加密 fail-closed（G2 统一口径）', () => {
@@ -147,7 +190,11 @@ describe('UpgradeDialog 口令加密 fail-closed（G2 统一口径）', () => {
     await fillForm()
 
     click(submitBtn())
-    await flush(8)
+    // 条件等待：阻断提示出现 + 提交态复位即视为链路落定
+    await waitFor(() => h.message.error.mock.calls.length === 1, { message: '阻断提示出现' })
+    await waitFor(() => submitBtn().getAttribute('aria-busy') === 'false', {
+      message: '提交态复位',
+    })
 
     expect(h.triggerUpgrade).not.toHaveBeenCalled()
     expect(h.message.error).toHaveBeenCalledTimes(1)
@@ -168,7 +215,11 @@ describe('UpgradeDialog 口令加密 fail-closed（G2 统一口径）', () => {
     await fillForm()
 
     click(submitBtn())
-    await flush(8)
+    // 条件等待：阻断提示出现 + 提交态复位即视为链路落定
+    await waitFor(() => h.message.error.mock.calls.length === 1, { message: '阻断提示出现' })
+    await waitFor(() => submitBtn().getAttribute('aria-busy') === 'false', {
+      message: '提交态复位',
+    })
 
     expect(h.triggerUpgrade).not.toHaveBeenCalled()
     expect(h.message.error.mock.calls[0][0]).toBe(
@@ -186,7 +237,11 @@ describe('UpgradeDialog 口令加密 fail-closed（G2 统一口径）', () => {
     await fillForm()
 
     click(submitBtn())
-    await flush(8)
+    // 条件等待：阻断提示出现 + 提交态复位即视为链路落定
+    await waitFor(() => h.message.error.mock.calls.length === 1, { message: '阻断提示出现' })
+    await waitFor(() => submitBtn().getAttribute('aria-busy') === 'false', {
+      message: '提交态复位',
+    })
 
     expect(h.triggerUpgrade).not.toHaveBeenCalled()
     expect(h.message.error.mock.calls[0][0]).toBe(
@@ -200,14 +255,15 @@ describe('UpgradeDialog 状态矩阵（2026-11-06 收敛批补测）', () => {
     active = mountComponent(UpgradeDialog, {
       props: { modelValue: true, overview, onStarted: (job) => started.push(job) },
     })
-    await flush(8)
+    await waitFor(() => submitBtn(), { message: '升级对话框渲染出提交按钮' })
     return active
   }
   const setInput = async (selector, value) => {
     const input = document.body.querySelector(selector)
     input.value = value
     input.dispatchEvent(new window.Event('input', { bubbles: true }))
-    await flush(2)
+    // v-model 在下一个 tick 同步：单轮确定性让渡即可，衍生状态由用例各自 waitFor
+    await flush()
   }
 
   test('ready=false：阻断横幅 + 逐条原因（含非字符串的 String 化臂），提交不可用', async () => {
@@ -238,13 +294,15 @@ describe('UpgradeDialog 状态矩阵（2026-11-06 收敛批补测）', () => {
     await openWith(null)
     await setInput('.upgrade-image-input input', IMAGE)
     document.body.querySelector('.upgrade-mode-toggle').click()
-    await flush(3)
-    const mfa = document.body.querySelector('.upgrade-mfa-input input')
-    expect(mfa).toBeTruthy()
+    await waitFor(() => document.body.querySelector('.upgrade-mfa-input input'), {
+      message: '动态口令输入框出现',
+    })
     await setInput('.upgrade-mfa-input input', '12345')
     expect(submitBtn().disabled).toBe(true) // /^\d{6}$/ 臂：5 位不足
     await setInput('.upgrade-mfa-input input', '123456')
-    expect(submitBtn().disabled).toBe(false) // 6 位 + 镜像就绪 ⇒ 解锁
+    // 条件等待可观察的状态迁移：6 位 + 镜像就绪 ⇒ 解锁
+    await waitFor(() => !submitBtn().disabled, { message: '6 位动态口令解锁提交' })
+    expect(submitBtn().disabled).toBe(false)
   })
 
   test('offline 源：包选择器出现、包/落位横幅的畸形数据过滤臂、提交在未选包时不可用', async () => {
@@ -263,8 +321,9 @@ describe('UpgradeDialog 状态矩阵（2026-11-06 收敛批补测）', () => {
     expect(radios.length).toBe(2)
     radios[1].click()
     radios[1].dispatchEvent(new window.Event('change', { bubbles: true }))
-    await flush(4)
-    expect(document.body.querySelector('[data-testid="upgrade-bundle-select"]')).toBeTruthy()
+    await waitFor(() => document.body.querySelector('[data-testid="upgrade-bundle-select"]'), {
+      message: '离线包选择器出现',
+    })
     // intake 横幅臂：pending 过滤掉 42（计数=1）；rejected 过滤掉 null，逐条渲染档名
     //（outcome 走 i18n 映射，不渲染裸码——断言档名与「落位失败」字样即可）
     const bodyText = document.body.textContent

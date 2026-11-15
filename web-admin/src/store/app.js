@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
-import { safeStorage, safeLocal } from './storage'
+import { safeLocal } from './storage'
 import { prefersReducedMotion } from '@/utils/motion'
+import { readStoredLocale, setLocale, getLocale } from '@/i18n'
 
 // P2-59 修复（2026-09-17）：initTheme 可能被重复调用（热重载、未来新增的
 // 重新初始化入口），原实现每次都新建 matchMedia 监听器且从不移除——
@@ -23,8 +24,8 @@ export const useAppStore = defineStore('app', {
       typeof window !== 'undefined' &&
       !!window.matchMedia?.('(prefers-color-scheme: dark)').matches,
     sidebarCollapsed: false,
-    language:
-      safeStorage.get('locale') || (navigator.language?.startsWith('zh') ? 'zh-CN' : 'en-US'),
+    // 语言偏好与主题同介质（localStorage，P3-08）：readStoredLocale 内部兼容旧 sessionStorage 值
+    language: readStoredLocale() || (navigator.language?.startsWith('zh') ? 'zh-CN' : 'en-US'),
   }),
 
   getters: {
@@ -88,6 +89,11 @@ export const useAppStore = defineStore('app', {
     },
 
     setThemeMode(mode) {
+      // P3：取值域白名单——非法值不生效也不落盘，告警留痕后回落默认 system
+      if (!['light', 'dark', 'system'].includes(mode)) {
+        console.warn('[appStore] 非法主题模式，回落 system：', mode)
+        mode = 'system'
+      }
       this.themeMode = mode
       safeLocal.set('themeMode', mode)
       // 用户主动切换时走 View Transitions 交叉淡化（不支持的环境/reduced-motion 回退硬切）。
@@ -111,8 +117,10 @@ export const useAppStore = defineStore('app', {
     },
 
     setLanguage(lang) {
-      this.language = lang
-      safeStorage.set('locale', lang)
+      // 单一入口（P3-09）：i18n 侧的 locale、<html lang> 与 localStorage 持久化
+      // 都在 setLocale 内完成；store 只镜像实际生效的 locale（含白名单回落）
+      setLocale(lang)
+      this.language = getLocale()
     },
   },
 })

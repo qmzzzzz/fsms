@@ -1560,6 +1560,73 @@ anonGet('/api', 'API 根路径', '固定返回 { success: true, message }，不�
 // 「有更新」永远检测不到），高频轮询故不进审计（auditLog.js 的 auditGetExcludePaths）。
 anonGet('/api/version', '版本元数据（匿名，响应带 no-store）', '构建信息（版本/构建时间/commit）');
 
+spec.paths['/readyz'] = {
+  get: p('get', ['System'], '就绪探针（Mongo/Redis 连通性 + 多实例与事务拓扑判据）', {
+    security: false,
+    responses: {
+      ...ok("依赖齐备，可接流量，返回 { status: 'ready' }"),
+      503: { description: "Mongo/Redis 未就绪或拓扑阻断，返回 { status: 'unready' }" },
+    },
+  }),
+};
+spec.paths['/metrics'] = {
+  get: p('get', ['System'], 'Prometheus 指标抓取端点（QPS/延迟直方图/错误计数/安全告警计数）', {
+    description:
+      '运维抓取面（O-8）。应用层鉴权：内网/回环放行 + 可选 METRICS_TOKEN（Bearer）作为 Nginx 限源之外的第二道防线。',
+    responses: ok('text/plain; version=0.0.4; charset=utf-8 指标流'),
+  }),
+};
+spec.paths['/api/metrics'] = {
+  get: p('get', ['System'], '运行指标 JSON 快照（管理面，需 security:audit 权限）', {
+    responses: ok('返回 { summary, latency, routes, alerts, series, process }'),
+  }),
+};
+const docsAccessNote =
+  '生产环境默认关闭（ENABLE_API_DOCS=true 开启）；开启后经 DOCS_USERNAME / DOCS_PASSWORD Basic Auth 保护，且文档限流先于口令比对。';
+spec.paths['/api-docs'] = {
+  get: p('get', ['System'], 'Swagger UI 交互式文档页', {
+    security: false,
+    description: docsAccessNote,
+    responses: ok('HTML 文档页'),
+  }),
+};
+spec.paths['/api-docs.json'] = {
+  get: p('get', ['System'], 'OpenAPI 规范 JSON（本文档产物）', {
+    security: false,
+    description: docsAccessNote,
+    responses: ok('返回 openapi.json 全文'),
+  }),
+};
+spec.paths['/csp-report'] = {
+  post: p('post', ['System'], 'CSP 违规上报（浏览器自动发起）', {
+    security: false,
+    description:
+      '单向通知：恒回 204，解析失败也不回错误码（避免客户端控制台二次噪音）。限流 5 分钟 60 条/IP，上报体上限 16kb。',
+    responses: { 204: { description: '上报已接收（无响应体）' } },
+  }),
+};
+spec.paths['/client-errors'] = {
+  post: p('post', ['System'], '前端异常 / Web Vitals 上报', {
+    security: false,
+    description:
+      '异常可能发生在会话失效后（401 跳转途中），故不要求认证。恒回 204；限流 5 分钟 30 批/IP，每批最多 20 条。',
+    responses: { 204: { description: '上报已接收（无响应体）' } },
+  }),
+};
+const securityTxtOp = (summary) =>
+  p('get', ['System'], summary, {
+    security: false,
+    description:
+      'Contact / Expires / Preferred-Languages 固定下发，Canonical 取 SECURITY_TXT_CANONICAL 或 ALLOWED_HOSTS 首项（都不配则省略该行），Policy 按 SECURITY_POLICY_URL 下发。',
+    responses: ok('text/plain; charset=utf-8，Cache-Control: public, max-age=86400'),
+  });
+spec.paths['/.well-known/security.txt'] = {
+  get: securityTxtOp('安全联络信息（RFC 9116 规范路径）'), // 内容动态生成，Expires 180 天滚动
+};
+spec.paths['/security.txt'] = {
+  get: securityTxtOp('安全联络信息（根路径兼容位置，同一处理器）'), // 根路径兼容位置（过渡期允许）
+};
+
 // L-24：直接执行（node src/docs/generate.js）→ 写盘；被 require → 只导出 spec、不产生副作用，从而让 openapiSync 能对「生成器输出」与「产物」双向对账（此前 require 即重写产物，无法比对）。
 // ===== 取证溯源（T5/T6，2026-11-01）=====
 // T6 的封禁是两步人工确认：request 出票（不落库）、confirm 持票落库。

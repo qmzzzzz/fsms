@@ -360,6 +360,11 @@ jest.mock('../../services/roleService', () => {
       mockStore.savedRole = { _id: id, permissions };
       return mockStore.savedRole;
     }),
+    // 第 9 组（createRole 大小写腿）需要的出口：查重恒空、建号记录入参
+    //（"交给 createRole 的是哪一份"由它暴露，等同 #39 的写入侧观测点）
+    findRoleByCode: jest.fn(async () => null),
+    createRole: jest.fn(async (fields) => ({ _id: 'new-role', ...fields })),
+    deleteRole: jest.fn(async () => ({})),
     listUsersWithRole: jest.fn(async () => []),
     findPopulatedRole: jest.fn(async (id) => ({ _id: id })),
   };
@@ -999,9 +1004,81 @@ describe('第 8 组 · 大写 :id 走单个入口', () => {
     expect(writtenRoles()).toBeNull();
   });
 });
+
+/* ============================== 第 9 组 ==============================
+ * 台账自报缺口 2 的收口（见文末"仍然存在的近似"第 2 条）：
+ * roleController.createRole 的权限 id 归一此前只有去重腿
+ * （roleCreatePermissionExistence.test.js，并行 agent 的已提交用例，本批未动），
+ * 大小写腿补在本文件——uniqueIdStrings 退回 new Set(map(String)) 时这里必须红。
+ */
+describe('第 9 组 · createRole 权限 id 归一的大小写腿', () => {
+  test('重复 + 大写两种权限 id：放行，交给 createRole 落库的是归一后的小写去重列表', async () => {
+    const roleController = require('../../controllers/roleController');
+    const roleService = require('../../services/roleService');
+    const res = await mockCall(
+      roleController.createRole,
+      mockReq({
+        body: {
+          name: '大小写腿角色',
+          code: 'CASE_LEG_ROLE',
+          level: 2,
+          permissions: [mockIds.permRead, mockIds.permRead.toUpperCase()],
+        },
+        app: { get: () => undefined },
+      })
+    );
+    expect(res.statusCode).toBe(201);
+    expect(errorCodeOf(res)).toBeNull();
+    // 写入与比对必须同源：交给 createRole 的就是归一后的那一份（不是裸值原样）
+    expect(roleService.createRole.mock.calls[0][0].permissions).toEqual([mockIds.permRead]);
+  });
+
+  test('大写 + 不存在的权限 id 仍然 PERMISSION_ID_INVALID（大小写归一不是通配放行）', async () => {
+    const roleController = require('../../controllers/roleController');
+    const res = await mockCall(
+      roleController.createRole,
+      mockReq({
+        body: {
+          name: '大小写反例角色',
+          code: 'CASE_LEG_MISS',
+          level: 2,
+          permissions: [mockIds.permRead.toUpperCase(), mockIds.missing.toUpperCase()],
+        },
+        app: { get: () => undefined },
+      })
+    );
+    expect(errorCodeOf(res)).toBe('PERMISSION_ID_INVALID');
+  });
+});
+
+/* ============================== 第 10 组 ==============================
+ * 台账自报缺口 6 的收口（见文末"仍然存在的近似"第 6 条）：
+ * userController/delete.js 的 BATCH_DELETE_MAX 按**裸值长度**判定（归一在其后），
+ * 这里按当前实现钉住真实期望——重复 id 计入上限计量，不因去重而缩小。
+ */
+describe('第 10 组 · batchDelete 上限按裸值长度判定（当前实现口径）', () => {
+  test('101 个重复 id 也判超限：上限看裸值长度，重复项不豁免', async () => {
+    const res = await batch(Array.from({ length: 101 }, () => mockIds.peerA));
+    expect(res.statusCode).toBe(400);
+    expect(errorCodeOf(res)).toBe('BATCH_DELETE_LIMIT_EXCEEDED');
+    // 超限在归一之前拦下：不触达服务层
+    expect(userService.findBatchUsers.mock.calls.length).toBe(0);
+    expect(userService.anonymizeMany.mock.calls.length).toBe(0);
+  });
+
+  test('边界：裸值恰好 100 个（50 对重复）不触上限，计量按去重后的目标集合', async () => {
+    const ids = [];
+    for (let i = 0; i < 50; i++) ids.push(mockIds.peerA, mockIds.peerB);
+    const res = await batch(ids);
+    expect(res.body && res.body.success).toBe(true);
+    // 匿名化计量是去重后的 2 个目标，不随 100 个裸值放大
+    expect(res.body.data.anonymized).toBe(2);
+    expect(anonymizedIn()).toEqual([mockIds.peerA, mockIds.peerB]);
+  });
+});
 /* ============================== 变异台账（2026-10-04 第 28 轮全量重测）==============================
  * 施加方式：node tools/ledger.js <被测文件> 本门禁文件 <模式名>=<预测> …
- * 腿编号按文件里的声明顺序（42 腿）：
+ * 腿编号按文件里的声明顺序（42 腿；2026-11-15 增补 #43-#46＝第 9/10 组，收口文末"仍然存在的近似"第 2、6 条）：
  *   #1-#3 第 0 组（替身自检）｜#4-#7 第 1 组（helper 语义）｜#8-#14 第 2 组（assignRoles）
  *   #15-#17 第 3 组（createUser）｜#18-#23 第 4 组（batchDeleteUsers）
  *   #24-#28 第 5 组（大小写这一维）｜#29-#32 第 6 组（归一函数本体四臂）
@@ -1106,9 +1183,10 @@ describe('第 8 组 · 大写 :id 走单个入口', () => {
  *     的腿。现在由 src/tests/controllers/inspectionGuardRefExistence.test.js（11 腿，无 DB）钉，
  *     该闸的被测面是守卫本体，模式为 guard-assignees-nodedupe/nocase、guard-devices-nodedupe/
  *     nocase/nofmtcheck 与仪器变异 guard-stub-case-sensitive。本闸第 6 组只钉"写入侧归一"。
- *  2. roleController.js:115 的权限 id 归一由 src/tests/controllers/
- *     roleCreatePermissionExistence.test.js 钉住"去重"，**没有大小写腿**——把 uniqueIdStrings
- *     换回 `new Set(map(String))` 那一套腿照样绿。该文件是并行 agent 的已提交用例，改动前需协调。
+ *  2. （2026-11-15 本批闭合）roleController.js:115 的权限 id 归一：去重腿在
+ *     src/tests/controllers/roleCreatePermissionExistence.test.js（并行 agent 的已提交用例，
+ *     本批未动），大小写腿已由本文件第 9 组两条补上（重复+大写放行且写入归一列表 /
+ *     大写+缺失仍拒）——uniqueIdStrings 退回 `new Set(map(String))` 时第 9 组会红。
  *  3. 三处 service 侧 `findScopeFieldsByIds`（userService.js:293、DeviceService.js:137、
  *     AlarmService.js:181）的归一没有腿，且在当前接线下**造不出**能红的腿：调用方（守卫）
  *     已经先归一过一次，服务层这一句是幂等冗余 ⇒ 删掉它是等价变异。留着是纵深防御
@@ -1120,7 +1198,8 @@ describe('第 8 组 · 大写 :id 走单个入口', () => {
  *  5. 路由层 isMongoId 放过大写十六进制这件事本身没改（改它会动 12 条路由的入参口径，
  *     且当前所有下游都按"12 字节"解析，不存在第二处判据分歧）；本闸的口径是
  *     "进门后一律按 cast 语义归一"，而不是"在门口拒绝大写"。
- *  6. userController/delete.js 批量删除的 BATCH_DELETE_MAX 仍按**裸值长度**判（同一请求写 101 次
- *     同一个 id 会被判"超出批量上限"，而按归一长度应是 1）。本轮没动：改它会与并行 agent
- *     的用例口径打架，先记录不隐身。
+ *  6. （2026-11-15 本批按当前实现钉住）userController/delete.js 的 BATCH_DELETE_MAX 按
+ *     **裸值长度**判（归一在其后）：101 个重复 id 判超限、100 个裸值（50 对重复）放行且按
+ *     去重集合计量——真实期望由本文件第 10 组两条回归腿钉住。若日后改成"归一后计量"，
+ *     这两条会红：那是要连同本台账一起显式修改口径的接口变更，不是回归。
  * ===================================================================== */

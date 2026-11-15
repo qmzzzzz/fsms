@@ -13,7 +13,7 @@
  * PII 只留在内存。本文件同时钉住「投影后刷新仍能认出身份」——否则一个
  * 安全修复把登录态搞坏，就是拿可用性换来的假安全。
  */
-import { describe, test, expect, beforeEach, vi } from 'vitest'
+import { describe, test, expect, beforeEach, afterEach, vi } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 import { useAuthStore, toPersistedUser, normalizeUser } from '@/store'
 
@@ -48,6 +48,12 @@ describe('身份持久化只写非 PII 白名单', () => {
     window.localStorage.clear()
     window.sessionStorage.clear()
     vi.stubGlobal('location', { replace: vi.fn(), href: 'http://localhost/' })
+  })
+
+  afterEach(() => {
+    // 与 authStore.test.js 同一还原模式：stub 的 location 必须还原，
+    // 否则泄漏到后续测试文件/用例的全局 location 会串味
+    vi.unstubAllGlobals()
   })
 
   test('toPersistedUser 是纯过滤器：只保留白名单里**确实存在**的键', () => {

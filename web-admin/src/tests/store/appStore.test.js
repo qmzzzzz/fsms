@@ -3,7 +3,7 @@
  * 核心断言：默认跟随系统、手动选择持久化 localStorage（登出/关页不失效）、
  * isDarkMode 在 system 模式下随系统偏好计算、DOM 应用（html.dark + color-scheme + theme-color）
  */
-import { describe, test, expect, beforeEach } from 'vitest'
+import { describe, test, expect, vi, beforeEach } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 import { useAppStore } from '@/store'
 
@@ -39,6 +39,26 @@ describe('useAppStore 主题模式', () => {
     expect(store.themeMode).toBe('dark')
     expect(localStorage.getItem('themeMode')).toBe('dark')
     expect(sessionStorage.getItem('themeMode')).toBeNull()
+  })
+
+  test('setThemeMode 非法值：告警并回落 system，非法值本身不落盘（P3-13）', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const store = useAppStore()
+      store.setThemeMode('blue')
+      expect(store.themeMode).toBe('system')
+      expect(warn).toHaveBeenCalled()
+      // 落盘的是回落后的合法值，而不是被拒绝的输入
+      expect(localStorage.getItem('themeMode')).toBe('system')
+      expect(localStorage.getItem('themeMode')).not.toBe('blue')
+      // 空串/大写变体同样不在取值域内
+      store.setThemeMode('')
+      expect(store.themeMode).toBe('system')
+      store.setThemeMode('Dark')
+      expect(store.themeMode).toBe('system')
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   test('isDarkMode：显式 light 时即使系统暗色也为亮', () => {

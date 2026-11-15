@@ -36,6 +36,8 @@ describe('审计 WAL 损坏行的可观测性与文件尾自愈', () => {
   let logger;
   let errorSpy;
   let warnSpy;
+  // P3-20：快照被改写的三个 env，afterAll 先归还再删目录
+  let savedEnv;
 
   const writeWal = (text) => fs.writeFileSync(walPath, text, 'utf8');
   const readWal = () => fs.readFileSync(walPath, 'utf8');
@@ -54,6 +56,11 @@ describe('审计 WAL 损坏行的可观测性与文件尾自愈', () => {
   beforeAll(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-wal-corrupt-'));
     walPath = path.join(tmpDir, 'test-audit.wal');
+    savedEnv = {
+      AUDIT_WAL_PATH: process.env.AUDIT_WAL_PATH,
+      AUDIT_WAL_MAX_BYTES: process.env.AUDIT_WAL_MAX_BYTES,
+      AUDIT_WAL_STAT_INTERVAL: process.env.AUDIT_WAL_STAT_INTERVAL,
+    };
     process.env.AUDIT_WAL_PATH = walPath;
     delete process.env.AUDIT_WAL_MAX_BYTES; // 本套件不测容量上限
     delete process.env.AUDIT_WAL_STAT_INTERVAL;
@@ -82,6 +89,11 @@ describe('审计 WAL 损坏行的可观测性与文件尾自愈', () => {
 
   afterAll(() => {
     auditBuffer.stop();
+    // P3-20：先归还 env 再删临时目录——env 仍指向已删路径会祸及同 worker 后续套件
+    for (const [key, value] of Object.entries(savedEnv || {})) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
     try {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     } catch (_) {

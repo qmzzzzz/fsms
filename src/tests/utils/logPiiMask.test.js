@@ -69,6 +69,34 @@ describe('凭据字段整体替换（O-1）', () => {
     }
   });
 
+  test('P3 组合词兜底：归一化后以 token 结尾的键一律按凭据（闭合集追不完组合词）', () => {
+    for (const key of [
+      'authToken',
+      'api_token',
+      'sessionToken',
+      'device-token',
+      'adminToken',
+      'super_token',
+      'x-auth-token',
+      'amzSecurityToken',
+    ]) {
+      expect(isSensitiveKey(key)).toBe(true);
+    }
+  });
+
+  test('P3 兜底白名单：tokenVersion / csrfToken 是刻意排除项，不得被误伤', () => {
+    for (const key of ['tokenVersion', 'csrfToken', 'CSRF-TOKEN', 'csrf_token']) {
+      expect(isSensitiveKey(key)).toBe(false);
+    }
+  });
+
+  test('P3 maskLogInfo 对组合词 token 整体替换（不是只掩 password 一族）', () => {
+    const info = { message: 'x', authToken: 'Bearer abc.def', sessionToken: 'sess-1' };
+    maskLogInfo(info);
+    expect(info.authToken).toBe(REDACTED);
+    expect(info.sessionToken).toBe(REDACTED);
+  });
+
   test('值是对象时整体替换：只处理字符串等于放过 { user, pass } 这种形状', () => {
     const info = {
       message: '登录',

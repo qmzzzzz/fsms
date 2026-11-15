@@ -94,6 +94,9 @@ describe('停用角色 -> auth 用户缓存失效链', () => {
 
   afterAll(async () => {
     if (mongoose.connection.readyState !== 0) {
+      // P3-24：回收自建用户（rsi_*）与角色（RSI_*）
+      await User.deleteMany({ username: new RegExp('^rsi_') }).catch(() => {});
+      await Role.deleteMany({ code: new RegExp('^RSI_') }).catch(() => {});
       await mongoose.connection.close();
     }
   });

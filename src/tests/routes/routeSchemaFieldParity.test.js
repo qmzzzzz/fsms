@@ -266,7 +266,8 @@ describe('写入链字段与模型 schema 的对账', () => {
     const caps = capsByModelField();
     for (const [key, enc] of ENCRYPTED_AT_REST) {
       const plainMax = plaintextMaxOf(enc);
-      expect(`${key} => ${plainMax}`).toBe(`${key} => ${plainMax}`); // 失败时能看见取到了什么
+      // P3-17：删除恒真死断言 `expect(`${key} => ${plainMax}`).toBe(同串)`——
+      // 真实判据在下一行（取值非 number 时 jest 会原样显示实际取到了什么）
       expect(typeof plainMax).toBe('number');
       const modelName = key.split('.')[0];
       const field = key.slice(key.indexOf('.') + 1);

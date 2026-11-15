@@ -234,7 +234,8 @@ const loading = ref(true)
 // 注册 echarts 组件（按需导入，减少包体积；import 已统一收敛至文件顶部，O-4）
 echarts.use([PieChart, BarChart, TooltipComponent, LegendComponent, GridComponent, CanvasRenderer])
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
-import { api, isCanceledError, resolveErrorMessage } from '@/utils/api'
+import { api, isCanceledError } from '@/utils/api'
+import { extractBlobErrorMessage } from '@/utils/reauthError'
 import { encryptPassword } from '@/utils/loginCipher'
 import { encryptionErrorMessage } from '@/utils/encryptionError'
 import { enterSubmit } from '@/utils/enterSubmit'
@@ -590,21 +591,11 @@ const exportTypeNames = computed(() => ({
 // 本地日期串已抽取至 utils/datetime.js 统一口径（O-3），此处按需引入
 import { localDateStr } from '@/utils/datetime'
 
-// 从 blob 响应中解析后端错误信息：responseType:'blob' 时 JSON 错误也被包成 Blob，
-// 通过 MIME 类型识别后读取文本内容。
-// 与 AuditLogView 的 extractBlobErrorMessage 同口径（WF-09，2026-11-02）：优先走
-// api.js 的 resolveErrorMessage（错误码 → i18n），英文界面下此前会直出后端中文。
-const extractErrorMessage = async (data, fallback) => {
-  if (data instanceof Blob && data.type?.includes('json')) {
-    try {
-      const parsed = JSON.parse(await data.text())
-      return resolveErrorMessage(parsed) || parsed?.message || fallback
-    } catch (_) {
-      /* 解析失败走兜底文案 */
-    }
-  }
-  return data?.message || fallback
-}
+// 从 blob 响应中解析后端错误信息：responseType:'blob' 时 JSON 错误也被包成 Blob。
+// 实现收口到 utils/reauthError（P3-15，与 AuditLogView 同源）；本视图沿用
+// 「仅 JSON MIME 才解析」的口径，避免把正常 xlsx 误当错误体。
+const extractErrorMessage = (data, fallback) =>
+  extractBlobErrorMessage(data, fallback, { requireJsonMime: true })
 
 /**
  * 组装未脱敏导出的二次验证凭据
@@ -697,6 +688,8 @@ const handleExport = async () => {
     window.URL.revokeObjectURL(url)
 
     ElMessage.success(t('messages.exportSuccess'))
+    exportDialog.password = '' // P3-23：导出成功即清二次验证凭据内存态（对话框关闭不会复位表单）
+    exportDialog.mfaCode = ''
     exportDialog.visible = false
   } catch (e) {
     // FE-L1：路由切换 abort 的在途请求不提示（用户已到达新页面）

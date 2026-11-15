@@ -168,7 +168,7 @@ groups:
       # 为什么 for 不是 0m：单次落库抖动属常态（重试与 WAL 重放是设计的一部分），
       # 持续 10 分钟仍在降级才说明持久化或模块加载真的坏了。
       - alert: ForensicCaptureDegraded
-        expr: increase(security_alerts_total{type=~"forensic_capture_write_failed|forensic_capture_trigger_unavailable"}[15m]) > 0
+        expr: increase(security_alerts_total{type=~"forensic_capture_write_failed|forensic_capture_trigger_unavailable|forensic_digest_no_pepper"}[15m]) > 0
         for: 10m
         labels:
           severity: warning
@@ -248,6 +248,44 @@ groups:
             MongoDB 可用性与审计集合查询延迟，核对 /api/metrics 的 security_alerts_total
             明细中三链（brute_force/permission_abuse/rate_limit）的退化占比。类型集合与
             台账对账见 failOpenLedgerGate ②d。
+
+      # ── 审计链僵尸写入超界信号（2026-11-15，P3）────────────────────────────
+      # 链锁持有超时后，围栏会代僵尸批次续租分布式锁直到其落定。僵尸若永不落定，
+      # 无限续租等于把链锁永久占死（其余实例拿不到锁、审计链整体停摆）。续租现在有
+      # 总时长上界，超界即停手并计数。for: 0m：超界是既成事实（锁即将按 PX 过期、
+      # 其它实例可接管），不存在"再等 10 分钟确认"的叙事；单次超界只 +1，速率型规则
+      # 永不达标，故必须专条，级别取 critical——它意味着链写入的互斥保护被主动放弃。
+      - alert: AuditChainZombieRenewalExceeded
+        expr: increase(security_alerts_total{type="audit_chain_zombie_renewal_exceeded"}[15m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: '审计链僵尸写入超续租上界，分布式锁已停止续租'
+          description: >-
+            某实例的审计链写入批次超时后长期未落定，围栏续租已达上界并停止续租：分布式锁
+            将按 PX 自然过期，其余实例可接管链尾。请立即排查该实例对 MongoDB 的写入为何
+            悬挂（无响应/网络半开/连接池耗尽），并核对审计链核验（/api/security/audit-logs/verify）
+            是否出现 chain_fork/chain_break——僵尸与接管者的写入可能落在同一父哈希上。
+            语义见 src/constants/failOpenSites.js 的 OTHER_ALERT_SIGNALS。
+
+      # ── 认证面基础设施故障兜底计数（2026-11-15，P3）──────────────────────────
+      # menu_tree_failure：菜单树查询数据库故障（已改为上抛，不再吞成空菜单）；
+      # refresh_session_failure：刷新令牌链路的数据库/缓存故障（对外仍统一失败语义）。
+      # 两者都是单次事件计数：出现即说明对应基础设施有真实故障。for: 0m：单次故障
+      # 只 +1，速率型规则永不达标，故必须专条。
+      - alert: AuthSurfaceDegraded
+        expr: increase(security_alerts_total{type=~"menu_tree_failure|refresh_session_failure"}[15m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: '认证面基础设施故障被兜底计数（菜单树/刷新令牌）'
+          description: >-
+            menu_tree_failure=菜单树查询数据库故障（已上抛，不再吞成空菜单）；
+            refresh_session_failure=刷新令牌链路的数据库/缓存故障（对外仍返回统一失败语义）。
+            请排查 MongoDB/Redis 健康与连接池，并核对故障时段的 400/503 分布。
+            语义见 src/constants/failOpenSites.js 的 OTHER_ALERT_SIGNALS。
 
   # 自监控：可观测性链路自身的失效。这类规则不反映业务异常，反映的是
   # 「我们看到的业务数据不完整」——所以它的严重度是 warning 而非 info：

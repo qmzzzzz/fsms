@@ -203,6 +203,57 @@ describe('WebSocket 分支补漏', () => {
     });
   });
 
+  // ========== extractHandshakeToken cookie 回退：同源握手真实可达（P2-23） ==========
+  describe('extractHandshakeToken cookie 回退：同源握手真实可达（P2-23）', () => {
+    // 既往审计（文件头 ⚠️ 条目）：旧用例的夹具 cookie 假设 Path=/api——那枚 cookie
+    // 在 /socket.io/ 握手上浏览器永远不会发，等于断言"不存在的前提"。
+    // 本组钉住真实链路：cookie 契约（utils/cookie.js，I-01）把 access cookie 的
+    // Path 定为 /，浏览器在 /socket.io/ 握手上**必然携带**，回退分支据此真实工作。
+    const { ACCESS_COOKIE_PATH, activeAccessCookieNames } = require('../../utils/cookie');
+    const SOCKET_IO_PATH = '/socket.io/';
+
+    test('契约前提：access cookie 的 Path 必须覆盖 /socket.io/ 握手路径', () => {
+      expect(ACCESS_COOKIE_PATH).toBe('/');
+      // 浏览器的 cookie 路径匹配是前缀语义：Path 必须是握手路径的前缀才会随请求发送
+      expect(SOCKET_IO_PATH.startsWith(ACCESS_COOKIE_PATH)).toBe(true);
+    });
+
+    test('同源握手：浏览器按契约实际发送的 Cookie 头 ⇒ 回退分支提取成功', () => {
+      const WebSocketService = require('../../services/websocketService');
+      const svc = Object.create(WebSocketService.prototype);
+      // Path=/ 的 access cookie 与 /socket.io/ 同源匹配 ⇒ Cookie 头就是「名字=URL编码值」
+      const cookieName = activeAccessCookieNames()[0];
+      const socket = {
+        handshake: {
+          auth: {},
+          headers: { cookie: `${cookieName}=${encodeURIComponent('cookie-jwt-value')}` },
+        },
+      };
+      expect(svc.extractHandshakeToken(socket)).toBe('cookie-jwt-value');
+    });
+
+    test('安全模式双名：__Host- 前缀 cookie 优先且同样走回退分支', () => {
+      const saved = process.env.COOKIE_SECURE;
+      process.env.COOKIE_SECURE = 'true';
+      try {
+        const WebSocketService = require('../../services/websocketService');
+        const svc = Object.create(WebSocketService.prototype);
+        const [hostName, legacyName] = activeAccessCookieNames();
+        expect(hostName).toBe('__Host-access_token');
+        const socket = {
+          handshake: {
+            auth: {},
+            headers: { cookie: `${hostName}=host-cookie-value; ${legacyName}=stale-value` },
+          },
+        };
+        expect(svc.extractHandshakeToken(socket)).toBe('host-cookie-value');
+      } finally {
+        if (saved === undefined) delete process.env.COOKIE_SECURE;
+        else process.env.COOKIE_SECURE = saved;
+      }
+    });
+  });
+
   // ========== emitRoleUpdate ==========
   describe('emitRoleUpdate', () => {
     test('向 role-management 房间广播并返回带时间戳的事件数据', () => {

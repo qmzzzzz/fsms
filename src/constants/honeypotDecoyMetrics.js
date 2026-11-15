@@ -65,9 +65,8 @@ const ALERT_SERIES = [
   { type: 'permission_abuse', level: 'high', base: 2, perHour: 1 },
   { type: 'suspicious_ip_activity', level: 'medium', base: 9, perHour: 5 },
   { type: 'rate_limit_abuse', level: 'medium', base: 14, perHour: 8 },
-  { type: 'unusual_time_access', level: 'low', base: 3, perHour: 1 },
   { type: 'bulk_data_export', level: 'high', base: 1, perHour: 1 },
-];
+]; // P3：不含 unusual_time_access——真实指标计数器（metrics.incSecurityAlert）无任何调用点投递该类型，诱饵序列里出现即成指纹差异
 
 const LOGIN_SERIES = [
   { result: 'success', base: 320, perHour: 24 },

@@ -31,9 +31,18 @@ const { HttpShipperTransport } = require('../../utils/logShipper');
 
 // 本套件以本地 http dummy 端点验证"排空/预算"行为，与出站加密判据无关：
 // 2026-10-24 起 http 需显式放宽（生产启动闸仍会在带令牌时拒绝）。
+// P3-20：快照原值，套件结束归还——放宽开关不能泄漏给同 worker 后续套件
+const SAVED_LOG_SHIPPING_ALLOW_INSECURE = process.env.LOG_SHIPPING_ALLOW_INSECURE;
 process.env.LOG_SHIPPING_ALLOW_INSECURE = 'true';
 
-afterAll(() => intervalSpy.mockRestore());
+afterAll(() => {
+  intervalSpy.mockRestore();
+  if (SAVED_LOG_SHIPPING_ALLOW_INSECURE === undefined) {
+    delete process.env.LOG_SHIPPING_ALLOW_INSECURE;
+  } else {
+    process.env.LOG_SHIPPING_ALLOW_INSECURE = SAVED_LOG_SHIPPING_ALLOW_INSECURE;
+  }
+});
 
 function makeTransport(overrides = {}) {
   return new HttpShipperTransport({

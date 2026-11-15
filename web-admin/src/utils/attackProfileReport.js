@@ -6,10 +6,19 @@
  */
 import { localDateStr } from '@/utils/datetime'
 
-/** 表格单元格：换行会拆行、竖线会拆列，先归一成安全文本 */
+/**
+ * 表格单元格：换行会拆行、竖线会拆列，先归一成安全文本；
+ * Markdown 语法字符（转义符/反引号/强调/方括号/标题符）一并中和成字面文本，
+ * 防止证据值（路径/原因等用户可控串）伪装成链接、代码段等结构（P3-25）。
+ * 括号不转义：formatTime 产出的 FMT(...) 等合法内容要保持原样。
+ */
 const cell = (value) => {
   const text = value === null || value === undefined || value === '' ? '-' : String(value)
-  return text.replace(/\r?\n/g, ' ').replace(/\|/g, '\\|')
+  return text
+    .replace(/\r?\n/g, ' ')
+    .replace(/\\/g, '\\\\')
+    .replace(/[`*_#[\]]/g, '\\$&')
+    .replace(/\|/g, '\\|')
 }
 
 const statLine = (t, key, value) => `- ${t('attackProfile.' + key)}: ${cell(value)}`

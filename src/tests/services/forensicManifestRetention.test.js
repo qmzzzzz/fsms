@@ -154,6 +154,22 @@ describe('B-5 保留与归档：老清单文件必须归档而不是静默删除
     expect(prune.getPruneStats().prunedFiles).toBe(1);
   });
 
+  test('归档年龄按业务时区「今天」计：上海 00:00–08:00（UTC 日期落后一天）不得晚归档一天', () => {
+    // 2026-11-14T18:30Z = 上海 2026-11-15 02:30。清单文件按业务日键命名：
+    // 2026-09-15 距业务今天 61 天（该归档），距 UTC 今天只有 60 天（旧实现会多留一天）。
+    jest.useFakeTimers({ now: new Date('2026-11-14T18:30:00.000Z') });
+    try {
+      const dir = tmpdir();
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, '2026-09-15.jsonl'), '{}\n', 'utf8');
+      const r = prune.pruneManifest({ dir, keepDays: 60 });
+      expect(r.archived).toEqual(['2026-09-15.jsonl']);
+      expect(fs.existsSync(path.join(dir, '.discarded', '2026-09-15.jsonl'))).toBe(true);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('保留期内一个都不动（否则等于自己把证据删了）', () => {
     const dir = tmpdir();
     fs.mkdirSync(dir, { recursive: true });

@@ -17,13 +17,25 @@
 const { flushEventLoop } = require('../helpers/waitFor');
 
 /** 假 worker 的共享状态（名以 mock 开头，jest.mock 工厂内可引用） */
-const mockPoolState = { instances: [], sent: [], replyOnPost: null };
+const mockPoolState = {
+  instances: [],
+  sent: [],
+  replyOnPost: null,
+  failOnConstruct: 0, // 已创建实例数达到该值时，下一个 Worker 构造即抛错（模拟初始化中途失败）
+  terminated: [],
+};
 
 jest.mock('worker_threads', () => {
   const { EventEmitter } = require('events');
   class FakeWorker extends EventEmitter {
     constructor() {
       super();
+      if (
+        mockPoolState.failOnConstruct > 0 &&
+        mockPoolState.instances.length >= mockPoolState.failOnConstruct
+      ) {
+        throw new Error('worker init failed');
+      }
       mockPoolState.instances.push(this);
     }
 
@@ -38,6 +50,7 @@ jest.mock('worker_threads', () => {
     unref() {}
 
     terminate() {
+      mockPoolState.terminated.push(this);
       return Promise.resolve();
     }
   }
@@ -59,6 +72,8 @@ describe('bcryptWorkerPool 崩溃语义', () => {
     mockPoolState.instances.length = 0;
     mockPoolState.sent.length = 0;
     mockPoolState.replyOnPost = null;
+    mockPoolState.failOnConstruct = 0;
+    mockPoolState.terminated.length = 0;
   });
 
   afterEach(() => {
@@ -127,6 +142,26 @@ describe('bcryptWorkerPool 崩溃语义', () => {
       const sentBefore = mockPoolState.sent.length;
       await expect(pool.hash('pw2', 4)).resolves.toMatch(/^\$2[aby]\$04\$/);
       expect(mockPoolState.sent.length).toBe(sentBefore);
+    } finally {
+      await pool._shutdownForTests();
+    }
+  });
+
+  test('池初始化中途失败：已创建线程必须 terminate 回收，任务改走进程内兜底（审计 2026-11-15）', async () => {
+    process.env.BCRYPT_WORKERS = '2';
+    mockPoolState.failOnConstruct = 1; // 第 2 个 Worker 构造时抛错 ⇒ 走初始化失败 catch
+    const hashMock = jest.fn(async () => 'FROM_INLINE');
+    jest.doMock('bcryptjs', () => ({ hash: hashMock, compare: jest.fn(), genSalt: jest.fn() }));
+    const pool = loadPool();
+
+    try {
+      // 修复前：已创建的第 1 个线程无人 terminate，成为孤儿线程
+      await expect(pool.hash('pw', 4)).resolves.toBe('FROM_INLINE');
+      expect(mockPoolState.instances).toHaveLength(1);
+      expect(mockPoolState.terminated).toHaveLength(1);
+      expect(mockPoolState.terminated[0]).toBe(mockPoolState.instances[0]);
+      expect(mockPoolState.sent).toHaveLength(0); // 失败的池不接任何任务
+      expect(hashMock).toHaveBeenCalledTimes(1);
     } finally {
       await pool._shutdownForTests();
     }

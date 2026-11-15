@@ -278,7 +278,9 @@ function parseArgs(argv = []) {
   for (let i = 0; i < argv.length; i += 1) {
     const raw = argv[i];
     if (!raw.startsWith('--')) throw new Error(`无法识别的参数：${raw}`);
-    const [name, inlineValue] = raw.slice(2).split('=');
+    const eq = raw.indexOf('='); // 只在第一个 = 切开：split('=') 会把值里后续的 = 当分隔符（--bundle=/a=b 被截成 /a）
+    const name = (eq === -1 ? raw : raw.slice(0, eq)).slice(2);
+    const inlineValue = eq === -1 ? undefined : raw.slice(eq + 1);
     if (!FLAGS.includes(name)) {
       // 复用 cliFlagPolicy.suggestFlag：本仓的破坏性脚本统一按「未知参数即拒绝 + 给出可照抄的
       // 写法」处理（口径见 scripts/cliFlagPolicy.js 头部）。手误（\`--bundle-rootz\`）被静默忽略时，

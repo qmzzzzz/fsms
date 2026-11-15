@@ -8,17 +8,13 @@
  * 同时锁定后端错误码契约样例：前端映射的码集合应覆盖后端已迁移码
  * （双向对齐的简化近似：断言关键码存在，避免测试与后端注册表强耦合）。
  */
-import { describe, test, expect, beforeEach } from 'vitest'
+import { describe, test, expect } from 'vitest'
 import { ERROR_CODE_I18N_MAP, resolveErrorMessage } from '@/utils/api'
 import i18n from '@/i18n'
 
 const LOCALES = ['zh-CN', 'en-US']
 
 describe('ERROR_CODE_I18N_MAP 与 locale 对齐', () => {
-  beforeEach(() => {
-    // 清空假性缓存：切 locale 时 vue-i18n 消息编译可能被复用
-  })
-
   LOCALES.forEach((locale) => {
     test(`${locale}：每个映射 key 均解析出非 key 文案`, () => {
       i18n.global.locale.value = locale
@@ -218,9 +214,9 @@ describe('resolveErrorMessage 方法分档', () => {
  * 若哪天 axios 去掉 toLowerCase，本用例会红，提示"分档表要改用大写键"。
  */
 test('axios 把 method 归一化为小写（分档表用小写键的前提）', async () => {
-  const axios = (await import('axios')).default
+  const { default: axios, AxiosError } = await import('axios')
   const seen = []
-  const inst = axios.create({ baseURL: 'http://127.0.0.1:1', timeout: 3000 })
+  const inst = axios.create()
   inst.interceptors.response.use(
     (r) => r,
     (err) => {
@@ -228,11 +224,18 @@ test('axios 把 method 归一化为小写（分档表用小写键的前提）', 
       return Promise.reject(err)
     }
   )
+  // 自定义 adapter：不发起真实网络请求（原探针打 127.0.0.1:1 靠真实连接拒绝失败，
+  // 属真实网络 I/O）。method 归一化发生在 axios 请求路径上（进入 adapter 与
+  // 响应拦截器之前），拒绝型 adapter 不影响本探针的判据；错误携带 config，
+  // 保证响应拦截器仍按真实形态读到 err.config.method。
+  inst.defaults.adapter = async (config) => {
+    throw new AxiosError('probe: no network in tests', AxiosError.ERR_BAD_REQUEST, config)
+  }
   const probe = async (cfg) => {
     try {
       await inst.request(cfg)
     } catch {
-      /* 预期失败：真实适配器拒绝连接，但 config 已归一化 */
+      /* 预期失败：adapter 直接拒绝，不产生真实网络 I/O */
     }
     return seen[seen.length - 1]
   }

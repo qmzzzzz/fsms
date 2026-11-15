@@ -202,6 +202,7 @@ import AccountBindingsCard from '@/components/AccountBindingsCard.vue'
 import MyLogsCard from '@/components/MyLogsCard.vue'
 import UserAvatar from '@/components/UserAvatar.vue'
 import { compressAvatarFile } from '@/utils/avatarImage'
+import { withSyncLock } from '@/utils/withSyncLock'
 
 const { t, locale } = useI18n()
 const { roleName } = useSystemLabels()
@@ -404,7 +405,7 @@ const removeAvatar = async () => {
   }
 }
 
-const save = async () => {
+const save = withSyncLock(async () => {
   try {
     await profileFormRef.value.validate()
   } catch (_) {
@@ -440,7 +441,7 @@ const save = async () => {
   } catch (e) {
     // 错误已在拦截器处理
   }
-}
+})
 
 /** 「重置」是用户主动要求丢弃输入，因此赋值前后都要让脏标记归位 */
 const reset = () => {

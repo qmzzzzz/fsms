@@ -133,12 +133,6 @@ defineExpose({ load })
   gap: 12px;
 }
 
-.card-header {
-  font-family: var(--xf-font-display);
-  font-weight: 600;
-  letter-spacing: var(--xf-tracking-wide);
-}
-
 .logs-range {
   width: 120px;
 }

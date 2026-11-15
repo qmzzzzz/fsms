@@ -116,7 +116,12 @@
 1. 同宿主 compose 网络明文（TLS 豁免显式声明）——拓扑拆分时摘旗标；
 2. realName 暂以明文存储（2026-09-30 决策：姓名片段模糊检索是用户列表的日常能力，
    正则对密文不成立）——转入加密需先给姓名检索另立方案（独立检索索引/搜索引擎）；
-3. logShipper 主机名目标的 DNS rebinding 窗口（纵深防御口径，见其头注）；
+3. **【已收口 2026-10-31，不再是开放残余】logShipper 主机名目标的 DNS rebinding**：
+   出站目标判据与发送前 IP 钉扎已落地——`utils/logShippingTarget.js` 的
+   `pinnedLookup` 在构造 http.Agent 时以自定义 `lookup` 钉死已解析地址，
+   建连不再经历第二次 DNS 解析，rebinding 窗口关闭（原「纵深防御口径」的
+   已知边界同步作废，见 `src/utils/logShipper.js` 头注与
+   `src/tests/observability/` 的钉扎用例）；
 4. 轮换 `HMAC_SECRET` 后口令复用历史归零（`passwordHistory.test.js` 头注的取舍）；
 5. **开发/预览服务器的源码可读面（默认仅回环，显式放开后才是残余风险；不构成生产面）**：
    `web-admin/vite.config.js` 的 `server.host` 与 `preview.host` 默认都绑定

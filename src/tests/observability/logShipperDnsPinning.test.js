@@ -184,6 +184,8 @@ describe('_post：连接期不再解析（重绑定窗口闭合的实证）', ()
 
     // 放行该主机名并把解析钉到回环地址：连接必须用这个地址，且不得再查一次 DNS
     process.env[ALLOW_ENV] = 'siem.internal';
+    // P3-20：按原值归还（而非一律 delete），避免覆盖同 worker 前序套件的原设定
+    const savedInsecure = process.env.LOG_SHIPPING_ALLOW_INSECURE;
     process.env.LOG_SHIPPING_ALLOW_INSECURE = 'true';
     const spy = stubLookup([{ address: '127.0.0.1', family: 4 }]);
 
@@ -195,7 +197,8 @@ describe('_post：连接期不再解析（重绑定窗口闭合的实证）', ()
     try {
       await t._post(['line-1']);
     } finally {
-      delete process.env.LOG_SHIPPING_ALLOW_INSECURE;
+      if (savedInsecure === undefined) delete process.env.LOG_SHIPPING_ALLOW_INSECURE;
+      else process.env.LOG_SHIPPING_ALLOW_INSECURE = savedInsecure;
       await t.close();
     }
 

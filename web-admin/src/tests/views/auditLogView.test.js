@@ -20,8 +20,12 @@ const createTicket = vi.fn()
 const isCanceledError = vi.fn(() => false)
 vi.mock('@/utils/api', () => ({
   apiClient: { get: (...a) => get(...a), post: vi.fn(), delete: vi.fn() },
-  // api.security 封装与 apiClient 共用同一个 get 漏斗，URL/参数断言沿用既有写法
+  // api.security / api.reports 封装与 apiClient 共用同一个 get 漏斗，URL/参数断言沿用既有写法
   api: {
+    reports: {
+      // P3-19：导出改走 api.reports.export 封装（不再 apiClient 直连）——mock 必须提供
+      export: (params) => get('/reports/export', { params, responseType: 'blob' }),
+    },
     security: {
       // WF-07：视图改走该封装（不再 apiClient 直连）——mock 必须提供，否则 loadStats 静默失败
       getOverview: () => get('/security/overview'),
@@ -1335,9 +1339,12 @@ describe('AuditLogView 详情对话框', () => {
     ).find((b) => b.textContent.trim() === '关闭')
     expect(closeBtn).toBeTruthy()
     click(closeBtn)
-    for (let i = 0; i < 60 && overlay.style.display !== 'none'; i += 1) {
-      await new Promise((r) => setTimeout(r, 10))
-    }
+    // 条件等待替代裸 60×10ms 真实定时器轮询（P3-14）：遮罩 display 归 none 是
+    // 不可逆终态；jsdom 下对话框过渡无真实时长，nextTick + 宏任务轮询即可达
+    await waitFor(() => overlay.style.display === 'none', {
+      maxTicks: 80,
+      message: '详情遮罩关闭',
+    })
     expect(overlay.style.display).toBe('none')
     expect(c.errors).toEqual([])
   })

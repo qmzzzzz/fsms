@@ -295,7 +295,40 @@ function formatShipper() {
 
 /** 渲染本组全部信号（供 metrics.formatPrometheus 拼接） */
 function formatRuntime() {
-  return [...formatReadyz(), ...formatDisk(), ...formatShipper(), ...formatExport(), ...formatWs()];
+  return [
+    ...formatReadyz(),
+    ...formatDisk(),
+    ...formatShipper(),
+    ...formatExport(),
+    ...formatWs(),
+    ...formatRejections(),
+  ];
+}
+
+const REJECTION_KINDS = ['error', 'non_error']; // 闭集：Error→error，其余→non_error（err.name 是开放集，不进标签——闭集标签纪律）
+const unhandledRejections = new Map(); // kind -> 累计次数。P3：unhandledRejection 退出前尽力 +1，让「因拒绝退出」在监控侧可聚合（target down 不知道怎么没的）
+
+function incUnhandledRejection(reason) {
+  try {
+    const kind = reason instanceof Error ? 'error' : 'non_error'; // unhandledRejection 处理器（index.js）退出前的尽力计数
+    unhandledRejections.set(kind, (unhandledRejections.get(kind) || 0) + 1);
+  } catch (_) {}
+}
+
+function formatRejections() {
+  const out = [
+    '# HELP unhandled_rejections_total Unhandled promise rejections observed by this process',
+    '# TYPE unhandled_rejections_total counter',
+  ];
+  for (const kind of REJECTION_KINDS) {
+    out.push(
+      'unhandled_rejections_total{reason_kind="' +
+        kind +
+        '"} ' +
+        (unhandledRejections.get(kind) || 0)
+    );
+  }
+  return out;
 }
 
 /** 仅供测试重置（生产不调用） */
@@ -313,11 +346,13 @@ function __resetForTest() {
   wsConnectionSource = null;
   wsInboundThrottled = 0;
   wsInboundDisconnects = 0;
+  unhandledRejections.clear();
 }
 
 module.exports = {
   READYZ_RESULTS,
   EXPORT_REJECT_REASONS,
+  REJECTION_KINDS,
   recordReadyz,
   incLogShipperFlushFailure,
   incLogShipperDroppedLines,
@@ -327,6 +362,7 @@ module.exports = {
   registerWsConnectionSource,
   incWsInboundThrottled,
   incWsInboundDisconnect,
+  incUnhandledRejection,
   getWsSnapshot,
   formatRuntime,
   __resetForTest,

@@ -8,6 +8,8 @@ const router = express.Router();
 const reportController = require('../controllers/reportController');
 const { authenticate, checkPermission, requireReAuthentication } = require('../middleware');
 const { strictLimiter, reauthLimiter, reauthUserLimiter } = require('../middleware/rateLimit');
+const { reauthCredentialValidation } = require('../middleware/security/reauthCredentialRules');
+const { consumeValidation } = require('../middleware/validateQuery');
 const ApiResponse = require('../utils/apiResponse');
 const { PII_NAME_EXPORT_TYPES } = require('../services/reportExportService');
 const logger = require('../utils/logger');
@@ -147,6 +149,8 @@ router.post(
   checkPermission('report:export'),
   checkPermission('pii:export'),
   requirePiiExportQuota,
+  reauthCredentialValidation, // 审计 2026-11-15：补凭据契约校验+消费（唯二未挂的凭据端点之一），格式闸在解密前生效
+  consumeValidation(),
   requireReAuthentication(),
   reportController.exportReport
 );

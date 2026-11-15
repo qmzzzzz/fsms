@@ -33,12 +33,13 @@ const seedUserBoundaryFixtures = async ({ stamp, password }) => {
   const Role = require('../../models/Role');
   const Permission = require('../../models/Permission');
 
-  const wildcardPermission = await Permission.create({
-    name: '全部权限',
-    code: '*:*',
-    type: 'api',
-    module: 'system',
-  });
+  // P2-16：`*:*` 是跨套件共享的内置码，必须 upsert 幂等播种（与 reportExport 等
+  // 套件的 findOneAndUpdate + $setOnInsert 模式一致），create 在并发/重复播种下撞 E11000
+  const wildcardPermission = await Permission.findOneAndUpdate(
+    { code: '*:*' },
+    { $setOnInsert: { name: '全部权限', code: '*:*', type: 'api', module: 'system' } },
+    { upsert: true, new: true }
+  );
   const superRole = await Role.create({
     name: '超级管理员',
     code: 'SUPER_ADMIN',
@@ -96,9 +97,7 @@ const cleanupUserBoundaryFixtures = async ({ stamp }) => {
   await require('../../models/Role')
     .deleteMany({ code: { $in: ['SUPER_ADMIN', `UB_ROLE_${stamp}`] } })
     .catch(() => {});
-  await require('../../models/Permission')
-    .deleteOne({ code: '*:*' })
-    .catch(() => {});
+  // P2-16：`*:*` 权限是共享内置文档，不随本套件清理（删掉会让仍引用它的角色悬空）
   await mongoose.connection.close();
 };
 

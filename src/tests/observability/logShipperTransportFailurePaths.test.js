@@ -15,11 +15,11 @@
  *       （deliverables/七维代码健康度深度审计-2026-09-18.md）。变异实测曾确认（2026-09-20）让
  *       utils/logShipper.js 永不写 `Authorization` 头 → 全绿。修复：服务端记录出站头并真断言
  *       `Bearer <token>`（见 `_post()` describe 的 seenRequests）。`:383-388`「HTTPS 协议选择」半条**仍有效**（见下条）。
- *   - [仍有效·静态确认] `:383-388`（现形 `:408-411`）标题写「HTTPS 协议选择 https 库（URL 解析分支）」
- *   - [仍有效·静态确认] `:383-388`（现形 `:408-411`）标题写「HTTPS 协议选择 https 库（URL 解析分支）」
- *       而函数体只断 `t.url`，`:410` 自陈「仅验证构造不报错；实际 HTTPS 请求会在 _post 里选 https 库」
- *       ⇒ **从不调用 `_post`**；`grep -n "_post(\[" src/tests/` 全仓其余用例一律打 `http://127.0.0.1`，
- *       **无一走 https 分支**。**未做变异**——该断言不执行被测代码，变异无观测通道（`deliverables/AGENT工作总账与待办-2026-09-21.md` §6 方法）。
+ *   - [已修复·2026-11-15（本批）] `:441-446`（原 `:383-388`，曾静态确认"仍有效"）「HTTPS 协议选择」
+ *       原本只断 `t.url`、从不调用 `_post`；`grep -n "_post(\[" src/tests/` 全仓其余用例一律打
+ *       `http://127.0.0.1`，无一走 https 分支（静态确认记录，变异无观测通道）。现补
+ *       `_post() HTTPS 出站` 用例：本地 openssl 自签 TLS 端点（127.0.0.1，禁外网）真实出站，
+ *       断言 https 库被选中（http.request 不被调用）且批次真达服务端。
  *
  * 命名沿革：2026-09-20 由 `logShipperGap.test.js` 更名。旧名里的
  *   Coverage / Gap / Hardening / Branch 说的是「当初为什么写它」（补覆盖率基线），
@@ -443,6 +443,105 @@ describe('HttpShipperTransport', () => {
       // 仅验证构造不报错；实际 HTTPS 请求会在 _post 里选 https 库
       expect(t.url).toBe('https://example.com/logs');
       t.close();
+    });
+
+    // ---- HTTPS 出站真发（补齐上面那条"从不调用 _post"的静态缺口）----
+    describe('_post() HTTPS 出站（本地 TLS 端点，禁外网）', () => {
+      const https = require('https');
+      const os = require('os');
+      const fs = require('fs');
+      const path = require('path');
+      const { execFileSync } = require('child_process');
+
+      let httpsServer;
+      let httpsPort;
+      let httpsSeen = [];
+      let certPem;
+
+      beforeAll((done) => {
+        // openssl 自签证书（CN=127.0.0.1，仅回环测试用）。openssl 缺失时本用例
+        // 显式红（与 workflowShellSyntax 对 bash 的口径一致），不静默跳过
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'logshipper-tls-'));
+        const certPath = path.join(dir, 'cert.pem');
+        const keyPath = path.join(dir, 'key.pem');
+        execFileSync('openssl', [
+          'req',
+          '-x509',
+          '-newkey',
+          'rsa:2048',
+          '-nodes',
+          '-keyout',
+          keyPath,
+          '-out',
+          certPath,
+          '-days',
+          '1',
+          '-subj',
+          '/CN=127.0.0.1',
+          // 现代校验只认 SAN：证书必须显式带 IP 条目，否则 "IP: 127.0.0.1 is not in the cert's list"
+          '-addext',
+          'subjectAltName=IP:127.0.0.1',
+        ]);
+        certPem = fs.readFileSync(certPath, 'utf8');
+
+        httpsServer = https.createServer(
+          { cert: certPem, key: fs.readFileSync(keyPath, 'utf8') },
+          (req, res) => {
+            let body = '';
+            req.on('data', (chunk) => {
+              body += chunk;
+            });
+            req.on('end', () => {
+              httpsSeen.push({ url: req.url, body });
+              res.writeHead(200);
+              res.end('ok');
+            });
+          }
+        );
+        httpsServer.listen(0, '127.0.0.1', () => {
+          httpsPort = httpsServer.address().port;
+          done();
+        });
+      });
+
+      afterAll((done) => {
+        httpsServer.close(done);
+      });
+
+      test('https URL 经 https 库真发批次到本地 TLS 端点（协议选择 + 内容到达）', async () => {
+        const httpLib = require('http');
+        const realHttpsRequest = https.request.bind(https);
+        // 客户端只注入测试 CA（自签证书的信任锚）：TLS 握手、证书校验、HTTP 语义全部真实，
+        // 不放宽 rejectUnauthorized——校验失败的路径不属于本用例的射程
+        const httpsSpy = jest
+          .spyOn(https, 'request')
+          .mockImplementation((opts, cb) =>
+            realHttpsRequest({ ...opts, ca: certPem, rejectUnauthorized: true }, cb)
+          );
+        const httpSpy = jest.spyOn(httpLib, 'request');
+        try {
+          const t = createTransport({ url: `https://127.0.0.1:${httpsPort}/logs` });
+          await expect(t._post(['tls-line-1'])).resolves.toBeUndefined();
+
+          // 协议选择：https 库被使用，且打向的就是本 TLS 端点
+          expect(httpsSpy).toHaveBeenCalled();
+          expect(httpsSpy.mock.calls[0][0].port).toBe(String(httpsPort));
+          // 精确到端口的 http 零调用：不做全局"零调用"断言——同文件更早用例的
+          // close() 排空循环会在后台继续真实重试（打各自 http 端口），与本用例无关
+          const httpHitsOnTlsEndpoint = httpSpy.mock.calls.filter(
+            ([opts]) => String(opts.port) === String(httpsPort)
+          );
+          expect(httpHitsOnTlsEndpoint).toEqual([]);
+          // 批次真达本地 TLS 端点：路径与请求体逐项核对（此前无任何用例走 https 分支）
+          expect(httpsSeen.length).toBeGreaterThan(0);
+          expect(httpsSeen[httpsSeen.length - 1].url).toBe('/logs');
+          expect(JSON.parse(httpsSeen[httpsSeen.length - 1].body)).toEqual(['tls-line-1']);
+          t.close();
+        } finally {
+          httpsSpy.mockRestore();
+          httpSpy.mockRestore();
+        }
+      }, 10000);
     });
   });
 

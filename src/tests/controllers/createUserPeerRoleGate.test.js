@@ -154,6 +154,10 @@ describe('建号轨的同级角色归属闸（与 assignRoles 同尺）', () => 
 
   afterAll(async () => {
     if (mongoose.connection.readyState !== 0) {
+      // P3-24：回收自建用户（zzb_*，含 HTTP 建号成功的那几条）与角色（ZZB_*）；
+      // upsert 的共享权限（user:create / role:assign / *:* 等）不在此列
+      await User.deleteMany({ username: new RegExp('^zzb_') }).catch(() => {});
+      await Role.deleteMany({ code: new RegExp('^ZZB_') }).catch(() => {});
       await mongoose.connection.close();
     }
   });

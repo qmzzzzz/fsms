@@ -652,8 +652,8 @@ function flush() {
     })
 }
 
-/** 供测试观察并发锁状态 */
-export const __isFlushInFlight = () => flushInFlight
+/** 供测试观察并发锁状态；生产构建剔除（P3-26） */
+export const __isFlushInFlight = import.meta.env.DEV ? () => flushInFlight : undefined
 
 function describeReason(reason) {
   if (reason instanceof Error) {

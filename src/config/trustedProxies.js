@@ -24,7 +24,7 @@
 
 const { parseCIDR, normalizeCIDR, isFullRangeCIDR, ipMatchesEntry } = require('../utils/ipUtils');
 
-const ENV_KEY = 'TRUSTED' + '_' + 'PROXY' + '_' + 'CIDRS';
+const ENV_KEY = 'TRUSTED_PROXY_CIDRS'; // 完整字面量（审计 2026-11-15）：拼接写法让 grep 检索不到环境变量名
 
 /**
  * 解析逗号分隔的可信代理网段列表（纯函数：不读 process.env、不打日志）。

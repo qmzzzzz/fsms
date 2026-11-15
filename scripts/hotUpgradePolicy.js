@@ -325,7 +325,9 @@ function parseArgs(argv = []) {
   for (let i = 0; i < argv.length; i += 1) {
     const raw = argv[i];
     if (!raw.startsWith('--')) throw new Error(`无法识别的参数：${raw}`);
-    const [name, inlineValue] = raw.slice(2).split('=');
+    const eq = raw.indexOf('='); // 只在第一个 = 切开：split('=') 会把值里后续的 = 当分隔符（--status-file=/a=b 被截成 /a）
+    const name = (eq === -1 ? raw : raw.slice(0, eq)).slice(2);
+    const inlineValue = eq === -1 ? undefined : raw.slice(eq + 1);
     if (!FLAGS.includes(name)) {
       throw new Error(`未知参数：--${name}（可用：${FLAGS.map((f) => `--${f}`).join(', ')}）`);
     }

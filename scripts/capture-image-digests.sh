@@ -68,7 +68,7 @@ docker pull "$MONGO_TAG"
 #     排障时得先 inspect 才知道跑的是哪个大版本"；
 #   Dockerfile 的三处 FROM 与 docker-compose.yml 的 redis 都是 `name:tag@sha256:<hex>`；
 #   门禁 src/tests/security/baseImageDigestPinned.test.js 的 FROM 判据是
-#     `/^node:22\.14\.0-alpine@sha256:[0-9a-f]{64}$/`，deployScript.test.js 把约定写成 `<repo>:<tag>@sha256:…`。
+#     `/^node:26\.12\.0-alpine@sha256:[0-9a-f]{64}$/`，deployScript.test.js 把约定写成 `<repo>:<tag>@sha256:…`。
 # 也就是说照本脚本的升级路径跑一次 `--apply`，产物会被那道闸直接判红——
 # 工具否定了它自己的产物。取尾巴追加到 tag 上，两种形态（短名 `node@…`、
 # 全限定 `docker.io/library/node@…`）都会收敛成同一个 `node:26.12.0-alpine@sha256:…`。

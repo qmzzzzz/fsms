@@ -2,6 +2,8 @@ node_modules
 npm-debug.log
 logs
 *.log
+# 根目录一次性运行日志，与 .gitignore 的 /logs-*.txt 同口径（2026-11-15 审计 P2-36）
+logs-*.txt
 .env
 .env.local
 .env.*
@@ -50,10 +52,10 @@ web-admin/dist
 web-admin/dist-*
 .vscode
 .idea
-*.md
-*.txt
-# Docker 的通配语义里 `*.md` 只匹配**根级**（与上面 coverage 的注释同一条规则），
-# 子目录里的 .md/.txt 根本没被挡住。`deliverables/` 整目录 1.6 MB，装的是
+# Docker 的通配语义里裸 `*.md` 只匹配**根级**（与上面 coverage 的注释同一条规则），
+# 子目录里的 .md/.txt 根本没被挡住，因此必须用下面的 `**/*` 全层级形态
+# （2026-11-15 审计：裸 `*.md`/`*.txt` 两行被 `**/*.md`/`**/*.txt` 完全覆盖，已删）。
+# `deliverables/` 整目录 1.6 MB，装的是
 # 审计利用细节（带 file:line 的攻击面描述），它们被 .gitignore 刻意挡在版本库外，
 # 却会随 `build: .` 的 context 上传给构建守护进程——构建上下文必须与 git 口径一致。
 deliverables

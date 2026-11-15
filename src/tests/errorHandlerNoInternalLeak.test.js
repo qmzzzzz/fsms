@@ -19,6 +19,8 @@
 
 const path = require('path');
 
+const logger = require('../utils/logger');
+
 const MOD_PATH = path.join(__dirname, '..', 'middleware', 'errorHandler.js');
 
 const S = {
@@ -151,6 +153,24 @@ describe('errorHandler 生产模式下逐分支不得回显内部细节', () => 
 
   test('取数有效：上面确实跑了多条分支（防 test.each 空数组恒绿）', () => {
     expect(CASES.length).toBeGreaterThanOrEqual(9);
+  });
+
+  test('CastError 日志不得被内嵌换行的用户输入伪造多行（审计 2026-11-15）', () => {
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      const malicious =
+        'Cast to ObjectId failed for value "abc\n2026-11-15 ERROR fake line" at path "_id"';
+      run(handler, { name: 'CastError', path: S.path, message: malicious });
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      const logged = warnSpy.mock.calls[0][0];
+      expect(typeof logged).toBe('string');
+      expect(logged).not.toContain('\n');
+      expect(logged).not.toContain('\r');
+      // 控制字符替换为空格：内容仍可读，但不再产生新日志行
+      expect(logged).toContain('abc 2026-11-15 ERROR fake line');
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   test('码化分支必须带 errorCode（前端据此做 i18n，不得退化成裸文案）', () => {

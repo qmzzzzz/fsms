@@ -1250,3 +1250,40 @@ describe('DeviceView 竞态守卫与刷新去抖（G9/G10）', () => {
     expect(c.errors).toEqual([])
   })
 })
+
+describe('DeviceView 同 tick 双击防重（P2-29 withSyncLock）', () => {
+  test('同一 tick 双击「新增」提交：只发一次创建请求', async () => {
+    let resolveCreate
+    create.mockImplementation(
+      () =>
+        new Promise((r) => {
+          resolveCreate = r
+        })
+    )
+    const c = await open()
+    const d = await openDialog(c, '新增设备')
+    typeInto(
+      d.querySelector('input[placeholder="请输入设备编号（必填，不超过 50 个字符）"]'),
+      'SMK-200'
+    )
+    typeInto(d.querySelector('input[placeholder="设备名称"]'), '三层烟感')
+    await flush(4)
+    click(d.querySelector('.el-select__wrapper'))
+    await flush(8)
+    const opts = Array.from(visiblePopper().querySelectorAll('.el-select-dropdown__item'))
+    click(opts[0])
+    await flush(10)
+    const submit = dlgFootBtn('新增')
+    expect(submit).toBeTruthy()
+    // 两次 click 在同一同步块内派发：dialog.submitting 要等校验后的重渲染才置位，
+    // 第二次进入必须由同步锁拦下（P2-29）
+    click(submit)
+    click(submit)
+    await waitFor(() => create.mock.calls.length === 1, { message: '新增请求发出' })
+    await flush(12)
+    expect(create.mock.calls.length).toBe(1)
+    resolveCreate({ data: { success: true } })
+    await flush(8)
+    expect(c.errors).toEqual([])
+  })
+})

@@ -292,6 +292,30 @@ const OTHER_ALERT_SIGNALS = Object.freeze([
     why: '取证触发判据不可用（forensicTrigger 模块缺失或抛错）：捕获整体跳过，请求不受影响。与上条同段同理由——这是"取证能力降级"而不是"护栏放行"，故不进 FAIL_OPEN_SITES；告警同由 ForensicCaptureDegraded 承担。',
   },
   {
+    type: 'forensic_digest_no_pepper',
+    file: 'services/forensicCapturePayload.js',
+    level: 'medium',
+    why: '取证口令摘要缺 pepper（HMAC_SECRET 未配置）：口令类字段退化为只存长度（hmac 记 null），不再落无盐 sha256（P2-05，2026-11-15）。归信号段同上两条——这是"取证能力降级"而不是"护栏放行"，请求不受影响；但"库泄露后口令等价物不可离线爆破"这层保护静默失效，必须可计数。告警同由 ForensicCaptureDegraded 承担。',
+  },
+  {
+    type: 'audit_chain_zombie_renewal_exceeded',
+    file: 'utils/auditChainFence.js',
+    level: 'high',
+    why: '审计链僵尸写入超过续租上界（P3，2026-11-15）：持锁超时的僵尸批次迟迟不落定时，围栏原本会无限续租分布式锁——其余实例从此永远拿不到链锁，审计链整体停摆且无告警。现在续租有总时长上界，超界即停止续租并告警，让锁按 PX 自然过期（其余实例可接管）；本进程的冻结窗仍由僵尸落定后的重同步兜底。归信号段而非 FAIL_OPEN_SITES：没有"准入护栏放行"的方向语义，是"完整性保护机制自我放弃占锁"的既成事件；单次超界只 +1，速率型规则永不达标，由专条 AuditChainZombieRenewalExceeded 承担（for: 0m，increase>0 即发）。',
+  },
+  {
+    type: 'menu_tree_failure',
+    file: 'utils/permissionHelper.js',
+    level: 'medium',
+    why: '菜单树查询数据库故障（P3，2026-11-15）：getMenuTree 不再把数据库故障吞成 200+空菜单，改为 error 日志+本计数并向上抛出，由错误响应路径处理——「无权限的空菜单」与「查询失败」从此对外可区分。归信号段而非 FAIL_OPEN_SITES：没有护栏放行方向语义，是可观测性/可用性降级；单次故障只 +1，速率型规则永不达标，由专条 AuthSurfaceDegraded 承担（for: 0m，increase>0 即发）。',
+  },
+  {
+    type: 'refresh_session_failure',
+    file: 'controllers/authController/credentials.js',
+    level: 'medium',
+    why: '刷新令牌链路基础设施故障（P3，2026-11-15）：refreshToken 兜底 catch 不再把数据库/缓存故障静默吞成 400——对外仍返回统一失败语义，但 error 日志+本计数让「故障期 400 洪水」与「真实凭据失效」在监控上可区分。归信号段而非 FAIL_OPEN_SITES：认证仍 fail-closed，缺的是故障可见性；单次故障只 +1，由专条 AuthSurfaceDegraded 承担（for: 0m，increase>0 即发）。',
+  },
+  {
     type: 'idempotency_lease_takeover',
     file: 'middleware/idempotency.js',
     level: 'medium',

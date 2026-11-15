@@ -3,6 +3,10 @@
  */
 
 const mongoose = require('mongoose');
+const { stripControlChars } = require('../utils/helpers');
+
+const consentIpOrEmpty = (value) => stripControlChars(value, 64); // P3：请求方可控文本，截断+中和；上界同 UserSession.ip
+const consentUserAgentOrEmpty = (value) => stripControlChars(value, 512); // 上界同 AuditLog.userAgent
 
 const consentRecordSchema = new mongoose.Schema(
   {
@@ -14,8 +18,8 @@ const consentRecordSchema = new mongoose.Schema(
     // 覆盖的数据范围：取自 constants/dataClassification 的 CONSENT_SCOPES 键
     scopes: { type: [String], required: true, default: [] },
     acceptedAt: { type: Date, required: true },
-    ip: { type: String, default: '' },
-    userAgent: { type: String, default: '' },
+    ip: { type: String, default: '', set: consentIpOrEmpty },
+    userAgent: { type: String, default: '', set: consentUserAgentOrEmpty },
     source: {
       type: String,
       required: true,

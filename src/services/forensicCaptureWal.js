@@ -9,6 +9,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const readline = require('readline');
 const logger = require('../utils/logger');
 const { errText } = require('../utils/auditWriteFailure');
 const { readPositiveNumberEnv } = require('../utils/envNumber');
@@ -74,11 +75,31 @@ async function readRecordsStrict() {
   return { records: hasTrailing ? parts.slice(0, -1) : parts, content };
 }
 
-async function atomicReplace(nextContent) {
-  const tmpPath = walPath + '.tmp';
-  await fs.promises.writeFile(tmpPath, nextContent, { encoding: 'utf8', mode: 0o600 });
-  await fs.promises.rename(tmpPath, walPath);
+async function scanWalLines(onLine) {
+  const stream = fs.createReadStream(walPath, { encoding: 'utf8' });
+  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+  let index = 0;
+  try {
+    for await (const line of rl) {
+      await onLine(line, index);
+      index += 1;
+    }
+  } finally {
+    rl.close();
+    stream.destroy();
+  }
+  return index;
 }
+
+const writeLineTo = (stream, line) =>
+  new Promise((resolve, reject) => {
+    stream.write(line + '\n', (err) => (err ? reject(err) : resolve()));
+  });
+
+const finishStream = (stream) =>
+  new Promise((resolve, reject) => {
+    stream.end((err) => (err ? reject(err) : resolve()));
+  });
 
 const walSeqOf = (line) => {
   try {
@@ -89,7 +110,7 @@ const walSeqOf = (line) => {
   }
 };
 
-/** 超过硬上限：丢最旧一半并归档到 .discarded（永不回灌），计数 + 限频 warn */
+/** 超过硬上限：丢最旧一半并归档 .discarded（永不回灌）+ 限频 warn；P2-04 流式：数行→分流→原子 rename，不整文件进内存 */
 async function enforceWalCap() {
   let stat;
   try {
@@ -103,38 +124,74 @@ async function enforceWalCap() {
   }
   const maxBytes = getWalMaxBytes();
   if (stat.size <= maxBytes) return;
-  let wal;
+  let totalLines = 0;
   try {
-    wal = await readRecordsStrict();
+    totalLines = await scanWalLines(async () => {});
   } catch (e) {
+    if (e?.code === 'ENOENT') return;
     walTrimFailures += 1;
     logger.error(`取证 WAL 已超限但读不回内容，本轮未裁剪：${errText(e)}`);
     return;
   }
-  if (!wal || wal.records.length < 2) return;
-  const dropCount = Math.floor(wal.records.length / 2);
-  const dropped = wal.records.slice(0, dropCount);
-  const kept = wal.records.slice(dropCount);
+  if (totalLines < 2) return;
+  const dropCount = Math.floor(totalLines / 2);
+  const tmpPath = walPath + '.tmp';
+  const out = fs.createWriteStream(tmpPath, { encoding: 'utf8', mode: 0o600 });
+  const discard = fs.createWriteStream(walPath + '.discarded', {
+    encoding: 'utf8',
+    mode: 0o600,
+    flags: 'a',
+  });
+  let dropped = 0;
+  const stageOf = (stage, e) => {
+    try {
+      e.stage = stage;
+    } catch (_) {}
+    return e;
+  };
   try {
-    await fs.promises.appendFile(walPath + '.discarded', dropped.join('\n') + '\n', {
-      encoding: 'utf8',
-      mode: 0o600,
+    await scanWalLines(async (line, index) => {
+      if (index < dropCount) {
+        try {
+          await writeLineTo(discard, line);
+          dropped += 1;
+        } catch (e) {
+          throw stageOf('archive', e);
+        }
+      } else {
+        try {
+          await writeLineTo(out, line);
+        } catch (e) {
+          throw stageOf('rewrite', e);
+        }
+      }
     });
+    try {
+      await finishStream(discard);
+    } catch (e) {
+      throw stageOf('archive', e);
+    }
+    try {
+      await finishStream(out);
+      await fs.promises.rename(tmpPath, walPath);
+    } catch (e) {
+      throw stageOf('rewrite', e);
+    }
   } catch (e) {
+    out.destroy();
+    discard.destroy();
+    await fs.promises.unlink(tmpPath).catch(() => {});
     walTrimFailures += 1;
-    logger.error(`取证 WAL 超限裁剪前归档失败：${errText(e)}——本轮不裁剪，主文件继续超限`);
+    if (e && e.stage === 'archive') {
+      logger.error(`取证 WAL 超限裁剪前归档失败：${errText(e)}——本轮不裁剪，主文件继续超限`);
+    } else {
+      logger.error(`取证 WAL 超限裁剪回写失败（累计 ${walTrimFailures} 次）：${errText(e)}`);
+    }
     return;
   }
-  try {
-    await atomicReplace(kept.length ? kept.join('\n') + '\n' : '');
-  } catch (e) {
-    walTrimFailures += 1;
-    logger.error(`取证 WAL 超限裁剪回写失败（累计 ${walTrimFailures} 次）：${errText(e)}`);
-    return;
-  }
-  walDroppedLines += dropped.length;
+  walDroppedLines += dropped;
   logger.error(
-    `取证 WAL 超过硬上限（${stat.size} > ${maxBytes} 字节），已丢弃最旧 ${dropped.length} 行` +
+    `取证 WAL 超过硬上限（${stat.size} > ${maxBytes} 字节），已丢弃最旧 ${dropped} 行` +
       `（归档到 ${walPath}.discarded，累计 ${walDroppedLines} 行）——取证证据出现缺口，请扩容或缩短保留期`
   );
 }
@@ -159,26 +216,41 @@ function appendLine(line) {
     .catch((e) => logger.warn(`取证 WAL 追加链后续操作失败：${errText(e)}`));
 }
 
-/** 按 __walSeq 精确移除已落库的行（不归档：它们已在库里） */
+/** 按 __walSeq 精确移除已落库的行（不归档：已在库里）；P2-04 流式过滤 + 原子 rename，一行未删不动主文件 */
 function trimBySeqs(seqs) {
   const seqSet = seqs instanceof Set ? seqs : new Set(seqs);
   if (seqSet.size === 0) return;
   walChain = walChain
     .then(async () => {
-      const wal = await readRecordsStrict();
-      if (!wal || wal.records.length === 0) return 0;
-      const kept = [];
       let removed = 0;
-      for (const line of wal.records) {
-        const seq = walSeqOf(line);
-        if (seq && seqSet.has(seq)) removed += 1;
-        else kept.push(line);
+      const tmpPath = walPath + '.tmp';
+      const out = fs.createWriteStream(tmpPath, { encoding: 'utf8', mode: 0o600 });
+      try {
+        await scanWalLines(async (line) => {
+          const seq = walSeqOf(line);
+          if (seq && seqSet.has(seq)) {
+            removed += 1;
+            return;
+          }
+          await writeLineTo(out, line);
+        });
+        await finishStream(out);
+        if (removed === 0) {
+          await fs.promises.unlink(tmpPath).catch(() => {});
+          return 0;
+        }
+        await fs.promises.rename(tmpPath, walPath);
+        return removed;
+      } catch (e) {
+        out.destroy();
+        await fs.promises.unlink(tmpPath).catch(() => {});
+        throw e;
       }
-      if (removed === 0) return 0;
-      await atomicReplace(kept.length ? kept.join('\n') + '\n' : '');
-      return removed;
     })
-    .catch((e) => logger.warn(`取证 WAL 裁剪失败：${errText(e)}`));
+    .catch((e) => {
+      if (e && e.code === 'ENOENT') return 0; // 主文件不存在：无可裁剪（与原实现同口径，静默）
+      logger.warn(`取证 WAL 裁剪失败：${errText(e)}`);
+    });
 }
 
 /** 启动重放：读出全部行（损坏行计数并跳过，不猜内容） */

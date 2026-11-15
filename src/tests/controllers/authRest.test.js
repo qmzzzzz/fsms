@@ -296,6 +296,40 @@ describe('认证剩余分支（批次 B2）', () => {
     });
   });
 
+  test('mfa/enable：非法格式验证码先于再验证拒绝，不烧共享 MFA 失败锁（审计 2026-11-15）', async () => {
+    await resetMfaState();
+    const enroll = await request(app)
+      .post('/api/auth/mfa/enroll')
+      .set('Authorization', `Bearer ${superToken}`)
+      .send({ currentPassword: PASSWORD });
+    expect(enroll.status).toBe(200);
+    // 直接置 MFA 已开启：本用例只关心"格式闸先于再验证"，不依赖真实 enable 往返
+    await User.findByIdAndUpdate(superUserId, { mfaEnabled: true, mfaFailCount: 3 });
+
+    // 仅带 mfaCode（无密码）⇒ requireReAuthentication 走 MFA 通道。格式非法时
+    // 必须在再验证之前就被 MFA_CODE_FORMAT 拒绝：修前这个请求会先进 verifyReauthMfa
+    // 烧一次失败计数（3→4），修后计数保持不变。
+    const bad = await request(app)
+      .post('/api/auth/mfa/enable')
+      .set('Authorization', `Bearer ${superToken}`)
+      .send({ mfaCode: 'abcdef' });
+    expect(bad.status).toBe(400);
+    expect(bad.body.errors.errorCode).toBe('MFA_CODE_FORMAT');
+    const doc = await User.findById(superUserId).select('+mfaFailCount');
+    expect(doc.mfaFailCount).toBe(3);
+
+    // 对照组：格式合法但码值错误 ⇒ 正常进入再验证并烧锁（锁机制本身不被本次修复削弱）
+    const wrong = await request(app)
+      .post('/api/auth/mfa/enable')
+      .set('Authorization', `Bearer ${superToken}`)
+      .send({ mfaCode: '000000' });
+    expect(wrong.status).toBe(403);
+    expect(wrong.body.errors.errorCode).toBe('REAUTH_MFA_INCORRECT');
+    const after = await User.findById(superUserId).select('+mfaFailCount');
+    expect(after.mfaFailCount).toBeGreaterThan(3);
+    await resetMfaState();
+  });
+
   test('恢复码重生成：错误口令 400 + 正确口令 200 且旧码作废', async () => {
     await resetMfaState();
     const enroll = await request(app)

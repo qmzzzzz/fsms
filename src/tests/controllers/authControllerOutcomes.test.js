@@ -291,13 +291,35 @@ describe('refreshToken outcome 矩阵', () => {
     expect(res.body.message).toBe(expectedMessage);
   });
 
-  test('service 抛未预期异常（含 DB 故障）：401 且不泄露内部错误', async () => {
+  test('service 抛未预期异常（含 DB 故障）：401 + error 日志/计数，不泄露内部错误', async () => {
+    // 审计 2026-11-15：兜底 catch 原先零日志，基础设施故障被吞成"凭据无效"假象；
+    // 现在必须留 error 日志 + 计数（metrics.incSecurityAlert）。计数端自身故障
+    // （两臂）都不得改变对外的 401 语义。注意：mockRestore 会连同清掉 mock.calls，
+    // 断言必须放在 restore 之前。
+    const metrics = require('../../utils/metrics');
+    const errorSpy = jest.spyOn(logger, 'error').mockImplementation(() => {});
+    const metricBoom = jest.spyOn(metrics, 'incSecurityAlert').mockImplementation(() => {
+      throw new Error('metrics down');
+    });
     authService.refreshSession.mockRejectedValue(new Error('ECONNREFUSED mongo:27017'));
-    const res = makeRes();
-    await invoke(controller.refreshToken, makeReq(), res);
-    expect(res.statusCode).toBe(401);
-    expect(res.body.message).toBe('无效的刷新令牌');
-    expect(JSON.stringify(res.body)).not.toContain('ECONNREFUSED');
+    const boomRes = makeRes();
+    await invoke(controller.refreshToken, makeReq(), boomRes);
+    expect(boomRes.statusCode).toBe(401);
+    expect(boomRes.body.message).toBe('无效的刷新令牌');
+    expect(JSON.stringify(boomRes.body)).not.toContain('ECONNREFUSED');
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('刷新令牌处理异常'));
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('ECONNREFUSED'));
+    expect(metricBoom).toHaveBeenCalledWith('refresh_session_failure', 'medium');
+
+    metricBoom.mockRestore();
+    const metricSpy = jest.spyOn(metrics, 'incSecurityAlert').mockImplementation(() => {});
+    const okRes = makeRes();
+    await invoke(controller.refreshToken, makeReq(), okRes);
+    expect(okRes.statusCode).toBe(401);
+    expect(okRes.body.errors.errorCode).toBe('REFRESH_TOKEN_INVALID');
+    expect(metricSpy).toHaveBeenCalledWith('refresh_session_failure', 'medium');
+    errorSpy.mockRestore();
+    metricSpy.mockRestore();
   });
 
   test('请求体校验失败：400 且不触达 service', async () => {

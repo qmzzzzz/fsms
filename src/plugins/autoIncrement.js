@@ -78,7 +78,7 @@ module.exports = function autoIncrementPlugin(schema, options = {}) {
    */
   async function maxPersistedSeq(model, prefix) {
     const shape = `^${escapeRegExp(prefix)}${prefix ? '-' : ''}\\d{${seqPadding},}$`;
-    const offset = prefix.length + (prefix ? 1 : 0);
+    const offset = prefix ? Buffer.byteLength(prefix, 'utf8') + 1 : 0; // $substrBytes 按字节计偏移
     const rows = await model.aggregate([
       { $match: { [field]: { $regex: shape } } },
       { $project: { _id: 0, seq: { $toInt: { $substrBytes: [`$${field}`, offset, 32] } } } },

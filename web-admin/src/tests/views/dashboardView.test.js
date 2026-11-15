@@ -171,6 +171,8 @@ const vis = (v) =>
 afterEach(() => {
   active?.handle.unmount()
   active = null
+  // 假时钟兜底还原：竞态用例中途失败时不得把 fake timers 泄漏给后续用例
+  vi.useRealTimers()
   getDashboard.mockReset()
   getUserStats.mockReset()
   getAlarms.mockReset()
@@ -346,14 +348,18 @@ describe('DashboardView 请求新鲜度守卫（定时/可见性恢复交叠）'
     })
     getUserStats.mockResolvedValue(okUsers())
     getAlarms.mockResolvedValue({ data: { data: [] } })
+    // 假时钟（参照 deviceView G9 模式）：900ms 慢响应由 advanceTimersByTimeAsync
+    // 精确点火，替代真实 1s 睡眠（P3-15）
+    vi.useFakeTimers()
     active = mountComponent(DashboardView, {
       setupStore: (pinia) => useAuthStore(pinia).setPermissions(ALL),
     })
     await flush(10)
     // 首次请求仍在途时，模拟「页面恢复可见」再次触发刷新（第二次立即返回 222）
     document.dispatchEvent(new window.Event('visibilitychange'))
+    await flush(10)
     // 等旧响应（111）到达且首屏 finally 落地：若无新鲜度守卫，111 会覆盖 222
-    await new Promise((r) => setTimeout(r, 1000))
+    await vi.advanceTimersByTimeAsync(900)
     await waitFor(() => active.find('.dashboard').classList.contains('is-loaded'), {
       message: '首屏加载完成',
     })
@@ -361,6 +367,7 @@ describe('DashboardView 请求新鲜度守卫（定时/可见性恢复交叠）'
     expect(statValues(active).slice(0, 3)).toEqual(['222', '222', '222'])
     expect(call).toBe(2)
     expect(active.errors).toEqual([])
+    vi.useRealTimers()
   })
 
   test('在途期间触发第二次刷新：旧响应后返回时不得覆盖新值（最近报警表）', async () => {
@@ -373,12 +380,15 @@ describe('DashboardView 请求新鲜度守卫（定时/可见性恢复交叠）'
     })
     getDashboard.mockResolvedValue(okDashboard())
     getUserStats.mockResolvedValue(okUsers())
+    // 假时钟：同上，替代真实 1s 睡眠（P3-15）
+    vi.useFakeTimers()
     active = mountComponent(DashboardView, {
       setupStore: (pinia) => useAuthStore(pinia).setPermissions(ALL),
     })
     await flush(10)
     document.dispatchEvent(new window.Event('visibilitychange'))
-    await new Promise((r) => setTimeout(r, 1000))
+    await flush(10)
+    await vi.advanceTimersByTimeAsync(900)
     await waitFor(() => active.find('.dashboard').classList.contains('is-loaded'), {
       message: '首屏加载完成',
     })
@@ -386,6 +396,7 @@ describe('DashboardView 请求新鲜度守卫（定时/可见性恢复交叠）'
     expect(alarmCells(active)[0][1]).toBe('新楼')
     expect(call).toBe(2)
     expect(active.errors).toEqual([])
+    vi.useRealTimers()
   })
 
   test('两次刷新互不串扰：统计与报警各自持守卫，后发者胜出且只在各自数据面生效', async () => {

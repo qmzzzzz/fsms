@@ -69,7 +69,7 @@ const WILDCARD_LITERAL_CENSUS = {
   'services/userPermissionService.js': 1,
   'utils/permissionHelper.js': 4,
   'utils/superAdmin.js': 1,
-};
+}; // 合法更新：某文件改引 RESERVED_WILDCARD_PERMISSION（或出现新的合法字面量）后按实测重算本表；改前先跑本文件，确认只有"手抄分布冻结"这一条红
 
 const stripComments = (code) => code.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
 

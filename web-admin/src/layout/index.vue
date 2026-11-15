@@ -344,7 +344,6 @@ import {
 import { useAuthStore, useAppStore } from '@/store'
 import { matchPermission } from '@/utils/permission'
 import { api } from '@/utils/api'
-import { setLocale } from '@/i18n'
 import { usePermissionSync } from '@/composables/usePermissionSync'
 import { usePullToRefresh } from '@/composables/usePullToRefresh'
 import { prefetchRoute } from '@/utils/routePrefetch'
@@ -354,7 +353,7 @@ import SearchPalette from '@/components/SearchPalette.vue'
 import ReportDialog from '@/components/ReportDialog.vue'
 import UserAvatar from '@/components/UserAvatar.vue'
 
-const { t, locale } = useI18n()
+const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
 const authStore = useAuthStore()
@@ -564,9 +563,8 @@ const onMenuSelect = () => {
 }
 
 const handleLanguageChange = (lang) => {
-  setLocale(lang)
+  // 单一入口（P3-09）：locale/<html lang>/持久化/store 镜像都在 appStore.setLanguage 内完成
   appStore.setLanguage(lang)
-  locale.value = lang
 }
 
 const refresh = () => {

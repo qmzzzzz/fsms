@@ -294,6 +294,23 @@ const gracefulShutdown = async (signal) => {
   return exitAfterFlush(0, { delayMs: 500 });
 };
 
+// P2-11：信号注册必须在模块加载期——启动窗口内收到信号走短路径退出，完成后走完整优雅关闭
+let startupComplete = false; // listen 成功且后台任务就位前为 false
+let startupSignalHandled = false; // 短路径幂等：重复信号不再重复退出
+
+const handleShutdownSignal = (signal) => {
+  if (!startupComplete) {
+    if (startupSignalHandled) return;
+    startupSignalHandled = true;
+    logger.warn(`收到 ${signal} 信号但启动尚未完成，走短路径退出（中止初始化，不等完整优雅排空）`);
+    return exitAfterFlush(0);
+  }
+  return gracefulShutdown(signal);
+};
+
+process.on('SIGTERM', () => handleShutdownSignal('SIGTERM'));
+process.on('SIGINT', () => handleShutdownSignal('SIGINT'));
+
 /**
  * PROXY protocol 前置层装配（ADR-021）。返回值三态：null=未启用（listen/error 挂到
  * 原 server——内层仍承载 WS、超时及 HTTP 连理清理）；false=「PROXY 头 + ENABLE_HTTPS」
@@ -493,11 +510,9 @@ const startServer = async () => {
       if (require('./config/validate').requiresProductionSemantics()) {
         logger.warn('生产环境运行中，请确保已配置强密钥和 CORS 白名单！');
       }
-    });
 
-    // 优雅关闭信号
-    process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-    process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+      startupComplete = true; // P2-11：listen+后台任务就位，此后信号走完整优雅关闭
+    });
   } catch (error) {
     logger.error(`服务器启动失败：${error.message}`);
     // 等日志落盘后再退出。原为紧接 process.exit(1)，而 winston 的
@@ -531,6 +546,12 @@ process.on('uncaughtException', (error) => {
 });
 
 process.on('unhandledRejection', (reason, promise) => {
+  try {
+    // P3：退出前尽力计数，让「因未处理拒绝退出」在监控侧可聚合
+    require('./utils/metricsRuntime').incUnhandledRejection(reason);
+  } catch (_) {
+    /* 指标端不可用仅保留日志 */
+  }
   if (isDevelopmentLikeEnv()) {
     logger.error(`未处理的 Promise 拒绝：${reason}`);
   } else {

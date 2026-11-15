@@ -32,6 +32,8 @@ class ApiResponse {
     });
   }
 
+  static _paginatedWarnedFields = new Set(); // paginated 非数值 meta 告警按字段去重，字段固定四个、集合有界
+
   /**
    * 分页成功响应
    * @param {Object} res - Express response 对象
@@ -43,11 +45,20 @@ class ApiResponse {
     // 分页元数据**整体缺失**时兜底成 1/0（不把"少传字段"升级成 500）；但**字段显式为 null ≠ 缺失**：
     // 游标模式的契约就是 total/totalPages=null（不做全量 count），兜成 0 会与"真的 0 条"在响应上不可分。
     const meta = pagination && typeof pagination === 'object' ? pagination : {};
-    const numOr = (v, dflt) => (v === null ? null : Number.isFinite(v) ? v : dflt);
-    const page = numOr(meta.page, 1);
-    const limit = numOr(meta.limit, 0);
-    const total = numOr(meta.total, 0);
-    const totalPages = numOr(meta.totalPages, 0);
+    const numOr = (v, dflt, field) => {
+      if (v === null || Number.isFinite(v)) return v;
+      if (v !== undefined && !this._paginatedWarnedFields.has(field)) {
+        this._paginatedWarnedFields.add(field);
+        logger.warn(
+          `ApiResponse.paginated 分页字段 ${field} 收到非数值（${typeof v}），已按契约回退默认值 ${dflt}；请检查调用方传参`
+        );
+      }
+      return dflt; // 显式传非数值（如 '2'）按契约兜默认但须告警（审计 2026-11-15）
+    };
+    const page = numOr(meta.page, 1, 'page');
+    const limit = numOr(meta.limit, 0, 'limit');
+    const total = numOr(meta.total, 0, 'total');
+    const totalPages = numOr(meta.totalPages, 0, 'totalPages');
     return res.status(200).json({
       success: true,
       message,

@@ -166,7 +166,8 @@
 
 /* 表格行入场编排：仅透明度淡入 + 逐级延迟（transform 对 table-row 在 Blink 下不生效，故不用位移）。
    动画在元素创建时播放：首屏骨架→表格替换时整表新建触发一次；
-   后续带数据刷新走原地 patch，不会重播，避免轮询噪声。 */
+   后续带数据刷新走原地 patch，不会重播，避免轮询噪声。
+   大表只编排前 20 行：逐行延迟对几百行的表是整体可感知的延迟，21 行起直接呈现终态。 */
 @keyframes table-row-in {
   from {
     opacity: 0;
@@ -178,6 +179,11 @@
 
 .el-table__body-wrapper .el-table__row {
   animation: table-row-in var(--apple-duration-base) ease both;
+}
+
+/* 21 行起不入场：立即呈现终态（animation 整体关闭后，下方的延迟规则对其无效果） */
+.el-table__body-wrapper .el-table__row:nth-child(n + 21) {
+  animation: none;
 }
 
 .el-table__body-wrapper .el-table__row:nth-child(2) {

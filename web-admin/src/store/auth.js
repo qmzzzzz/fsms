@@ -4,6 +4,7 @@ import { broadcastAuthChange } from '@/utils/sessionSync'
 import { toPermissionCodes } from '@/schemas'
 import { safeStorage, safeLocal, readSessionState } from './storage'
 import { clearReauthTicket } from '@/utils/reauthTicket'
+import { reportDegradation } from '@/utils/errorReporter'
 
 /**
  * 归一化用户对象形状（P3-38）
@@ -95,6 +96,9 @@ export const useAuthStore = defineStore('auth', {
     // 本次页面加载内是否已探测过且失败（负缓存）：匿名用户在 /login 与
     // /register 之间来回跳时不应每次都打一发 /auth/me
     restoreFailed: false,
+    // P3-11：未登录深链被守卫拦下时暂存目标路径，登录成功后经站内校验跳回
+    //（不走 URL query 回传，缩小开放重定向面；仅本标签页内存态）
+    postLoginRedirect: null,
   }),
 
   getters: {
@@ -360,6 +364,10 @@ export const useAuthStore = defineStore('auth', {
           if (hadCachedIdentity) {
             // 打不通：无法核实，但后端仍是最终鉴权方（所有请求带 cookie）。
             // 保留已有身份与页面，下一次路由切换会继续尝试核实（sessionVerified 仍为 false）。
+            // P3-10：fail-open 是安全相关降级，走统一遥测留痕（脱敏，不含 PII/凭据）
+            reportDegradation('restoreSession: 会话核实请求未打通，暂以本地缓存身份放行', {
+              status: typeof status === 'number' ? status : 'network',
+            })
             return true
           }
           return false

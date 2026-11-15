@@ -48,22 +48,30 @@ describe('bcryptRounds 范围校验（10–14）', () => {
     expect(loadConfigWith({ BCRYPT_ROUNDS: 'abc' }).bcryptRounds).toBe(12);
   });
 
-  test('越界时打印告警而非静默（避免「按危险参数运行却无人知晓」）', () => {
-    const { execFileSync } = require('child_process');
-    const out = execFileSync(
-      process.execPath,
-      ['-e', `require(process.env.CFG_ROOT + '/src/config')`],
-      {
+  test('越界时打印告警而非静默（真实 stderr 出现告警文本；合法值不误报）', () => {
+    // P3-11：原用例因 console.warn 走 stderr 拿不到而退化为源码文本断言——
+    // 改用 spawnSync 捕获**真实 stderr**：越界值必须出现告警，合法值不得出现
+    //（正反两面都钉住，告警文案同义改写不再误红、删掉告警必然变红）。
+    const { spawnSync } = require('child_process');
+    const run = (rounds) =>
+      spawnSync(process.execPath, ['-e', `require(process.env.CFG_ROOT + '/src/config')`], {
         cwd: ROOT,
-        env: { ...process.env, BCRYPT_ROUNDS: '5', CFG_ROOT: ROOT },
+        env: { ...process.env, BCRYPT_ROUNDS: rounds, CFG_ROOT: ROOT },
         encoding: 'utf8',
         stdio: 'pipe',
-      }
-    );
-    // console.warn 走 stderr，execFileSync 的 stdout 拿不到，改断言源码含告警
-    const src = read('src/config/index.js');
-    expect(src).toMatch(/BCRYPT_ROUNDS=\$\{process\.env\.BCRYPT_ROUNDS\} 超出安全范围/);
-    void out;
+      });
+
+    const warned = run('5');
+    expect(warned.status).toBe(0);
+    expect(warned.stderr).toContain('BCRYPT_ROUNDS=5 超出安全范围');
+    expect(warned.stderr).toContain('已回落默认值 12');
+
+    const oversized = run('999');
+    expect(oversized.stderr).toContain('BCRYPT_ROUNDS=999 超出安全范围');
+
+    // 对照：合法值与未设置都不得告警（守卫不得把正常配置也喊一遍狼来了）
+    expect(run('12').stderr).not.toContain('超出安全范围');
+    expect(run('').stderr).not.toContain('超出安全范围');
   });
 });
 

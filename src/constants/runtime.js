@@ -202,6 +202,12 @@ const SINGLE_PROCESS_DEPENDENCIES = Object.freeze([
     impact: '各进程各自标记各自淘汰；同一 IP 只在实际命中它的实例上被取证，抽查面随实例数缩小',
   },
   {
+    module: 'models/auditLogWriteStatics.js',
+    mechanism:
+      '敏感操作 riskFactors 判定表（DELETE/BATCH_OPERATION_ACTIONS Set：模块加载期由 AUDIT_LOG_ACTIONS 枚举一次性派生）',
+    impact: '无进程内可变状态：不可变只读查找表（P3 精确匹配用），跨实例天然一致',
+  },
+  {
     module: 'services/websocketService/index.js',
     mechanism: '客户端连接表',
     impact: '跨进程无法向指定用户推送（需 socket.io adapter）',

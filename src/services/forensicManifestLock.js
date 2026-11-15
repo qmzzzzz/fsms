@@ -1,5 +1,6 @@
 /** 取证清单的跨进程互斥锁（B-1）。 为什么需要：appendBatch 的动作是「读末行 chainHash → 算新哈希 → appendFile」，这是典型的读-改-写。进程内的并发由 forensicManifest 的 appendChain 串行化解决，但**多副本部署/多进程**同时写同一份清单时，两个进程会各自读到同一个末行，各写一条以它为首的记录 —— 链就地分叉，之后 verifyManifest 会把合法数据报成断链。 方案取舍： - 不用 flock/文件描述符锁：Windows 上语义不同（Node 也没有跨平台 flock）。 - 用 O_CREAT|O_EXCL 创建锁文件：这是 POSIX 与 Windows 上**都原子**的唯一操作。 - 必须能接管崩溃残留：持锁者进程被 kill 时锁文件留了下来，若不能接管，整个清单从此写不进去。接管判据是锁文件 mtime 超过 staleMs。 - 接管次数与超时次数都计数：锁失效是「取证静默降级」的入口，必须可见。 / / / */
 const fs = require('fs');
+const crypto = require('crypto');
 const os = require('os');
 const path = require('path');
 
@@ -18,11 +19,28 @@ const readEnvInt = (name, fallback) => {
   return Number.isFinite(v) && v >= 0 ? v : fallback;
 };
 
+let ownerToken = null; // CSPRNG（同 sharedCacheLocks）：释放/接管前必须比对再删——无条件 unlink 会删掉别人的新锁（破防窗）
+
+const readLockContent = (lockPath) => {
+  try {
+    return fs.readFileSync(lockPath, 'utf8');
+  } catch (e) {
+    if (e && e.code === 'ENOENT') return null; // 锁已不在；其他读错误→undefined（内容未知，绝不删）
+    return undefined;
+  }
+};
+
+const isOwnLock = (lockPath) => {
+  const content = readLockContent(lockPath);
+  return typeof content === 'string' && ownerToken !== null && content.startsWith(ownerToken + ':');
+};
+
 /** 尝试创建锁：成功返回 true，已存在返回 false（原子，不检查后创建） */
 const tryCreate = (lockPath) => {
   try {
     const fd = fs.openSync(lockPath, 'wx', 0o600);
-    fs.writeSync(fd, `${os.hostname()}:${process.pid}`); // 持有者标识只为排障，不参与判据
+    ownerToken = crypto.randomBytes(16).toString('hex');
+    fs.writeSync(fd, `${ownerToken}:${os.hostname()}:${process.pid}`); // 首段 token 参与释放/接管判据；hostname:pid 仅排障
     fs.closeSync(fd);
     return true;
   } catch (e) {
@@ -41,6 +59,9 @@ const tryTakeOverStale = (lockPath, staleMs) => {
     return Boolean(e && e.code === 'ENOENT');
   }
   if (Date.now() - st.mtimeMs <= staleMs) return false;
+  const observed = readLockContent(lockPath); // 只删「观察到的那份陈锁」：内容已变=第三方刚接管 ⇒ 绝不 unlink，交外层重试
+  if (typeof observed !== 'string') return false;
+  if (readLockContent(lockPath) !== observed) return false;
   try {
     fs.unlinkSync(lockPath);
   } catch (e) {
@@ -82,11 +103,15 @@ async function withLock(dir, opts, fn) {
     const value = await fn();
     return { ok: true, value };
   } finally {
-    try {
-      fs.unlinkSync(lockPath);
-    } catch (e) {
-      // 释放失败不改写结果：陈锁接管会兜住，但要留痕
-      if (e && e.code !== 'ENOENT') state.releaseFailures += 1;
+    if (isOwnLock(lockPath)) {
+      try {
+        fs.unlinkSync(lockPath); // 释放前已比对 token：锁被他人接管时绝不删（旧实现无条件 unlink 的破防窗）
+      } catch (e) {
+        // 释放失败不改写结果：陈锁接管会兜住，但要留痕
+        if (e && e.code !== 'ENOENT') state.releaseFailures += 1;
+      }
+    } else {
+      state.releaseFailures += 1; // 锁已易主/读不出内容：释放动作没有删到自己的锁，必须留痕
     }
   }
 }

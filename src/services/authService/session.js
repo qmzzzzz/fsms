@@ -16,7 +16,7 @@ const { checkUnusualTime } = require('../securityAlert');
 const canaryWatch = require('../canaryWatch');
 const AuditLog = require('../../models/AuditLog');
 // 手写审计写入是这些操作的唯一留痕，静默吞错＝审计库零痕迹（且无可观测信号）
-const { onAuditWriteFailure, awaitAuditWrite } = require('../../utils/auditWriteFailure');
+const { onAuditWriteFailure, awaitAuditWrite, errText } = require('../../utils/auditWriteFailure');
 const captchaService = require('../captchaService');
 const { decryptLoginCredential } = require('../../utils/loginCipher');
 // A3：email 已 at-rest 加密，查重不能再比对明文列（随机 IV 下相等性不成立），
@@ -279,6 +279,8 @@ async function issueLoginSession(user, ctx, username) {
     lastLoginIp: ip,
     failedLoginCount: 0,
     lockUntil: null,
+  }).catch((err) => {
+    logger.debug(`登录信息回写失败（不影响登录结果）：${errText(err)}`, { username }); // 审计 2026-11-15：只降级不打断登录
   });
 
   // 获取用户角色和权限（仅生效角色/权限项：登录响应即客户端权限快照，

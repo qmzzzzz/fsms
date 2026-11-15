@@ -117,10 +117,10 @@ const DECOY_TEMP_GRANTS = Object.freeze([
     status: 'revoked',
     createdAtOffsetMin: 4800,
     grantedAtOffsetMin: 4200,
-    expiresAtOffsetMin: -2760,
+    expiresAtOffsetMin: 2760, // P3：grantedAt(70h 前)+24h 时长 ⇒ 自然到期在 46h 前（正偏移=过去）；吊销(50h 前)早于到期，"提前结束"才成立
     decisionReason: '',
     revokeReason: '处置任务提前结束，主动回收',
-    revokedAtOffsetMin: 2400,
+    revokedAtOffsetMin: 3000,
     revokedByName: '张伟',
   }),
   Object.freeze({

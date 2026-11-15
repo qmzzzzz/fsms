@@ -70,6 +70,36 @@ describe('CORS_ORIGIN：生产只接受 https 的完整来源', () => {
       expect({ bad, errors: run(guards.collectCorsOriginErrors) }).not.toEqual({ bad, errors: [] });
     }
   });
+
+  test('浏览器永远不会发送的形态（:443/大写 host）：不报错但必须告警（审计 2026-11-15）', () => {
+    const logger = require('../../utils/logger');
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      process.env.CORS_ORIGIN = 'https://admin.example.com:443,https://Admin.Example.Com';
+      const errors = run(guards.collectCorsOriginErrors);
+      // 修前：静默放行 ⇒ 启动全绿但真实 Origin 永不匹配、写操作全 403。
+      // 修后：匹配侧已归一化，这里对非常规书写告警（不升级为致命错误）。
+      expect(errors).toEqual([]);
+      const warned = warnSpy.mock.calls.map((c) => String(c[0])).join('\n');
+      expect(warned).toContain('https://admin.example.com:443');
+      expect(warned).toContain('https://Admin.Example.Com');
+      expect(warned).toContain('浏览器永远不会发送');
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  test('规范形态（小写 host、非默认端口）不触发告警', () => {
+    const logger = require('../../utils/logger');
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      process.env.CORS_ORIGIN = 'https://admin.example.com,https://api.example.com:8443';
+      expect(run(guards.collectCorsOriginErrors)).toEqual([]);
+      expect(warnSpy).not.toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
 });
 
 describe('运维凭据强度：设置了就必须强', () => {

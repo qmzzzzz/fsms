@@ -177,6 +177,7 @@ import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index.mjs'
 import { Monitor, Cellphone, Platform, Help } from '@element-plus/icons-vue'
 import { api } from '@/utils/api'
+import { useLatestRequest } from '@/composables/useLatestRequest'
 import GlassSkeleton from '@/components/GlassSkeleton.vue'
 import { formatTime } from '@/utils/datetime'
 // IP 归属地：后端只出稳定码，中文「内网」/ 英文 "Internal network" 的本地化在这一个模块
@@ -277,21 +278,28 @@ const toggleDetail = (sid) => {
   expanded.value = next
 }
 
+// 竞态门票：与同族卡片（MyLogsCard/SecurityStatsCard 等）同一口径——
+// revoke 后的 load() 与外部触发的 load() 并发时，慢的旧响应不得覆盖新状态
+const sessionsGuard = useLatestRequest()
+
 const load = async () => {
+  const isCurrent = sessionsGuard()
   loading.value = true
   try {
     const { data: resp } = await api.auth.listSessions()
+    if (!isCurrent()) return
     sessions.value = Array.isArray(resp.data?.sessions) ? resp.data.sessions : []
     // 显式判断 === false：字段缺失（旧后端）时不应触发提示，
     // 用 `!resp.data?.currentSidPresent` 会把 undefined 也当成「不含 sid」
     currentSidPresent.value = resp.data?.currentSidPresent !== false
     loadError.value = false
   } catch (_) {
+    if (!isCurrent()) return
     // 错误提示已由拦截器统一处理；此处标记失败并保留已有数据（刷新失败时
     // 清空列表会让用户误以为其他设备都已掉线）
     loadError.value = true
   } finally {
-    loading.value = false
+    if (isCurrent()) loading.value = false
   }
 }
 

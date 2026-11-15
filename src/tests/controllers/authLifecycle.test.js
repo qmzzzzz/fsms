@@ -7,7 +7,6 @@
  */
 
 const request = require('supertest');
-const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
 const { accessToken } = require('../helpers/authResponse');
@@ -25,8 +24,6 @@ describe('认证生命周期（批次 B）', () => {
   let Role;
   let Permission;
   let SystemConfig;
-  let superToken;
-  let selfUserId;
   const stamp = `lb${Date.now()}`.replace(/\d/g, (d) => 'abcdefghij'[Number(d)]);
   const PASSWORD = randomPassword();
 
@@ -55,20 +52,12 @@ describe('认证生命周期（批次 B）', () => {
       isBuiltIn: false,
       permissions: [wildcardPerm._id],
     });
-    const admin = await User.create({
+    await User.create({
       username: `lbadmin${stamp}`,
       email: `lbadmin${stamp}@example.com`,
       password: PASSWORD,
       roles: [superRole._id],
     });
-    selfUserId = String(admin._id);
-    superToken = jwt.sign(
-      { userId: selfUserId, username: admin.username, tokenVersion: 0 },
-      process.env.JWT_SECRET,
-      { expiresIn: '24h' }
-    );
-    void superToken;
-
     const { createApp } = require('../../app');
     app = createApp();
   });

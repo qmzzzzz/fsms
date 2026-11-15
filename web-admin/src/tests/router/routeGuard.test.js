@@ -262,6 +262,18 @@ describe('A. 守卫决策表', () => {
     mockStore.currentUser = null
   })
 
+  test('已登录（须改密）访问普通受保护页：改密闸先于权限校验，一律先去 /profile', async () => {
+    // 强制改密闸的语义是「完成改密前只允许停留在个人资料页」，不限于 /register：
+    // 任何业务页（含声明了 permission 的页面）都必须先被收敛到 /profile
+    mockStore.isAuthenticated = true
+    mockStore.currentUser = { mustChangePassword: true }
+    mockStore.permissions = ['user:read']
+    const next = await runGuard(mkRoute()) // 默认 /users：普通受保护页（带 permission）
+    expect(next).toHaveBeenCalledWith('/profile')
+    // 共享单例：用完就地还原（理由同上）
+    mockStore.currentUser = null
+  })
+
   test('未登录访问公开页（/login、/register）：不探测会话，直接放行', async () => {
     // P-2：公开入口是匿名用户的高频路径，/auth/me 的 401 往返不应发生在这一层。
     // 若把恢复探测重新挪到公开路由判断之前，本用例会红。
@@ -388,6 +400,19 @@ describe('B. 真实导航（守卫 + 路由表 + 重定向链的联合行为）'
     await push('/login')
     await settle(() => router.currentRoute.value.path === '/dashboard', '等 /dashboard')
     expect(router.currentRoute.value.path).toBe('/dashboard')
+  })
+
+  test('已登录（须改密）访问普通受保护页：真实导航被拦截重定向到 /profile', async () => {
+    // 与 A 组决策表互为印证：真路由表 + 真重定向链下，强制改密账户
+    // 点任何业务页（/users）都应落在 /profile，而不是看到 403 界面
+    mockStore.isAuthenticated = true
+    mockStore.currentUser = { mustChangePassword: true }
+    mockStore.permissions = ['user:read']
+    await push('/users')
+    await settle(() => router.currentRoute.value.path === '/profile', '等 /profile')
+    expect(router.currentRoute.value.path).toBe('/profile')
+    // 共享单例：mustChangePassword 就地还原，避免泄漏到后续用例
+    mockStore.currentUser = null
   })
 
   test('未知路径：兜底重定向后仍要过守卫（已登录落在首页）', async () => {

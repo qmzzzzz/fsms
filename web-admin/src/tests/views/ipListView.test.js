@@ -30,7 +30,9 @@ vi.mock('@/utils/api', () => ({
     delete: (...a) => del(...a),
   },
   isCanceledError: (e) => Boolean(e && e.code === 'ERR_CANCELED'),
-  isHandledApiError: () => false,
+  // 与 api.js 同一判据（P3-14：此前钉死 false，组件侧死分支被测成可达）：
+  // 只有走过响应拦截器的 axios 错误才算已提示
+  isHandledApiError: (e) => e?.isAxiosError === true && !e?.config?.silent401,
   resolveErrorMessage: () => '码化文案',
 }))
 vi.mock('element-plus/es/components/message/index.mjs', () => ({
@@ -676,6 +678,27 @@ describe('IpListView 新增名单条目', () => {
     await flush(8)
     expect(ElMessage.warning).toHaveBeenCalledWith('IP 或网段格式不正确')
     expect(post).not.toHaveBeenCalled()
+  })
+
+  test('IPv6 非法形态（:::: / 缺组 / 双压缩 / 越界组数）被拒，合法形态放行（P3-24）', async () => {
+    const c = await openList([ipRow()])
+    for (const bad of ['::::', '1:2:3:4:5:6:7', '1::2::3', '1:2:3:4:5:6:7:8::', '1::2::']) {
+      await fillAdd(c, bad)
+      click(addIpBtn(c))
+      await flush(6)
+      expect(ElMessage.warning).toHaveBeenCalledWith('IP 或网段格式不正确')
+    }
+    expect(post).not.toHaveBeenCalled()
+    // 合法 IPv6（完整 8 组 / 压缩 / loopback / 带 CIDR）通过校验并发出请求
+    post.mockResolvedValue({ data: {} })
+    for (const good of ['2001:db8:0:0:0:0:0:1', '2001:db8::1', '::1', '2001:DB8::/64']) {
+      await fillAdd(c, good)
+      click(addIpBtn(c))
+      await waitFor(() => post.mock.calls.length >= 1, { message: '合法 IPv6 提交' })
+      post.mockClear()
+      await flush(4)
+    }
+    expect(c.errors).toEqual([])
   })
 
   test('黑名单新增：载荷为 IP/type/reason/时长，成功后清空表单、回第 1 页并重载', async () => {
@@ -1509,23 +1532,25 @@ describe('第22轮：逐字确认的 expected 回带 / no_rescue_path / 删除�
     expect(c.errors).toEqual([])
   })
 
-  test('(d) 删除侧 403 FULL_RANGE_FORBIDDEN：说清"这是唯一救援路径"，不是泛化删除失败', async () => {
+  test('(d) 删除侧 403 FULL_RANGE_FORBIDDEN：专属文案归拦截器，组件不重复弹（P3-14）', async () => {
     const row = ipRow({ _id: 'b-zero', type: 'black', ip: '0.0.0.0/0', reason: '全网封禁' })
     const c = await openList([row], { black: 1 })
     confirm.mockResolvedValue('confirm')
-    del.mockRejectedValue({
-      response: {
-        status: 403,
-        data: { errors: { errorCode: 'FULL_RANGE_FORBIDDEN', ip: '0.0.0.0/0' } },
-      },
-    })
+    del.mockRejectedValue(
+      Object.assign(new Error('Request failed with status code 403'), {
+        isAxiosError: true,
+        response: {
+          status: 403,
+          data: { errors: { errorCode: 'FULL_RANGE_FORBIDDEN', ip: '0.0.0.0/0' } },
+        },
+      })
+    )
     click(
       Array.from(trs(c)[0].querySelectorAll('button')).find((b) => b.textContent.includes('移除'))
     )
-    await waitFor(() => errTexts().length >= 1, { message: '删除失败提示' })
-    await flush(6)
-    expect(errTexts()).toContain(i18n.global.t('ipList.deleteRescueForbidden'))
-    expect(errTexts()).not.toContain(i18n.global.t('messages.deleteFailed'))
+    await flush(10)
+    // 走真实 isHandledApiError 判据：axios 错误视为拦截器已提示，组件不得叠加任何 toast
+    expect(errTexts()).toEqual([])
     expect(ElMessage.success).not.toHaveBeenCalled()
     expect(c.errors).toEqual([])
   })

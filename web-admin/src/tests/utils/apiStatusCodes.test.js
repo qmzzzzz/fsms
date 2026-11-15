@@ -20,6 +20,7 @@ const require = createRequire(import.meta.url)
 const { ERROR_CODES } = require('../../../../src/utils/errorCodes.js')
 
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
+import axios from 'axios'
 import { apiClient } from '@/utils/api'
 import i18n from '@/i18n'
 
@@ -115,7 +116,10 @@ describe('拦截器状态码覆盖（P1-15）', () => {
   })
 
   test('票据 401（REAUTH_TICKET_REQUIRED）：不得触发刷新链或强制登出', async () => {
-    const refreshSpy = vi.spyOn(apiClient, 'post')
+    // P2-28：刷新链走裸 axios.post（api.js doRefreshToken 刻意绕开 apiClient
+    // 拦截器），spy 打在 apiClient.post 上盯错对象——豁免分支被删也恒绿。
+    // 这里直接盯 axios.post：豁免分支一旦失效，doRefreshToken 会立刻命中本 spy。
+    const refreshSpy = vi.spyOn(axios, 'post')
     await respondWith(401, { errors: { errorCode: 'REAUTH_TICKET_REQUIRED' } })
     // 票据缺失只是「需要二次验证」：不提示、不刷新、不跳登录；由页面弹框取票
     expect(ElMessage.error).not.toHaveBeenCalled()
@@ -128,10 +132,25 @@ describe('拦截器状态码覆盖（P1-15）', () => {
     const blob = new Blob([JSON.stringify({ errors: { errorCode: 'REAUTH_TICKET_INVALID' } })], {
       type: 'application/json',
     })
-    const refreshSpy = vi.spyOn(apiClient, 'post')
+    const refreshSpy = vi.spyOn(axios, 'post')
     await respondWith(401, blob)
     expect(ElMessage.error).not.toHaveBeenCalled()
     expect(refreshSpy).not.toHaveBeenCalled()
+    refreshSpy.mockRestore()
+  })
+
+  test('有牙对照：普通 401 确实会经裸 axios.post 走刷新链（证明上述 not.called 盯对了对象）', async () => {
+    // 非票据 401 → doRefreshToken → 裸 axios.post('/auth/refresh')；刷新被明确
+    // 拒绝（401）→ forceSessionReset。本用例证明 spy 能看到真实刷新链——
+    // 于是上面「票据 401 不触发刷新」的断言才不是恒真。
+    const refreshSpy = vi
+      .spyOn(axios, 'post')
+      .mockRejectedValue({ response: { status: 401, data: {} } })
+    await respondWith(401, { errors: { errorCode: 'SESSION_EXPIRED' } })
+    expect(refreshSpy).toHaveBeenCalledTimes(1)
+    expect(String(refreshSpy.mock.calls[0][0])).toContain('/auth/refresh')
+    // 刷新被明确拒绝 → 会话判死 → 强制登出提示
+    expect(ElMessage.error).toHaveBeenCalledTimes(1)
     refreshSpy.mockRestore()
   })
 

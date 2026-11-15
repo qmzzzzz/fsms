@@ -271,6 +271,33 @@ describe('authService gap C - catch handler coverage', () => {
       expect(callCount).toBeGreaterThanOrEqual(1);
       spy.mockRestore();
     });
+
+    test('登录成功后 lastLoginAt 回写失败 → 登录仍 OK（审计 2026-11-15：唯一未挂 catch 的写操作）', async () => {
+      const user = await makeUser('cuid5');
+      const origFindByIdAndUpdate = User.findByIdAndUpdate.bind(User);
+      let injected = 0;
+      const spy = jest.spyOn(User, 'findByIdAndUpdate').mockImplementation(function (...args) {
+        // 只对成功路径的"登录信息回写"注入故障：该更新以 lastLoginAt 为特征字段，
+        // 不会误伤失败计数递增等其他 findByIdAndUpdate 调用
+        if (args[1] && Object.prototype.hasOwnProperty.call(args[1], 'lastLoginAt')) {
+          injected += 1;
+          return Promise.reject(new Error('db jitter'));
+        }
+        return origFindByIdAndUpdate(...args);
+      });
+      try {
+        const result = await authService.loginUser(
+          { username: user.username, password: PASSWORD },
+          defaultCtx()
+        );
+        // 修复前：回写 reject 沿 async 链上抛 ⇒ 已验证成功的登录被打成 500；
+        // 修复后：catch 记 debug 日志，登录结果不受影响
+        expect(result.outcome).toBe('OK');
+        expect(injected).toBe(1);
+      } finally {
+        spy.mockRestore();
+      }
+    });
   });
 
   describe('loginUser - MFA audit catch handlers', () => {

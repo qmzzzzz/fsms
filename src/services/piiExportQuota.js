@@ -3,6 +3,7 @@ const AuditLog = require('../models/AuditLog');
 const logger = require('../utils/logger');
 const { readPositiveNumberEnv } = require('../utils/envNumber');
 const sharedCache = require('./sharedCache');
+const { businessDateParts, businessDayBounds } = require('../constants/timezone');
 
 const WINDOW_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_QUOTA = 5;
@@ -30,23 +31,17 @@ const recentExportFilter = (userId, since) => ({
 
 const windowStart = (now) => new Date(now.getTime() - WINDOW_MS);
 
-/** UTC+8 挂钟下的当日键：配额按自然日，不随实例/容器时区漂移 */
+/** 业务时区挂钟下的当日键：配额按业务自然日，不随实例/容器时区漂移（P3：改走 constants/timezone 单一口径，不再硬编码 UTC+8） */
 const quotaDayKey = (userId, now) => {
-  const local = new Date(now.getTime() + 8 * 60 * 60 * 1000);
-  const ymd = `${local.getUTCFullYear()}${String(local.getUTCMonth() + 1).padStart(2, '0')}${String(
-    local.getUTCDate()
-  ).padStart(2, '0')}`;
+  const { year, month, day } = businessDateParts(now);
+  const ymd = `${year}${String(month).padStart(2, '0')}${String(day).padStart(2, '0')}`;
   return `${REDIS_KEY_PREFIX}${userId}:${ymd}`;
 };
 
 const retryAfterOfDay = (now) => {
-  const local = new Date(now.getTime() + 8 * 60 * 60 * 1000);
-  const nextMidnight = Date.UTC(
-    local.getUTCFullYear(),
-    local.getUTCMonth(),
-    local.getUTCDate() + 1
-  );
-  const waitMs = nextMidnight - local.getTime();
+  const { year, month, day } = businessDateParts(now);
+  const nextDay = new Date(Date.UTC(year, month - 1, day + 1)).toISOString().slice(0, 10);
+  const waitMs = businessDayBounds(nextDay).start.getTime() - now.getTime();
   return Math.min(Math.max(Math.ceil(waitMs / 1000), 60), WINDOW_MS / 1000);
 };
 

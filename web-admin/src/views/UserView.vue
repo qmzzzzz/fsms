@@ -586,6 +586,7 @@ import { usePermission } from '@/composables/usePermission'
 import { useLatestRequest } from '@/composables/useLatestRequest'
 import { useAuthStore } from '@/store'
 import { createSubmissionKey } from '@/utils/idempotency'
+import { withSyncLock } from '@/utils/withSyncLock'
 
 const { hasPerm } = usePermission()
 const { t } = useI18n()
@@ -1180,7 +1181,7 @@ const handleBatchDelete = async () => {
   }
 }
 
-const handleDelete = async (row) => {
+const handleDelete = withSyncLock(async (row) => {
   try {
     await ElMessageBox.confirm(
       t('messages.userDeactivateConfirm', { username: row.username }),
@@ -1197,10 +1198,10 @@ const handleDelete = async (row) => {
       if (!isHandledApiError(e)) ElMessage.error(t('messages.deleteFailed'))
     }
   }
-}
+})
 
 /** 管理员重置用户口令（P1-2：返回一次性临时口令，首次登录强制改密） */
-const handleResetPassword = async (row) => {
+const handleResetPassword = withSyncLock(async (row) => {
   try {
     await ElMessageBox.confirm(
       t('user.resetPasswordConfirm', { username: row.username }),
@@ -1223,10 +1224,10 @@ const handleResetPassword = async (row) => {
       loadData()
     },
   })
-}
+})
 
 /** 管理员重置用户两步验证（丢失认证器时的救济操作，成功后该用户被强制下线） */
-const handleResetMfa = async (row) => {
+const handleResetMfa = withSyncLock(async (row) => {
   try {
     await ElMessageBox.confirm(
       `${t('user.resetMfaConfirm')}「${row.username}」?`,
@@ -1243,7 +1244,7 @@ const handleResetMfa = async (row) => {
       loadData()
     },
   })
-}
+})
 
 // 锁定/解锁的行级忙态：重入守卫必须在首个 await 前同步置位（ElMessageBox 弹出
 // 需要一帧，按钮的 :disabled 要等渲染才生效；同一 tick 的第二次点击/长按回车
@@ -1307,7 +1308,7 @@ const handleToggleLock = async (row) => {
   }
 }
 
-const submitForm = async () => {
+const submitForm = withSyncLock(async () => {
   if (!formRef.value) return
   try {
     const valid = await formRef.value.validate()
@@ -1370,9 +1371,9 @@ const submitForm = async () => {
   } finally {
     dialog.submitting = false
   }
-}
+})
 
-const submitRoleAssignment = async () => {
+const submitRoleAssignment = withSyncLock(async () => {
   roleDialog.submitting = true
   try {
     await api.users.assignRoles(roleDialog.userId, {
@@ -1386,7 +1387,7 @@ const submitRoleAssignment = async () => {
   } finally {
     roleDialog.submitting = false
   }
-}
+})
 
 const resetForm = () => {
   dialog.form = {

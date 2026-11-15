@@ -495,6 +495,53 @@ describe('D-1 部署工作流：结构与关键不变量', () => {
     expect(block).toMatch(/group:\s*deploy-\$\{\{ inputs\.environment \}\}/);
     expect(block).toMatch(/cancel-in-progress:\s*false/);
   });
+
+  // P2-33（2026-11-15 审计）：凭据探测旧实现只 ::warning 就落 self-hosted——
+  // 没有带 deploy 标签的在线 runner 时 deploy-self-hosted 会永远停在「等 runner」。
+  // 现在必须在 preflight 里查 runner 存在性，不存在即 exit 1。
+  test('凭据探测 fail-closed：无 SSH 密钥且无在线 deploy runner 时必须显式失败', () => {
+    const preflightRun = runScriptOf('preflight');
+    // runner 存在性真的被查询（gh api + deploy 标签 + 在线状态），不是只写警告
+    expect(preflightRun).toMatch(/actions\/runners/);
+    expect(preflightRun).toMatch(/index\("deploy"\)/);
+    expect(preflightRun).toMatch(/status == "online"/);
+    // 查不到时 exit 1（不是 warning 后继续）
+    expect(preflightRun).toMatch(/exit 1/);
+    expect(preflightRun).not.toMatch(/::warning::未配置 DEPLOY_HOST/);
+  });
+
+  // P2-33：两个部署 job 此前都没有 timeout-minutes——凭据/网络问题会让 job 挂到默认上限。
+  test('两个部署 job 与 dry-run job 都有 timeout-minutes', () => {
+    for (const job of ['deploy-self-hosted', 'deploy-ssh', 'dry-run']) {
+      const block = jobBlock(job);
+      expect({ job, hasTimeout: /timeout-minutes:\s*\d+/.test(block) }).toMatchObject({
+        job,
+        hasTimeout: true,
+      });
+    }
+  });
+
+  // P2-33：hosted dry-run job——dry_run=true 时在 hosted runner 上实跑
+  // checkout → compose 渲染 → deploy.js --dry-run，不做任何 SSH 投递。
+  test('dry-run job：消费验签后的 image_ref、渲染 compose、打印计划，不投递', () => {
+    const block = jobBlock('dry-run');
+    expect(block).toMatch(/needs:\s*preflight/);
+    expect(block).toMatch(/if:\s*inputs\.dry_run == true/);
+    expect(block).toMatch(/runs-on:\s*ubuntu-latest/);
+    // 不做 SSH 投递：dry-run job 里不得出现 ssh / DEPLOY_HOST
+    expect(block).not.toMatch(/ssh\s/);
+    expect(block).not.toMatch(/DEPLOY_HOST/);
+    // compose 配置渲染 + 发布计划打印都是可执行行（不是注释）
+    const execLines = block
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l && !l.startsWith('#'));
+    expect(execLines.some((l) => l.includes('docker compose config'))).toBe(true);
+    expect(execLines.some((l) => l.includes('node scripts/deploy.js'))).toBe(true);
+    // 消费的是 preflight 验签后的 digest 引用，不是原始 tag
+    expect(block).toMatch(/APP_IMAGE:\s*\$\{\{\s*needs\.preflight\.outputs\.image_ref\s*\}\}/);
+    expect(block).not.toMatch(/needs\.preflight\.outputs\.image_tag/);
+  });
 });
 
 /**
@@ -540,7 +587,7 @@ describe('门禁执行位置：脚本与证据必须在同层', () => {
     // 这一条拦的是"门禁脚本本身不存在"这类死闸：printf 生成的是**远程**命令，
     // 不在本 job 执行，故排除——两条部署路径的差异正在这里。
     const offenders = [];
-    for (const name of ['preflight', 'deploy-self-hosted', 'deploy-ssh']) {
+    for (const name of ['preflight', 'dry-run', 'deploy-self-hosted', 'deploy-ssh']) {
       const block = jobBlock(name);
       // 三类行都不算"本 job 执行"：注释（说明文字，仓库里到处引脚本名）、
       // printf 生成串（那是**远程**命令），以及纯 echo 文案。

@@ -88,7 +88,12 @@ describe('getUserStats self 范围 aggregate cast', () => {
   });
 
   afterAll(async () => {
-    if (mongoose.connection.readyState !== 0) await mongoose.connection.close();
+    if (mongoose.connection.readyState !== 0) {
+      // P3-24：回收自建用户（用户名以 stamp 结尾）与角色（码以大写 stamp 结尾）
+      await User.deleteMany({ username: new RegExp(`${stamp}$`) }).catch(() => {});
+      await Role.deleteMany({ code: new RegExp(`${stamp.toUpperCase()}$`) }).catch(() => {});
+      await mongoose.connection.close();
+    }
   });
 
   test('self 域操作员统计精确命中自己创建的那一条（既非 0、也非全量）', async () => {

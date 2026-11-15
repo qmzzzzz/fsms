@@ -45,3 +45,25 @@ test('错误口令被拒且有明确提示', async ({ page }) => {
       .filter({ hasText: /用户名或密码错误|登录失败，请核对用户名与密码/ })
   ).toBeVisible({ timeout: 10_000 });
 });
+
+test('登出后访问受保护路由被重定向回 /login', async ({ page }) => {
+  await loginViaUI(page, USER, PASS);
+  await expectLoggedIn(page);
+
+  // 登出走真实 UI 链路：右上角用户下拉 → 「退出登录」→ 确认弹窗 → 确认。
+  // 布局把登出项渲染进 el-dropdown（command="logout"），确认弹窗文案来自
+  // auth.logoutConfirm（zh-CN.js:344 = 确定要退出登录吗？）。
+  await page.locator('.user-dropdown').hover();
+  await page.locator('.el-dropdown-menu__item').filter({ hasText: '退出登录' }).click();
+  const confirmBox = page.locator('.el-message-box').filter({ hasText: '确定要退出登录吗' });
+  await confirmBox.waitFor({ state: 'visible', timeout: 10_000 });
+  await confirmBox.getByRole('button', { name: '确定', exact: true }).click();
+
+  // 优雅退出遮罩动画（约 600ms）结束后才跳转登录页
+  await page.waitForURL(/\/login(?:[?#].*)?$/, { timeout: 20_000 });
+
+  // 只读安全旅程：会话已注销时直接访问受保护路由，路由守卫必须重定向回 /login
+  // （router/index.js 的 beforeEach：requiresAuth !== false 且未认证 ⇒ next('/login')）
+  await page.goto('/dashboard');
+  await expect(page).toHaveURL(/\/login(?:[?#].*)?$/);
+});

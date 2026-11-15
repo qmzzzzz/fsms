@@ -132,7 +132,7 @@ describe('A4 接线闸（只登记不接线 = 缺陷）', () => {
     // POST 的权限与二次验证一个都不能少
     expect(routes).toContain("router.post('/export/pii',authenticate,requirePiiExportType,");
     expect(routes).toContain(
-      "checkPermission('report:export'),checkPermission('pii:export'),requirePiiExportQuota,requireReAuthentication(),reportController.exportReport"
+      "checkPermission('report:export'),checkPermission('pii:export'),requirePiiExportQuota,reauthCredentialValidation,consumeValidation(),requireReAuthentication(),reportController.exportReport"
     );
     // A-8：配额闸也得在二次验证之前——注定被配额拒绝的请求不该先烧掉凭据尝试
     expect(routes.indexOf('requirePiiExportQuota')).toBeLessThan(

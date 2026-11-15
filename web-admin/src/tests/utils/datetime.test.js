@@ -70,13 +70,11 @@ describe('formatTime 时间串', () => {
   })
 
   test('0 是合法的纪元时间戳，不得被 if (!v) 吞成占位符（P1⑤）', () => {
-    const expected = localDateStr(new Date(0)) + ' 0' + '0:00:00'
     const text = formatTime(0)
     expect(text).not.toBe('-')
     expect(text).not.toContain('NaN')
     expect(text).toBe(formatTime(new Date(0)))
     expect(text.startsWith(localDateStr(new Date(0)))).toBe(true)
-    expect(expected.length).toBeGreaterThan(0)
   })
 
   test('非法日期串返回占位符 -，不抛错也不输出 Invalid Date', () => {

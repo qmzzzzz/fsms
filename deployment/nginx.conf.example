@@ -225,8 +225,12 @@ server {
     # resolver 223.5.5.5 119.29.29.29 valid=300s;
     # resolver_timeout 5s;
 
-    # ===== HSTS（仅在 HTTPS 上下发才有意义；确认全站 HTTPS 后再启用 preload） =====
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+    # ===== HSTS（仅在 HTTPS 上下发才有意义） =====
+    # preload **不默认下发**（2026-11-15 审计）：提交 preload 列表后撤销以月计
+    # （浏览器内置名单），必须先确认全站（含所有子域）长期 HTTPS 再启用。
+    # 确认后改用下一行（含 preload）并删除本行：
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    # add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
 
     # ===== 全套安全响应头 =====
     add_header X-Content-Type-Options "nosniff" always;
@@ -295,7 +299,8 @@ server {
     # 都会关掉对 server 级头的继承（L-09），所以是整套而非只写 CSP。
     location / {
         try_files $uri $uri/ /index.html;
-        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+        # 与 server 级同口径：preload 默认不下发（启用条件见 server 级 HSTS 段）
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
         add_header X-Content-Type-Options "nosniff" always;
         add_header X-Frame-Options "DENY" always;
         add_header Referrer-Policy "same-origin" always;
@@ -341,7 +346,8 @@ server {
     location /assets/ {
         expires 1y;
         add_header Cache-Control "public, immutable" always;
-        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+        # 与 server 级同口径：preload 默认不下发（启用条件见 server 级 HSTS 段）
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
         add_header X-Content-Type-Options "nosniff" always;
         add_header X-Frame-Options "DENY" always;
         add_header Referrer-Policy "same-origin" always;

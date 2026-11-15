@@ -139,6 +139,7 @@ import { formatTime } from '@/utils/datetime'
 import { useLatestRequest } from '@/composables/useLatestRequest'
 import { useCountUp } from '@/composables/useCountUp'
 import { api, isCanceledError } from '@/utils/api'
+import { isPageHidden } from '@/utils/versionWatcher'
 // 类型/状态 → i18n 标签映射（O-1 抽取的单一事实来源，与 ReportView 共用）
 import { makeAlarmTypeLabels, makeAlarmStatusLabels } from '@/utils/labelMaps'
 // D-2：欢迎卡/图表区/最近报警拆为子组件（echarts 与图表数据加载随之迁出）
@@ -257,7 +258,7 @@ let refreshTimer = null
 const startAutoRefresh = () => {
   refreshTimer = setInterval(
     () => {
-      if (document.visibilityState === 'visible') {
+      if (!isPageHidden()) {
         loadDashboardData()
         loadRecentAlarms()
         chartsRef.value?.load?.()
@@ -269,7 +270,7 @@ const startAutoRefresh = () => {
 }
 
 const handleVisibilityChange = () => {
-  if (document.visibilityState === 'visible') {
+  if (!isPageHidden()) {
     loadDashboardData()
     loadRecentAlarms()
     chartsRef.value?.load?.()

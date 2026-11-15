@@ -564,9 +564,13 @@ apiClient.interceptors.request.use(
       if (callerSignal.aborted) {
         controller.abort(callerSignal.reason)
       } else {
-        callerSignal.addEventListener('abort', () => controller.abort(callerSignal.reason), {
-          once: true,
-        })
+        const forwardAbort = () => controller.abort(callerSignal.reason)
+        callerSignal.addEventListener('abort', forwardAbort, { once: true })
+        // P3-21：正常完成路径也要摘掉挂在调用方 signal 上的转发监听，
+        // 否则同一个 AbortController 的多次请求会在其上累积监听器
+        config.__releaseCallerSignal = () => {
+          callerSignal.removeEventListener('abort', forwardAbort)
+        }
       }
     }
     config.signal = controller.signal
@@ -646,8 +650,8 @@ const rememberDrift = (key) => {
   }
 }
 
-/** 供测试断言当前去重集合规模（LRU 上限回归用） */
-export const __getDriftCount = () => reportedDrifts.size
+/** 供测试断言当前去重集合规模（LRU 上限回归用）；生产构建剔除（P3-26） */
+export const __getDriftCount = import.meta.env.DEV ? () => reportedDrifts.size : undefined
 
 /**
  * 校验响应形状，失败时告警但不阻断
@@ -701,7 +705,8 @@ export const __resetDriftReports = () => reportedDrifts.clear()
 
 apiClient.interceptors.response.use(
   (response) => {
-    // 请求完成，清理对应的 AbortController
+    // 请求完成，清理对应的 AbortController 与调用方 signal 上的转发监听（P3-21）
+    response.config?.__releaseCallerSignal?.()
     if (response.config?.__reqKey) {
       pendingControllers.delete(response.config.__reqKey)
     }
@@ -712,7 +717,8 @@ apiClient.interceptors.response.use(
     return response
   },
   async (error) => {
-    // 清理已取消/完成请求的控制器
+    // 清理已取消/完成请求的控制器与调用方 signal 上的转发监听（P3-21）
+    error.config?.__releaseCallerSignal?.()
     const reqKey = error.config?.__reqKey
     if (reqKey) pendingControllers.delete(reqKey)
 

@@ -314,7 +314,21 @@ const tableData = ref([])
 // 名单分页：后端 /security/ip-list 支持分页，limit=200 一次性拉取会导致超出部分不可见
 const page = reactive({ current: 1, size: 20, total: 0 })
 
-// 校验 IPv4/IPv6 地址或 CIDR 网段格式（IPv4 每段 ≤255、前缀 ≤32；IPv6 粗校验、前缀 ≤128）
+// IPv6 形态校验：组 1-4 位十六进制；'::' 至多一次且两侧显式组合计 ≤7（'::' 至少代表一个零组）；
+// 无压缩形态必须恰好 8 组。此前仅限字符集（'::::' 这类非法形态可过）。
+const validIpv6 = (addr) => {
+  const halves = addr.split('::')
+  if (halves.length > 2) return false
+  const groupsOk = (seg) => seg === '' || seg.split(':').every((g) => /^[0-9a-fA-F]{1,4}$/.test(g))
+  if (halves.length === 2) {
+    const count = (seg) => (seg === '' ? 0 : seg.split(':').length)
+    return groupsOk(halves[0]) && groupsOk(halves[1]) && count(halves[0]) + count(halves[1]) <= 7
+  }
+  const groups = addr.split(':')
+  return groups.length === 8 && groups.every((g) => /^[0-9a-fA-F]{1,4}$/.test(g))
+}
+
+// 校验 IPv4/IPv6 地址或 CIDR 网段格式（IPv4 每段 ≤255、前缀 ≤32；IPv6 前缀 ≤128）
 const validateIpOrCidr = (str) => {
   const s = String(str || '').trim()
   if (!s || /\s/.test(s)) return false
@@ -328,7 +342,7 @@ const validateIpOrCidr = (str) => {
   const isV6 = addr.includes(':')
   if (isV6) {
     if (prefix !== null && prefix > 128) return false
-    return /^[0-9a-fA-F:]+$/.test(addr)
+    return validIpv6(addr)
   }
   if (prefix !== null && prefix > 32) return false
   const m = addr.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/)
@@ -665,16 +679,10 @@ const handleRemove = async (row) => {
   } catch (e) {
     if (e !== 'cancel' && e !== 'close') {
       // O-6: 点右上角 X(close) 亦属用户主动放弃，不误报删除失败
-      // 具体原因已由响应拦截器提示，组件不再叠加一条泛化「删除失败」
-      // 删除侧 403 多了一种触发（删掉全网段黑名单的唯一救援路径）：它与「权限不足」的
-      // 下一步动作完全不同（删了就再也没人能自行解除封锁），不能与泛化删除失败同档
-      const code = e?.response?.data?.errors?.errorCode
+      // 403 的具体原因（含 FULL_RANGE_FORBIDDEN「删掉全网段唯一救援路径」的专属文案）
+      // 已由响应拦截器按错误码提示；组件只对未经拦截器的异常补一条泛化兜底
       if (!isHandledApiError(e)) {
-        ElMessage.error(
-          code === 'FULL_RANGE_FORBIDDEN'
-            ? t('ipList.deleteRescueForbidden')
-            : t('messages.deleteFailed')
-        )
+        ElMessage.error(t('messages.deleteFailed'))
       }
     }
   }

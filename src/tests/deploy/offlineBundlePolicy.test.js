@@ -480,6 +480,8 @@ describe('命令行：未知参数必报错，默认演练', () => {
     expect(policy.parseArgs(['--bundle', '/x/y']).bundle).toBe('/x/y');
     expect(policy.parseArgs(['--dry-run']).dryRun).toBe(true);
     expect(policy.parseArgs(['--dry-run=false']).dryRun).toBe(false);
+    // 值里含 = 时不得被 split 截断（2026-11-15 审计）：只在第一个 = 处切分
+    expect(policy.parseArgs(['--bundle=/x/y=z']).bundle).toBe('/x/y=z');
   });
 
   test('拼错 --bundle-rootz —— 报错，且文案里能照抄到正确拼写', () => {

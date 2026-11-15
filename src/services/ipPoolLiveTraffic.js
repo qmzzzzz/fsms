@@ -1,7 +1,7 @@
 /** 封段前的业务活跃度护栏（T6-3）：该网段内若仍有真实业务请求，拒绝封段。通用安全产品没有这条判据——它只属于本系统：封掉一栋楼的后果是消防报警报不上来，不是几个访客看到 403。 */
 const logger = require('../utils/logger');
 const AuditLog = require('../models/AuditLog');
-const { ipMatchesEntry } = require('../utils/ipUtils');
+const { ipMatchesEntry, parseIP } = require('../utils/ipUtils');
 const { cidrOf } = require('./ipPoolCluster');
 
 const ACTIVITY_METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'];
@@ -13,12 +13,15 @@ const CANDIDATE_LIMIT = 200;
 const state = { checks: 0, refused: 0, lastError: null };
 
 const segmentOfIp = (ip) => {
-  if (!ip || typeof ip !== 'string') return null;
-  const parts = ip.split('.');
-  if (parts.length === 4) return cidrOf(parts.slice(0, 3).join('.'));
-  const groups = ip.split(':');
-  if (groups.length >= 4) return cidrOf(groups.slice(0, 4).join(':'));
-  return null;
+  const addr = parseIP(ip); // P3：改走 ipaddr 解析，压缩形态 IPv6（2001:db8::1）取 /64 前缀不再产出非法 CIDR；非法/歧义输入返回 null（宁漏不造）
+  if (!addr) return null;
+  if (addr.kind() === 'ipv4') return cidrOf(addr.octets.slice(0, 3).join('.'));
+  const v6 = addr.isIPv4MappedAddress && addr.isIPv4MappedAddress() ? addr.toIPv4Address() : addr;
+  if (v6.kind() === 'ipv4') return cidrOf(v6.octets.slice(0, 3).join('.'));
+  const head = v6.toByteArray().slice(0, 8); // /64 前缀 = 前 8 字节
+  const groups = [];
+  for (let i = 0; i < 8; i += 2) groups.push(((head[i] << 8) | head[i + 1]).toString(16));
+  return cidrOf(groups.join(':'));
 };
 
 // 取行漏斗只管「别把整张表捞进来」，判据由 ipMatchesEntry 出（本仓库唯一的 CIDR 包含判断）。唯一硬要求是**超集**：窄一格就漏行，答 live:false 放行封禁（fail-open）；宽了只是多挡封禁。

@@ -6,6 +6,7 @@ const loginRateLimitAudit = require('../services/loginRateLimitAudit');
 const config = require('../config');
 const logger = require('../utils/logger');
 const { normalizeIP, clientIpForSecurityDecision } = require('../utils/ipUtils');
+const { stripControlChars } = require('../utils/helpers');
 const { SUPER_ADMIN_ROLE_CODE } = require('../utils/superAdmin');
 const { makeSharedStore } = require('./rateLimitStore');
 const { isProbeRequest } = require('../constants/probePaths');
@@ -413,6 +414,10 @@ const normalizeLoginRateKey = (username) => {
   return LOGIN_RATE_KEY_OVERSIZED;
 };
 
+/** 登录账号维度限流告警文案（抽成纯函数供测试断言）。P2-07：username 请求方可控，插值前必须过 stripControlChars 防换行伪造日志（上限 64 同键长口径） */
+const loginUserLimitWarnMessage = (req) =>
+  `登录账号维度限流触发：username=${stripControlChars(normalizeLoginRateKey(req.body?.username), 64) || '-'}, ip=${clientIpForSecurityDecision(req)}（可能存在分布式撞单账号攻击）`;
+
 /**
  * 登录限流器（账号维度）：与上方 IP 维度限流器互补——IP 维度防「单 IP 撞库/轮换用户名」，账号维度防
  * 「分布式撞单账号」（多个 IP 各自少量尝试同一用户名，IP 维度无法察觉）。单账号 20 次/15 分钟，跳过
@@ -433,9 +438,7 @@ const loginUserLimiter = rateLimit({
   legacyHeaders: false,
   handler: (req, res) => {
     loginRateLimitAudit.recordLimitedAttempt(req, 'login-user');
-    logger.warn(
-      `登录账号维度限流触发：username=${normalizeLoginRateKey(req.body?.username) || '-'}, ip=${clientIpForSecurityDecision(req)}（可能存在分布式撞单账号攻击）`
-    );
+    logger.warn(loginUserLimitWarnMessage(req));
     respond429(res, {
       success: false,
       message: '该账户登录尝试次数过多，请稍后再试或联系管理员',
@@ -797,6 +800,7 @@ module.exports = {
   avatarReadUserLimiter,
   // 仅供测试：账号维度键的归一化与有界化规则（空格填充分裂桶、超长 username 撑爆键都由它盯着）
   normalizeLoginRateKey,
+  loginUserLimitWarnMessage,
   LOGIN_RATE_KEY_MAX_CHARS,
   LOGIN_RATE_KEY_OVERSIZED,
   // 仅供测试与 wellKnownRoutes 复用：限流键 IP 部分的归一化（::ffff: 双桶回归由它盯着）

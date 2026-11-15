@@ -14,6 +14,11 @@
 const socketIo = require('socket.io');
 const logger = require('../../utils/logger');
 const config = require('../../config');
+const {
+  parseCorsOriginList,
+  devCorsFallback,
+  normalizeCorsOrigin,
+} = require('../../config/corsOrigins');
 const { HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT } = require('./shared');
 const handshake = require('./handshake');
 const lifecycle = require('./lifecycle');
@@ -30,20 +35,12 @@ class WebSocketService {
       logger.error('CORS_ORIGIN 不能设置为通配符 "*"，WebSocket 服务已拒绝启动（安全策略）');
       throw new Error('CORS_ORIGIN 不能为通配符 "*"');
     }
-    // 【I-10】与 app.js 中 HTTP CORS 的来源回退列表保持完全一致：
+    // 【I-10】与 app.js 中 HTTP CORS 的来源解析/回退同走 config/corsOrigins 单源：
     // 配置了 CORS_ORIGIN 时按逗号分隔白名单；未配置时回退同一本地开发白名单，
-    // 避免 WS 与 HTTP 两侧同源策略漂移导致跨域携带 cookie 行为不一致（改动需两侧同步）
+    // 避免 WS 与 HTTP 两侧同源策略漂移导致跨域携带 cookie 行为不一致
     const corsOrigin = rawOrigin
-      ? rawOrigin
-          .split(',')
-          .map((s) => s.trim())
-          .filter(Boolean)
-      : [
-          'http://localhost:3001',
-          'http://127.0.0.1:3001',
-          'http://localhost:5173',
-          'http://127.0.0.1:5173',
-        ];
+      ? parseCorsOriginList(rawOrigin).map(normalizeCorsOrigin)
+      : devCorsFallback();
 
     this.io = socketIo(server, {
       cors: {

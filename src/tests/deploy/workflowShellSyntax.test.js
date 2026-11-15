@@ -104,9 +104,21 @@ const workflowFiles = () => fs.readdirSync(WF_DIR).filter((f) => /\.ya?ml$/i.tes
 
 const allBlocks = () => workflowFiles().flatMap((f) => extractRunBlocks(f));
 
-/** 只有 bash/sh 语义的步骤适用本判据 */
-const BASH_LIKE = /^$|bash|sh|python/i;
-const isBashLike = (shell) => BASH_LIKE.test(shell || '');
+/**
+ * 只有 bash/sh 语义的步骤适用本判据。
+ * GitHub Actions 的 shell 取值是闭集：bash/sh 适用本判据；pwsh/powershell/cmd/python 等
+ * 不适用——拿去 bash -n 只会假红（`shell: python` 的 run 体是 Python 源码）。
+ * 用"精确等于集合成员"判定，不用子串正则：/sh/ 会把 pwsh、zsh 误判成 bash。
+ * 未声明 shell: 的步骤按 Actions 默认就是 bash，同样适用。
+ */
+const BASH_SHELLS = new Set(['bash', 'sh']);
+const isBashLike = (shell) => {
+  if (shell === null || shell === undefined || shell === '') return true;
+  return BASH_SHELLS.has(String(shell).trim().toLowerCase());
+};
+
+/** 已知非 bash 语义的 shell 闭集：这些步骤明确跳过 bash -n（跳过数量与名单都必须可见） */
+const NON_BASH_SHELLS = new Set(['pwsh', 'powershell', 'cmd', 'python', 'python3']);
 
 const syntaxCheck = (script) => {
   const r = spawnSync('bash', ['-n', '-'], {
@@ -157,6 +169,17 @@ describe('工作流的每个 run 步骤必须是语法成立的 bash', () => {
   test.each(workflowFiles())('%s 的每个 bash 步骤都过得了 bash -n', (file) => {
     const blocks = extractRunBlocks(file);
     const bashLike = blocks.filter((b) => isBashLike(b.shell));
+    // 跳过的步骤必须逐个声明了**已知**的非 bash shell：出现清单外的 shell（如 fish）
+    // 说明分类器漏了，必须显式扩 NON_BASH_SHELLS 而不是静默跳过；反过来，把 bash 步骤
+    // 误判成跳过（shell 为空/ bash 拼写变体不在集合内）也会在这里红——"该跳未跳"可验
+    const skippedShells = blocks.filter((b) => !isBashLike(b.shell)).map((b) => b.shell);
+    for (const shell of skippedShells) {
+      expect({
+        file,
+        shell,
+        knownNonBash: NON_BASH_SHELLS.has(String(shell).trim().toLowerCase()),
+      }).toEqual({ file, shell, knownNonBash: true });
+    }
     const failures = [];
     for (const b of bashLike) {
       const r = syntaxCheck(b.body);
@@ -169,7 +192,7 @@ describe('工作流的每个 run 步骤必须是语法成立的 bash', () => {
       }
     }
     // 跳过的非 bash 步骤必须数量可见（新增了 pwsh 步骤就得在这里显式承认）
-    const skipped = blocks.length - bashLike.length;
+    const skipped = skippedShells.length;
     expect({ failures, skipped }).toEqual({ failures: [], skipped: expect.any(Number) });
   });
 });

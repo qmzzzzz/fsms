@@ -32,19 +32,22 @@ const CONFIG = path.join(__dirname, '../../../migrate-mongo-config.js');
  * 在受控 env 下加载迁移配置并求值 `mongodb.url`。
  * 空串表示"已设置但没配"：配置模块每次加载都会跑 `dotenv.config()`，删掉的键会被 .env 重新注入，
  * 而 resolveMongoUri 判"未配置"用的是 `.trim()` 后为空。
- * @param {{uri: string, allowed?: string}} env
+ * @param {{uri: string, allowed?: string, command?: string}} env
+ *   command 模拟 migrate-mongo 的子命令（写入 process.argv 供配置模块识别，缺省按 status 的宽松路径走）
  */
-function evalUrl({ uri, allowed }) {
+function evalUrl({ uri, allowed, command }) {
   const saved = {
     MONGODB_URI: process.env.MONGODB_URI,
     ALLOWED_SOURCE_DB: process.env.ALLOWED_SOURCE_DB,
     exitCode: process.exitCode,
+    argv: process.argv,
   };
   const printed = [];
   const originals = { log: console.log, warn: console.warn, error: console.error };
   process.env.MONGODB_URI = uri;
   if (allowed === undefined) delete process.env.ALLOWED_SOURCE_DB;
   else process.env.ALLOWED_SOURCE_DB = allowed;
+  process.argv = ['node', 'node_modules/.bin/migrate-mongo', command || 'status'];
   // 护栏走 process.exitCode（不是 process.exit），不还原会让整个 jest 进程带 2 退出
   process.exitCode = 0;
   console.log = (...a) => printed.push(a.join(' '));
@@ -60,7 +63,9 @@ function evalUrl({ uri, allowed }) {
     }
   } finally {
     Object.assign(console, originals);
+    process.argv = saved.argv;
     Object.entries(saved).forEach(([k, v]) => {
+      if (k === 'argv') return;
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
     });
@@ -110,5 +115,31 @@ describe('迁移目标库白名单与护栏同口径', () => {
     expect(code).toMatch(/assertApplyAllowed\(\s*\{[^}]*\bhost\b[^}]*\}/);
     // 且没有把回退库这一档偷偷改掉（那是另一处待决）
     expect(code).not.toMatch(/assertApplyAllowed\(\s*\{[^}]*isFallback[^}]*\}/);
+    // P2-34 的本体：写命令识别表必须仍在（防止日后被静默删掉回到 fail-open）
+    expect(code).toMatch(/MIGRATE_WRITE_COMMANDS/);
+    expect(code).toMatch(/currentMigrateCommand/);
+  });
+
+  test('⑥ P2-34：写命令（up）在白名单未设置时必须拒绝执行并给配置指引', () => {
+    const r = evalUrl({ uri: URI, command: 'up' });
+    expect(r.value).toBeUndefined();
+    expect(r.error).toContain('未设置 ALLOWED_SOURCE_DB');
+    expect(r.error).toContain('npm run migrate:up');
+    expect(r.error).toContain(`ALLOWED_SOURCE_DB=127.0.0.1:27017/${DB}`);
+  });
+
+  test('⑦ down 同样拒绝；status 保持宽松（读命令不受 fail-closed 影响）', () => {
+    const d = evalUrl({ uri: URI, command: 'down' });
+    expect(d.value).toBeUndefined();
+    expect(d.error).toContain('migrate-mongo down');
+    const s = evalUrl({ uri: URI, command: 'status' });
+    expect(s.error).toBe('');
+    expect(s.value).toBe(URI);
+  });
+
+  test('⑧ 白名单命中时写命令照常放行（fail-closed 不误伤已声明的目标库）', () => {
+    const r = evalUrl({ uri: URI, allowed: `127.0.0.1:27017/${DB}`, command: 'up' });
+    expect(r.error).toBe('');
+    expect(r.value).toBe(URI);
   });
 });

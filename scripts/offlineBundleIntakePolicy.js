@@ -17,7 +17,7 @@
  *   ② 解包分步进行，每一步只给一个显式条目名（`--` 之后），从不「整包全解再检查」；
  *   ③ 解包后对每个落点 lstat 复核「普通文件 + 非符号链接」（不解析 `tar -tv` 文本——
  *      那是在解析一个会随 locale/实现变化的输出格式）；
- *   ④ `--no-same-owner --no-same-permissions` 剥掉归档里的 uid/gid 与 setuid 位。
+ *   ④ 解包后对落点整树 lstat + chmod 收紧（hardenTree）：不沿用归档自带的 uid/gid/setuid 位，也不靠 tar 的「请求别照搬」类选项。
  *   路径穿越面因此不是「被检查掉了」，而是**根本不存在**：没有任何一步会跟随归档里
  *   声明的目录结构去创建子目录。
  *
@@ -59,7 +59,7 @@ const DEFAULT_SETTLE_SECONDS = 60;
 /** sha256 十六进制（小写）——与 offlineBundlePolicy 的 digest 同口径 */
 const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
 
-/** 包内必须存在的四个条目（与目录形态一致）；payload 名由 manifest 声明，不写死 */
+/** 包内必须存在的三个条目（与目录形态一致）；payload 名由 manifest 声明，不写死 */
 const REQUIRED_ENTRIES = ['manifest.json', 'manifest.sig', 'SHA256SUMS'];
 
 /**
@@ -188,7 +188,7 @@ function assertRequiredEntriesPresent(entries, required = REQUIRED_ENTRIES) {
   if (missing.length > 0) {
     throw new Error(
       `归档缺少必需条目：${missing.join(' / ')}\n` +
-        '  这四个条目是导入器判据的全部输入；缺任何一个都不该继续解包。'
+        '  这三个条目是导入器判据的全部输入；缺任何一个都不该继续解包。'
     );
   }
   return true;

@@ -547,10 +547,11 @@ mongo_hydrate_uri() {
   #   · `[ -s ]` 是 shell 内建：计数为 0 却说"文件非空" ⇒ 自相矛盾 ⇒ 拒；
   #   · 非 NUL 字节数 + NUL 字节数 == 总字节数（两条互补管道之和必须闭合；tr 不过滤 ⇒ 两边都等于
   #     总数 ⇒ 判「检测不可用」）；且 **NUL 字节数必须为 0**（直接数 NUL，内容相关退化藏不住）。
-  _file_stat=$(stat -c %s -- "$_file" 2>/dev/null | tr -d ' \t') || _file_stat=''
+  # 跨平台取文件大小：GNU stat 用 -c %s，BSD/macOS 用 -f %z；两者都取不到 ⇒ 下面形状校验按「检测不可用」拒
+  _file_stat=$( { stat -c %s -- "$_file" 2>/dev/null || stat -f %z -- "$_file" 2>/dev/null; } | tr -d ' \t') || _file_stat=''
   case "$_file_stat" in
     '' | *[!0-9]*)
-      printf 'Error: MONGODB_URI_FILE 的字节检查未能完成（stat 不可用）：%s\n' "$_file" >&2
+      printf 'Error: MONGODB_URI_FILE 的字节检查未能完成（stat -c %%s 与 stat -f %%z 都不可用）：%s\n' "$_file" >&2
       return 1
       ;;
   esac

@@ -56,12 +56,11 @@ const submit = (c) => {
   click(b)
 }
 
-/** 真实等待：延时登出是 1500ms 的 setTimeout，用真实计时器最贴近用户行为 */
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
-
 afterEach(() => {
   active?.handle.unmount()
   active = null
+  // 假时钟兜底还原：延时登出用例中途失败时不得把 fake timers 泄漏给后续用例
+  vi.useRealTimers()
   changePassword.mockReset()
   encryptPassword.mockReset()
   encryptPassword.mockImplementation(async () => null)
@@ -165,6 +164,9 @@ describe('ChangePasswordCard 成功后行为', () => {
     encryptPassword.mockResolvedValue('ENV')
     changePassword.mockResolvedValue({ data: { success: true } })
     const c = await open()
+    // 假时钟：1.5s 延时登出由 advanceTimersByTimeAsync 精确推进，替代真实 1.7s 睡眠
+    //（组件延时是写死的 1500ms，无注入点；必须在 submit 前启用，定时器才受控）
+    vi.useFakeTimers()
     typeInto(c, 'currentPassword', 'OldPass_2026')
     typeInto(c, 'newPassword', STRONG)
     typeInto(c, 'confirmPassword', STRONG)
@@ -177,17 +179,19 @@ describe('ChangePasswordCard 成功后行为', () => {
     expect(c.find('#confirmPassword').value).toBe('')
     // 定时器到期前不得跳转（用户要看到成功提示）
     expect(c.router.currentRoute.value.path).toBe('/profile')
-    await sleep(1700)
-    await flush(20)
+    await vi.advanceTimersByTimeAsync(1600)
     await waitFor(() => c.router.currentRoute.value.path === '/login', {
       message: '延时登出后跳转登录页',
     })
+    vi.useRealTimers()
   })
 
   test('定时器未到期就卸载：不得在组件销毁后跳转（防内存泄漏）', async () => {
     encryptPassword.mockResolvedValue('ENV')
     changePassword.mockResolvedValue({ data: { success: true } })
     const c = await open()
+    // 假时钟：同上，替代真实 1.7s 睡眠（P3-16）
+    vi.useFakeTimers()
     typeInto(c, 'currentPassword', 'OldPass_2026')
     typeInto(c, 'newPassword', STRONG)
     typeInto(c, 'confirmPassword', STRONG)
@@ -198,11 +202,13 @@ describe('ChangePasswordCard 成功后行为', () => {
     const router = c.router
     c.handle.unmount()
     active = null
-    await sleep(1700)
+    // 推过 1.5s 登出窗口：卸载时若没清掉定时器，这里会跳成 /login
+    await vi.advanceTimersByTimeAsync(1600)
     await flush(20)
     // 卸载后 router 会被 Vue 的 uninstall 重置 currentRoute，改看 history 的真实位置：
     // 组件若没清掉定时器，这里会变成 /login
     expect(router.options.history.location).toBe('/profile')
+    vi.useRealTimers()
   })
 
   test('连点/长按回车「修改密码」：并发只发一次改密请求（in-flight 守卫，防撞 5/15min 限流）', async () => {

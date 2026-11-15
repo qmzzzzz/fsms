@@ -20,6 +20,9 @@ const mongoose = require('mongoose');
 
 // 必须在 require auditBuffer 之前设：WAL 路径在模块加载期读 env
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'probe-d1-real-'));
+// P3-20：快照原值，afterAll 里先归还 env 再删目录，避免同 worker 后续套件
+// 把 WAL 写进已删除的路径
+const SAVED_WAL_PATH = process.env.AUDIT_WAL_PATH;
 process.env.AUDIT_WAL_PATH = path.join(tmpDir, 'd1.wal');
 
 const auditBuffer = require('../../services/auditBuffer');
@@ -81,6 +84,10 @@ describe('审计链检查点 × _id 乱序的诚实库（真实 push 预分配�
   afterAll(async () => {
     auditBuffer.stop();
     auditBuffer.__resetForTest();
+    // P3-20：先归还 env 再删临时目录——env 指向已删路径会让同 worker 后续套件
+    // 的 WAL 写入落空
+    if (SAVED_WAL_PATH === undefined) delete process.env.AUDIT_WAL_PATH;
+    else process.env.AUDIT_WAL_PATH = SAVED_WAL_PATH;
     try {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     } catch (_) {

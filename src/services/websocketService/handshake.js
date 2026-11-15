@@ -17,11 +17,14 @@ const {
   resolveTrustProxyHops: resolveTrustProxyHopsFromConfig,
 } = require('../../config/validate');
 const { parseCookies, activeAccessCookieNames, pickCookieValue } = require('../../utils/cookie');
+const { stripControlChars } = require('../../utils/helpers');
 const { isIPAllowed } = require('../../utils/ipRange');
 const { isPeerTrustedProxy } = require('../../utils/ipUtils');
 const trustedProxies = require('../../config/trustedProxies');
 const { isTemporarilyLocked, userRoom } = require('./shared');
 const honeypotWatch = require('../honeypotWatch'); // 蜜罐会话的 WS 侧判据与留痕（不建立推送通道，与账户禁用同形的拒绝）
+
+const rejectionReasonText = (err) => String(err?.message ?? err); // P3 非 Error 拒绝值安全化（.message 直读会在 catch 里再抛）
 
 /**
  * 解析握手来源 IP（修复，2026-09-17）
@@ -285,7 +288,8 @@ const methods = {
       logger.info('WebSocket 认证成功', { userId: socket.userId, socketId: socket.id });
       return true;
     } catch (err) {
-      logger.warn(`WebSocket 认证失败: ${socket.id}, reason: ${err.message}`);
+      const reason = stripControlChars(rejectionReasonText(err), 128); // 非 Error 拒绝值安全化
+      logger.warn(`WebSocket 认证失败: ${socket.id}, reason: ${reason}`);
       socket.emit('auth-error', { message: '认证失败' });
       socket.disconnect(true);
       return false;

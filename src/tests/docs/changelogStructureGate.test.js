@@ -21,6 +21,8 @@ const {
   CHANGELOG_TITLE,
   sectionKey,
   collectSectionHeaders,
+  countUnescapedPipes,
+  tableColumnIssues,
   checkChangelogStructure,
   checkFile,
 } = require('../../../scripts/check-changelog-structure.js');
@@ -150,5 +152,47 @@ describe('checkChangelogStructure：仓库真实 CHANGELOG 与 fail-closed', () 
 
   test('checkFile：仓库真实文件返回 code 0', () => {
     expect(checkFile()).toEqual({ ok: true, issues: [], code: 0 });
+  });
+});
+
+describe('判据 4（2026-11-15 审计）：markdown 表格列数须与表头一致', () => {
+  const TABLE_OK = [
+    '# 更新日志（CHANGELOG）',
+    '',
+    '## [未发布]',
+    '',
+    '| 项 | 内容 |',
+    '| --- | --- |',
+    '| a | b |',
+    '',
+  ].join('\r\n');
+
+  test('列数一致（\\| 转义竖线不计列）⇒ 通过', () => {
+    const text = TABLE_OK.replace('| a | b |', '| a | b\\|c |');
+    expect(checkChangelogStructure(text)).toEqual({ ok: true, issues: [] });
+  });
+
+  test('某行列数与表头不一致 ⇒ 报错并给行号', () => {
+    const text = TABLE_OK.replace('| a | b |', '| a | b | c |');
+    const bad = checkChangelogStructure(text);
+    expect(bad.ok).toBe(false);
+    expect(bad.issues).toEqual([expect.stringContaining('表格第 7 行列数与表头不一致')]);
+  });
+
+  test('countUnescapedPipes：\\| 是字面量不是分隔符', () => {
+    expect(countUnescapedPipes('| a | b |')).toBe(3);
+    expect(countUnescapedPipes('| a\\|b | c |')).toBe(3);
+  });
+
+  test('tableColumnIssues：空行分隔的两张表各自对表头判', () => {
+    const ok = ['| a | b |', '| 1 | 2 |', '', '| x | y | z |', '| 1 | 2 | 3 |'].join('\n');
+    expect(tableColumnIssues(ok)).toEqual([]);
+    const bad = ['| a | b |', '| 1 | 2 |', '', '| x | y | z |', '| 1 | 2 |'].join('\n');
+    expect(tableColumnIssues(bad)).toEqual([expect.stringContaining('表格第 5 行')]);
+  });
+
+  test('仓库真实 CHANGELOG.md 通过列数判据（此前的错位行已修复）', () => {
+    const real = fs.readFileSync(path.join(ROOT, 'CHANGELOG.md'), 'utf8');
+    expect(tableColumnIssues(real.replace(/\r\n/g, '\n'))).toEqual([]);
   });
 });

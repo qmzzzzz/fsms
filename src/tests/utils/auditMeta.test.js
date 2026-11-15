@@ -336,6 +336,8 @@ describe('auditMeta（审计元数据派生）', () => {
       //      sql_injection_attempt / scan_probe_detected / scan_probe_storm）**不计入本数**——
       //      本数只钉「路由派生」action；事件型的写入点（检测器叶子模块）由
       //      auditActionReconciliation/auditActionReachability 两闸对账，不走本闸。
+      // 合法更新：路由派生 action 增删后本数 +1/-1 并在上方补一行变更事由（事件型不计入）；
+      // 改数前先过 auditActionReconciliation / auditActionReachability 两闸，确认派生面无第二处漂移
       expect(collectActions().size).toBe(110);
     });
 

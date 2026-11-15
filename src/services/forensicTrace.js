@@ -1,4 +1,5 @@
 /** 取证溯源查询（T5-1，只读）：按 IP / 指纹 / 网段把「这个人做了什么、从哪些 IP 来的、触发过什么」拼出来。IP 过滤一律走 ipUtils.ipQueryCondition（查询侧与导出侧同一把尺子），不自己拼 ::ffff: 变体。返回摘要视图（行顶层带 status/reason，由 response.status / trigger.reason 提升）；请求/响应体只在被取证标记过的那几条里才有，这是设计而非缺失。「他的 ip 池」双路径：判据带指纹/设备键走 actorPools（全窗口完整池），按 IP/网段溯源走 derivedPools（从库内观测到的指纹派生）——换 IP 不换机器的直接证据在最常用的按 IP 入口上也要可见。 */
+const logger = require('../utils/logger');
 const { ipQueryCondition, normalizeIP } = require('../utils/ipUtils');
 
 const DEFAULT_LIMIT = 200;
@@ -32,7 +33,7 @@ const DERIVED_GROUP_CAP = 400;
 // 池只答 top N 指纹：溯源要的是「这几台机器从哪来」，不是全量报表
 const MAX_DERIVED_FINGERPRINTS = 5;
 
-const state = { queries: 0, lastError: null };
+const state = { queries: 0 };
 
 const clampLimit = (n) => {
   const v = Number.parseInt(n, 10);
@@ -45,11 +46,17 @@ const FINGERPRINT_FULL_LEN = 32;
 
 /** 完整值等值、更短走锚定前缀正则；统一 trim + toLowerCase（大写粘贴过去原本静默不命中）。 */
 const fingerprintCondition = (input) => {
-  const text = String(input || '')
+  let text = String(input || '')
     .trim()
-    .toLowerCase()
-    .slice(0, 128);
+    .toLowerCase();
   if (!text) return null;
+  if (text.length > FINGERPRINT_FULL_LEN) {
+    // P3：超长指纹截断+留痕（库内恒 32 位；超长等值恒 0 条=把非法伪装成查无此人）
+    logger.warn(
+      `取证溯源指纹输入超长（${text.length} 位），已截断到前 ${FINGERPRINT_FULL_LEN} 位再匹配`
+    );
+    text = text.slice(0, FINGERPRINT_FULL_LEN);
+  }
   if (text.length >= FINGERPRINT_FULL_LEN) return text;
   return { $regex: '^' + text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') };
 };
@@ -283,7 +290,6 @@ async function traceActor(opts = {}) {
 const getTraceStats = () => ({ ...state });
 const resetTraceState = () => {
   state.queries = 0;
-  state.lastError = null;
 };
 
 module.exports = {

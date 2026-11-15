@@ -33,17 +33,24 @@ const { summarizeByRiskLevel, summaryCacheKey } = require('../../services/auditQ
 
 const ROOT = path.resolve(__dirname, '../../..');
 
-/** 清掉本模块产生的全部缓存条目（statsCache 是共享底座，不能整表清空） */
-const clearAuditCache = () => {
-  for (const key of [...statsCache._store.keys()]) {
-    if (key.startsWith('audit:risk-summary:')) statsCache._store.delete(key);
-  }
-};
+/**
+ * 本套件用到的可缓存 query：缓存键由公开的 summaryCacheKey 确定性派生
+ * （返回值已含 `audit:risk-summary:` 前缀；超长键返回 null，本就不入缓存）。
+ */
+const CACHED_QUERIES = [
+  { riskLevel: 'high', timestamp: { $gte: new Date('2026-09-01') } },
+  { riskLevel: 'high', action: 'login' },
+  { riskLevel: 'high' },
+  { riskLevel: 'low' },
+  { riskLevel: 'medium' },
+  { riskLevel: 'critical' },
+];
 
-/** 把某个键的过期时间拨到过去，用于验证 TTL 语义（比 fake timers 稳：不牵扯异步 DB） */
-const expireKey = (prefix) => {
-  for (const [key, entry] of statsCache._store) {
-    if (key.startsWith(prefix)) entry.expireAt = Date.now() - 1;
+/** 清掉本套件产生的缓存条目：走公开 del 按派生键精确删除（statsCache 是共享底座，不能整表清空） */
+const clearAuditCache = () => {
+  for (const query of CACHED_QUERIES) {
+    const key = summaryCacheKey(query);
+    if (key) statsCache.del(key);
   }
 };
 
@@ -87,8 +94,15 @@ describe('Top-8 汇总缓存：同一 query 的多页只算一次', () => {
     await summarizeByRiskLevel(q);
     expect(aggSpy).toHaveBeenCalledTimes(1);
 
-    expireKey('audit:risk-summary:');
-    await summarizeByRiskLevel(q);
+    // 时间前移超过 TTL 上界（statsCache 夹取到 3600s），经公开行为面观察失效：
+    // 同一 query 再次取页必须真的重算（比 fake timers 稳：不牵扯异步 DB）
+    const realNow = Date.now.bind(Date);
+    const clockSpy = jest.spyOn(Date, 'now').mockImplementation(() => realNow() + 2 * 3600 * 1000);
+    try {
+      await summarizeByRiskLevel(q);
+    } finally {
+      clockSpy.mockRestore();
+    }
     expect(aggSpy).toHaveBeenCalledTimes(2);
   });
 

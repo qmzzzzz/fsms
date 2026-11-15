@@ -77,9 +77,6 @@ describe('后台任务与错误路径（批次 E）', () => {
     });
     adminUserId = String(admin._id);
     void jwt; // 令牌签发已不再需要（本套件全部为直驱/服务层调用）
-
-    const { createApp } = require('../../app');
-    global.__eapp = createApp();
   });
 
   afterAll(async () => {

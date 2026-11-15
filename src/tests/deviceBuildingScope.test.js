@@ -90,7 +90,14 @@ describe('设备楼栋只能落在操作者自己部门', () => {
     await FireDevice.deleteMany({ deviceCode: new RegExp(`^${stamp.toUpperCase()}`) }).catch(
       () => {}
     );
-    if (mongoose.connection.readyState !== 0) await mongoose.connection.close();
+    if (mongoose.connection.readyState !== 0) {
+      // P3-24：回收自建操作员账号与角色（均以 stamp 前缀命名）
+      const User = require('../models/User');
+      const Role = require('../models/Role');
+      await User.deleteMany({ username: new RegExp(`^${stamp}`) }).catch(() => {});
+      await Role.deleteMany({ code: new RegExp(`^${stamp.toUpperCase()}`) }).catch(() => {});
+      await mongoose.connection.close();
+    }
   });
 
   const createDevice = (tag, extra) =>

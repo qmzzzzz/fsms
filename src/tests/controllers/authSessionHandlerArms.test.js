@@ -120,7 +120,11 @@ describe('会话管理 handler 旅程补测', () => {
       .post('/api/auth/logout')
       .set('Cookie', [accessCookie(reg.access)])
       .send({});
-    expect([200, 204]).toContain(res.status);
+    // P3-14：实跑观测登出成功固定回 200 + JSON 信封（ApiResponse.success 默认 200，
+    // 不存在 204 分支）——钉死单一实测值，双可能断言会放过"响应形态被改坏"的回归
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.message).toBe('登出成功');
     // 登出后该会话的受保护读面回落 401（吊销即时生效）
     const after = await request(app)
       .get('/api/auth/sessions')

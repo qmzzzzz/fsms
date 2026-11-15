@@ -85,12 +85,6 @@ defineExpose({ load })
 </script>
 
 <style scoped>
-.card-header {
-  font-family: var(--xf-font-display);
-  font-weight: 600;
-  letter-spacing: var(--xf-tracking-wide);
-}
-
 .self-error {
   display: flex;
   align-items: center;

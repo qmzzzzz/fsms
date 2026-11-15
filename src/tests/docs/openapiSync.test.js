@@ -7,15 +7,16 @@
  *   - 文档存在但无路由 → 幽灵文档误导调用方
  * 任何一边漂移都会让本测试红灯，强制新端点同步文档。
  *
- * 文档豁免清单：health 系列（存活/就绪探针）与内部指标端点——
- * 它们面向容器编排与运维抓取，不属于业务 API 文档面。
+ * 文档豁免清单（2026-11-15 P2-12 收窄）：原豁免的探针/指标/发现端点已全部按真实实现
+ * 入册（generate.js 同名段）；仅剩随开关条件注册的 /metrics、/api-docs、/api-docs.json
+ * 保留豁免——它们无法从 router.stack 采集，存在性由本文件源码断言钉住。
  */
 
 const fs = require('fs');
 const path = require('path');
 const spec = require('../../docs/openapi.json');
-// 文档豁免的路径（精确匹配）
-const DOC_EXEMPT = new Set(['/health', '/readyz', '/api/metrics']);
+// 文档豁免的路径（精确匹配）：三者都随 METRICS_ENABLED / ENABLE_API_DOCS 开关条件注册
+const DOC_EXEMPT = new Set(['/metrics', '/api-docs', '/api-docs.json']);
 
 // 挂载表：与 app.js 的 app.use 前缀一致（单一事实来源的镜像，
 // 修改 app.js 挂载点时必须同步此处——openapiSync 测试会兜底对账）
@@ -61,6 +62,16 @@ describe('OpenAPI 文档同步守卫', () => {
     // app.js 直挂路由（不经 MOUNTS 子路由，文档中已有定义）
     registered.add('GET /api');
     registered.add('GET /health');
+    // P2-12 入册的无条件直挂端点（原豁免面）
+    registered.add('GET /readyz');
+    registered.add('GET /api/metrics');
+    // 根路径公共发现端点：wellKnownRoutes 挂 '/'，不在 MOUNTS 内；P2-12 起已入册
+    for (const layer of routers.wellKnownRoutes.stack) {
+      if (!layer.route) continue;
+      const methods = Object.keys(layer.route.methods).map((m) => m.toUpperCase());
+      const fullPath = layer.route.path.replace(/\/+$/, '') || '/';
+      for (const method of methods) registered.add(method + ' ' + fullPath);
+    }
     for (const { name, prefix } of MOUNTS) {
       const router = routers[name];
       expect(router).toBeTruthy();
@@ -211,18 +222,11 @@ describe('OpenAPI 文档同步守卫', () => {
   //   1. wellKnownRoutes（挂在根路径，不在任何 /api 前缀下）
   //   2. app.js 直挂的 /api-docs.json（文档自身，随 ENABLE_API_DOCS 开关）
   //   3. app.js 直挂的 /metrics（随 METRICS_ENABLED 开关）
-  // 盲区期间，这些端点无论怎么漂移测试都不会红——「任何一边漂移都会
-  // 让本测试红灯」的宣称对它们是假的。
   //
-  // 补法：把上述路由纳入**显式豁免清单**并单独断言其存在性。
-  // 之所以是豁免而非纳入 spec.paths：
-  //   - security.txt 由 RFC 9116 规定路径，不是业务 API；
-  //   - /csp-report 与 /client-errors 是浏览器自动发起的单向上报端点，
-  //     调用方是浏览器而非 API 消费者；
-  //   - /api-docs.json 与 /metrics 面向运维/文档工具，且随开关可缺席。
-  // 若把它们塞进 openapi.json，反而会让「文档面 = 业务 API 面」这条
-  // 边界失效。故改为「必须存在 + 明确豁免」的双向锁定：
-  // 端点消失或豁免清单被误删，本组用例都会红。
+  // 2026-11-15（P2-12）：这批端点已按真实实现**入册** openapi.json（审计结论：
+  // 实际暴露面不得大于文档面），故本组断言从「必须不在文档」翻转为「必须在文档」；
+  // 采集面（collectRegistered）已把 wellKnownRoutes 与无条件直挂端点纳入对账，
+  // 仅随开关缺席的 /metrics、/api-docs、/api-docs.json 仍走 DOC_EXEMPT + 源码存在性断言。
   describe('对账盲区补齐', () => {
     /** 根路径路由（不挂 /api 前缀） */
     const ROOT_MOUNTS = [{ name: 'wellKnownRoutes', prefix: '' }];
@@ -255,7 +259,7 @@ describe('OpenAPI 文档同步守卫', () => {
       ]);
     });
 
-    test('wellKnownRoutes 端点属于豁免面（不进 openapi.json，且豁免有据）', () => {
+    test('wellKnownRoutes 端点已入册（P2-12：暴露面不得大于文档面）', () => {
       const documented = collectDocumented();
       for (const ep of [
         'GET /.well-known/security.txt',
@@ -263,7 +267,7 @@ describe('OpenAPI 文档同步守卫', () => {
         'POST /client-errors',
         'POST /csp-report',
       ]) {
-        expect({ ep, documented: documented.has(ep) }).toEqual({ ep, documented: false });
+        expect({ ep, documented: documented.has(ep) }).toEqual({ ep, documented: true });
       }
     });
 
@@ -278,10 +282,16 @@ describe('OpenAPI 文档同步守卫', () => {
       expect(appSource).toMatch(/app\.get\(\s*'\/metrics'/);
     });
 
-    test('app.js 直挂端点不进入 openapi.json（同为豁免面）', () => {
+    test('app.js 直挂端点已入册（P2-12；条件注册项的存在性由上一条源码断言钉住）', () => {
       const documented = collectDocumented();
-      for (const ep of ['GET /api-docs.json', 'GET /metrics', 'GET /readyz']) {
-        expect({ ep, documented: documented.has(ep) }).toEqual({ ep, documented: false });
+      for (const ep of [
+        'GET /api-docs',
+        'GET /api-docs.json',
+        'GET /metrics',
+        'GET /readyz',
+        'GET /api/metrics',
+      ]) {
+        expect({ ep, documented: documented.has(ep) }).toEqual({ ep, documented: true });
       }
     });
   });

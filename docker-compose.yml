@@ -50,6 +50,10 @@ services:
       - NODE_OPTIONS=--max-old-space-size=768
       - TRUST_PROXY_HOPS=${TRUST_PROXY_HOPS:-1}
       # F-01 的闭合口：可信代理网段（逗号分隔 CIDR，如 172.28.0.0/16）。
+      # 本文件文末已用 ipam 把两个内网网段钉死：fire-safety-net=172.28.0.0/16、
+      # data-net=172.29.0.0/16。标准拓扑（宿主 nginx 反代 → 发布面/网桥进 app）
+      # 下，本项就填 fire-safety-net 的 172.28.0.0/16；不钉子网时 Docker 按
+      # 默认地址池动态分配，「正确取值」随部署机漂移，清单会写一个其实不对的值。
       #
       # 本文件此前**从未把该变量传入容器**：运维照 .env.example 与 README 配好它，
       # 容器里读到的仍是 undefined，判据静默退回「对端属私网/回环即可信」——
@@ -79,8 +83,12 @@ services:
       - REQUIRE_PRODUCTION_CONFIG=true
       # 登录口令密文轨（2026-10-24 审计）：此前 compose 不透传该变量，运维在 .env
       # 里设为 true 也进不了容器，标准部署因此永远关不掉明文口令字段。
-      # 纯 HTTP 内网部署（无 secure context）才保持 false。
-      - LOGIN_ENCRYPT_STRICT=${LOGIN_ENCRYPT_STRICT:-false}
+      # 2026-11-15 审计：默认改为 true——本 compose 的标准拓扑就是宿主 nginx 终结
+      # TLS（TLS_TERMINATED_UPSTREAM 默认 true），浏览器有 secure context/WebCrypto，
+      # 前端密文轨全量就绪，生产 HTTPS 部署没有理由再开明文轨（loginEncryptGuard
+      # 同口径）。仅纯 HTTP 内网部署（无 secure context，前端只能明文降级）需要
+      # **显式**设回 false，并在部署文档记录拓扑依据。
+      - LOGIN_ENCRYPT_STRICT=${LOGIN_ENCRYPT_STRICT:-true}
       - CORS_ORIGIN=${CORS_ORIGIN:?CORS_ORIGIN 必须显式配置（如 https://admin.example.com，多个用逗号分隔）}
       # Host 头白名单（生产必填，见 src/config/validate.js 的 collectAllowedHostsErrors）。
       # 本文件此前从未提供这一项，而 NODE_ENV=production 下缺失即**启动失败**——
@@ -497,9 +505,11 @@ services:
   # 是"库不健康"还是"initiate 没成"，而且失败会被 restart 策略反复重试。
   #
   # 为什么需要 root 凭据：mongod 已有用户时 localhost exception 不再适用，
-  # rs.initiate 必须认证。密码从 secret 文件读入 shell 变量再传给 mongosh，
-  # 不出现在 entrypoint（`docker inspect` 看不到），仅在容器内进程列表短暂可见
-  # ——该容器内没有其他进程，且用后即退出。
+  # rs.initiate 必须认证。凭据从 secret 文件读入 shell 变量后**以环境变量前缀**
+  # 交给 mongosh、在 --eval 里经 process.env 取用（与本文件 mongo healthcheck 的
+  # P2-17 口径一致，2026-11-15 审计：不再走 --username/--password argv——那会
+  # 把明文口令展开进 /proc/<pid>/cmdline）。env 前缀赋值只进 mongosh 进程的
+  # environ（仅同 uid/根可读），该容器内没有其他进程，且用后即退出。
   #
   # 幂等性：已初始化时 rs.status() 成功 ⇒ 打印后退出 0，重复 `docker compose up`
   # 不会报错、不会重建副本集配置。
@@ -521,8 +531,13 @@ services:
         P="$$(cat /run/secrets/mongo_root_password)"
         AU="$$(cat /run/secrets/mongo_app_username)"
         AP="$$(cat /run/secrets/mongo_app_password)"
-        APP_U="$$AU" APP_P="$$AP" mongosh --host mongo:27017 --username "$$U" --password "$$P" \
-          --authenticationDatabase admin --quiet --eval '
+        # 凭据走环境变量前缀（不进 argv）：/proc/<pid>/cmdline 里只有 $(cat …) 字面量，
+        # 明文凭据只存在于 mongosh 进程的 environ（仅同 uid/根可读），用后即退。
+        FSMS_ROOT_U="$$U" FSMS_ROOT_P="$$P" FSMS_APP_U="$$AU" FSMS_APP_P="$$AP" \
+          mongosh --host mongo:27017 --quiet --eval '
+          const u = process.env.FSMS_ROOT_U, p = process.env.FSMS_ROOT_P;
+          if (!u || !p) quit(2);
+          try { db.getSiblingDB("admin").auth(u, p) } catch (e) { quit(3) }
           try {
             rs.status();
             print("replica set 已初始化，跳过 initiate");
@@ -553,8 +568,8 @@ services:
           // 应用专用账号（2026-10-24 审计，P2）：只授 fire_safety_db 的 readWrite。
           // 幂等：已存在则同步口令与角色（轮换 secret 后重跑本容器即可生效）。
           const appDb = db.getSiblingDB("fire_safety_db");
-          const appUser = process.env.APP_U;
-          const appPass = process.env.APP_P;
+          const appUser = process.env.FSMS_APP_U;
+          const appPass = process.env.FSMS_APP_P;
           if (appDb.getUser(appUser)) {
             appDb.updateUser(appUser, {
               pwd: appPass,
@@ -572,9 +587,12 @@ services:
         '
         # 用应用凭据真建一次连：凭据/授权不对 ⇒ 本容器退出非零 ⇒ app 不会启动。
         # 这比 healthcheck 更强的点在于它验证的正是应用将使用的那个账号。
-        mongosh --host mongo:27017 --username "$$AU" --password "$$AP" \
-          --authenticationDatabase fire_safety_db --quiet \
-          --eval 'if (db.runCommand({ ping: 1 }).ok !== 1) quit(1);'
+        # 凭据同样走环境变量前缀（不进 argv，口径同上）。
+        FSMS_APP_U="$$AU" FSMS_APP_P="$$AP" mongosh --host mongo:27017 --quiet \
+          --eval 'const u = process.env.FSMS_APP_U, p = process.env.FSMS_APP_P;
+          if (!u || !p) quit(2);
+          try { db.getSiblingDB("fire_safety_db").auth(u, p) } catch (e) { quit(3) }
+          if (db.runCommand({ ping: 1 }).ok !== 1) quit(1);'
     secrets:
       - mongo_root_username
       - mongo_root_password
@@ -961,7 +979,10 @@ services:
 # ============================================================
 # 密钥文件（P3-48）
 #
-# 部署前准备（宿主机上执行一次，务必放在仓库之外的目录）：
+# 部署前准备（宿主机上执行一次）。./secrets 相对本 compose 文件所在目录，
+# 已列入 .gitignore 与 .dockerignore（不入库、不进构建上下文）——因此写在本
+# 仓库目录内是安全的；GitHub Actions 工作流部署另按 deployPolicy 的
+# FSMS_SECRETS_DIR 口径把密钥放在 checkout 之外（见 .env.example 同名项）：
 #   mkdir -p ./secrets && chmod 700 ./secrets
 #   # 首选：一次生成全套（mongodb_uri 的 userinfo 转义也自动处理，免手抄拼接）
 #   node scripts/generate-secrets.js --out ./secrets
@@ -1081,8 +1102,16 @@ volumes:
   # redis-data:
 
 networks:
+  # 子网钉死（2026-11-15 审计）：不钉 ipam 时 Docker 按默认地址池动态分配，
+  # TRUSTED_PROXY_CIDRS 的正确取值随部署机漂移（清单照示例填就会填错）。
+  # 选 172.28.0.0/16 与 172.29.0.0/16 两个保留私网段，避开 Docker Desktop 的
+  # 192.168.65.x 特殊段；与 app 服务 TRUSTED_PROXY_CIDRS 注释里的示例一致。
   fire-safety-net:
     driver: bridge
+    ipam:
+      config:
+        # 流式写法（带引号键）与仓内 configDriftYaml 解析器兼容，docker compose 等价接受
+        - { 'subnet': 172.28.0.0/16 }
   # ===== 数据面内网（2026-10-01 审计 finding：六服务共处一张扁平 bridge）=====
   # internal: true ⇒ 该网络不接宿主 NAT、不出外网；mongo / redis 只在此网络上，
   # 监控栈（prometheus / alertmanager / grafana）与宿主发布面（127.0.0.1:* 端口）
@@ -1093,3 +1122,6 @@ networks:
   data-net:
     driver: bridge
     internal: true
+    ipam:
+      config:
+        - { 'subnet': 172.29.0.0/16 }

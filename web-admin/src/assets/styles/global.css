@@ -1217,6 +1217,15 @@ a:hover {
   text-wrap: balance;
 }
 
+/* ===== 卡片标题公共基类（P3 收敛）：自绘卡片组件统一从这里取字体排印，
+   不再各自复制同一份 scoped 定义；视图内更具体的 scoped 规则（如
+   .xxx .card-header）仍按原值覆盖，视觉不变 ===== */
+.card-header {
+  font-family: var(--xf-font-display);
+  font-weight: 600;
+  letter-spacing: var(--xf-tracking-wide);
+}
+
 /* ===== el-table：高科技数据表格 ===== */
 .el-table {
   --el-table-border-color: var(--xf-border-color);

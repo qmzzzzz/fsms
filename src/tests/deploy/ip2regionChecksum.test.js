@@ -9,13 +9,14 @@
 const { execFileSync } = require('child_process');
 const crypto = require('crypto');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..', '..', '..');
 const PIN = JSON.parse(
   fs.readFileSync(path.join(ROOT, 'deployment/ip2region-checksum.json'), 'utf8')
 );
-const { checkPin, digest, loadPin, CHECKSUM_FILE } = require(
+const { checkPin, digest, loadPin, CHECKSUM_FILE, assertPathAbsent, randomTmpName } = require(
   path.join(ROOT, 'scripts/update-ip2region.js')
 );
 
@@ -66,5 +67,35 @@ describe('ip2region 内容锚', () => {
     expect(digest(Buffer.from('fsms'))).toBe(
       crypto.createHash('sha256').update('fsms').digest('hex')
     );
+  });
+});
+
+describe('update-ip2region 原子替换的临时文件加固（2026-11-15 审计）', () => {
+  test('临时名带 pid 与随机后缀，不再固定为 .tmp', () => {
+    const base = '/repo/src/data/ip2region.xdb';
+    const a = randomTmpName(base);
+    const b = randomTmpName(base);
+    expect(a).not.toBe(b); // 随机后缀：并发运行与预置攻击都难以命中同一个名字
+    expect(a).toContain(`.${process.pid}-`);
+    expect(a.endsWith('.tmp')).toBe(true);
+    expect(a.startsWith(`${base}.`)).toBe(true);
+  });
+
+  test('assertPathAbsent：不存在的路径放行；已存在（含悬空符号链接）一律拒绝', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ip2region-tmp-'));
+    try {
+      expect(() => assertPathAbsent(path.join(dir, 'free.tmp'))).not.toThrow();
+      fs.writeFileSync(path.join(dir, 'occupied'), 'x');
+      expect(() => assertPathAbsent(path.join(dir, 'occupied'))).toThrow(/拒绝写入/);
+      const link = path.join(dir, 'dangling.link');
+      try {
+        fs.symlinkSync(path.join(dir, 'no-such-target'), link);
+        expect(() => assertPathAbsent(link)).toThrow(/拒绝写入/); // 悬空链接也算已占用
+      } catch (err) {
+        if (err.code !== 'EPERM') throw err; // Windows 非开发者模式建链 EPERM：本平台测不到该腿
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

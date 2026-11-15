@@ -125,6 +125,11 @@ function parseCliArgs(tokens) {
   return { ...parsed, errors };
 }
 
+if (require.main !== module) {
+  module.exports = { parseCliArgs }; // 被 require 时只暴露参数解析器；CLI 仅在直接执行时运行（对齐同族脚本的守卫）
+  return;
+}
+
 const cli = parseCliArgs(process.argv.slice(2));
 if (cli.help) {
   console.log(USAGE);

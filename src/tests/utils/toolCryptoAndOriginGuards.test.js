@@ -190,11 +190,8 @@ describe('批次F 工具与密码学加固回归', () => {
       expect(isIPAllowed('192.168.7.9', '192.168.*.*').allowed).toBe(true);
       expect(isIPAllowed('10.0.0.1', '192.168.*.*').allowed).toBe(false);
     });
-
-    test('文件头注释显式说明四段约束（防止注释再次漂移）', () => {
-      const source = fs.readFileSync(path.join(__dirname, '../../utils/ipRange.js'), 'utf8');
-      expect(source).toMatch(/须写满四段/);
-    });
+    // （原「文件头注释显式说明四段约束」的文本断言已移入下方「注释与实现对齐」
+    // 集中登记；本 describe 保留其行为面：三段简写非法 + 语法逐条可用。）
   });
 
   // ================= 密码策略 =================
@@ -627,7 +624,11 @@ describe('批次F 工具与密码学加固回归', () => {
       // winston 配置 exceptionHandlers 后会向 logger.transports 追加
       // ExceptionStream/RejectionStream，可直接观测；exitOnError 亦可读。
       const { execFileSync } = require('child_process');
+      const os = require('os');
       const ROOT = path.join(__dirname, '..', '..', '..');
+      // P2-24：生产模式 logger 会按 LOG_DIR 建目录并写滚动日志；探针必须把
+      // LOG_DIR 指到临时目录，否则日志落进仓库 logs/ 污染工作区
+      const probeLogDir = fs.mkdtempSync(path.join(os.tmpdir(), 'logger-probe-'));
       const script = `
         const l = require(process.env.PROBE_ROOT + '/src/utils/logger');
         const names = l.transports.map((t) => t.constructor.name);
@@ -641,25 +642,29 @@ describe('批次F 工具与密码学加固回归', () => {
       const run = (nodeEnv) => {
         const out = execFileSync(process.execPath, ['-e', script], {
           cwd: ROOT,
-          env: { ...process.env, NODE_ENV: nodeEnv, PROBE_ROOT: ROOT },
+          env: { ...process.env, NODE_ENV: nodeEnv, PROBE_ROOT: ROOT, LOG_DIR: probeLogDir },
           encoding: 'utf8',
           stdio: 'pipe',
         });
         return JSON.parse(out.match(/R:\{.*\}/)[0].slice(2));
       };
 
-      const prod = run('production');
-      // 不抢占退出：exitOnError 必须为 false（true 会抢在 index.js 审计 flush 前退出）
-      expect(prod.exitOnError).toBe(false);
-      // 崩溃取证 transport 真实存在（winston 配置 exceptionHandlers 的产物）
-      expect(prod.names).toEqual(expect.arrayContaining(['ExceptionStream', 'RejectionStream']));
-      expect(prod.excKeys).toEqual(expect.arrayContaining(['logger', 'handlers']));
-      expect(prod.rejKeys).toEqual(expect.arrayContaining(['logger', 'handlers']));
+      try {
+        const prod = run('production');
+        // 不抢占退出：exitOnError 必须为 false（true 会抢在 index.js 审计 flush 前退出）
+        expect(prod.exitOnError).toBe(false);
+        // 崩溃取证 transport 真实存在（winston 配置 exceptionHandlers 的产物）
+        expect(prod.names).toEqual(expect.arrayContaining(['ExceptionStream', 'RejectionStream']));
+        expect(prod.excKeys).toEqual(expect.arrayContaining(['logger', 'handlers']));
+        expect(prod.rejKeys).toEqual(expect.arrayContaining(['logger', 'handlers']));
 
-      // 对照：测试环境刻意不挂载（避免 jest.resetModules 反复追加 process 监听器）
-      const test = run('test');
-      expect(test.exitOnError).toBe(false);
-      expect(test.names).not.toEqual(expect.arrayContaining(['ExceptionStream']));
+        // 对照：测试环境刻意不挂载（避免 jest.resetModules 反复追加 process 监听器）
+        const test = run('test');
+        expect(test.exitOnError).toBe(false);
+        expect(test.names).not.toEqual(expect.arrayContaining(['ExceptionStream']));
+      } finally {
+        fs.rmSync(probeLogDir, { recursive: true, force: true });
+      }
     });
   });
 
@@ -1126,13 +1131,49 @@ describe('批次F 工具与密码学加固回归', () => {
   });
 
   // ================= 注释/配置漂移 =================
-  describe('注释与实现对齐', () => {
+  // P2-24：注释本体不可执行——纯注释契约只能做文本对账，本 describe 集中登记
+  // 这类「无法行为化」的断言（同义改写会误红的风险已在文件头 ⚠️ 记录；保留理由：
+  // 注释与实现背离时会直接把读代码的人带偏）。每条文本契约都有对应的行为用例兜底：
+  //   · ipRange 四段约束 → ipRange describe 的「三段简写非法 / 语法逐条可用」
+  //   · cookie maxAge 口径 → 下方「maxAge 真实来自 config.jwt.expire」
+  //   · corsOrigin 回退 → 下方「真实 app 不回显任意来源」
+  //   · userAuthCache 淘汰口径 → 下方「容量淘汰真实行为」
+  describe('注释与实现对齐（不可行为化的注释契约集中登记）', () => {
+    test('ipRange 文件头注释显式说明四段约束（防止注释再次漂移）', () => {
+      const source = fs.readFileSync(path.join(__dirname, '../../utils/ipRange.js'), 'utf8');
+      expect(source).toMatch(/须写满四段/);
+    });
+
     test('cookie.js 不再写死与 config 默认值不符的具体时长', () => {
       const source = fs.readFileSync(path.join(__dirname, '../../utils/cookie.js'), 'utf8');
       const contract = source.slice(source.indexOf('契约（I-01）'), source.indexOf('项目未引入'));
       // 契约段落里不得出现写死的小时数——JWT_EXPIRE 由配置决定
       expect(contract).not.toMatch(/JWT_EXPIRE\s*\(\s*\d+\s*h\s*\)/);
       expect(contract).toMatch(/maxAge 与 JWT_EXPIRE 一致/);
+    });
+
+    test('access cookie 的 maxAge 真实来自 config.jwt.expire（上条契约的行为面）', () => {
+      // 用非默认值驱动：默认 2h 下「config 决定」与「写死 2h」不可区分；
+      // 改成 7h 后 maxAge 跟着配置走，才证明 cookie 侧没有写死时长
+      const saved = process.env.JWT_EXPIRE;
+      process.env.JWT_EXPIRE = '7h';
+      try {
+        jest.isolateModules(() => {
+          const { setAuthCookies } = require('../../utils/cookie');
+          const calls = [];
+          setAuthCookies(
+            { cookie: (name, value, opts) => calls.push({ name, opts }), clearCookie: () => {} },
+            'tok',
+            null
+          );
+          const access = calls.find((c) => c.opts && c.opts.maxAge !== undefined);
+          expect(access).toBeTruthy();
+          expect(access.opts.maxAge).toBe(7 * 60 * 60 * 1000);
+        });
+      } finally {
+        if (saved === undefined) delete process.env.JWT_EXPIRE;
+        else process.env.JWT_EXPIRE = saved;
+      }
     });
 
     test('config 的 corsOrigin 注释描述真实回退行为（固定白名单，非回显来源）', () => {
@@ -1190,6 +1231,40 @@ describe('批次F 工具与密码学加固回归', () => {
       // 不得残留任何肯定式 LRU 声明
       expect(block).not.toMatch(/按最近使用淘汰/);
       expect(block).not.toMatch(/此处原注释称 LRU/);
+    });
+
+    test('用户缓存容量淘汰的真实行为：超出上限时按插入序淘汰最早的一半', () => {
+      // 上条注释契约的行为面：淘汰判据是**插入顺序**（Map 迭代序），不是 LRU。
+      // 写满 1001 条后再写第 1002 条触发淘汰，最早的 500 条必须消失、其余保留——
+      // 若实现改成真 LRU 或整表清空，本用例即红。
+      const {
+        setCacheEntry,
+        getCacheEntry,
+        deleteCacheEntry,
+      } = require('../../middleware/userAuthCache');
+      const MAX = 1000;
+      const inserted = [];
+      try {
+        // 写满 1001 条后再写第 1002 条：淘汰闸在写入前检查 size > MAX
+        for (let i = 0; i <= MAX + 1; i += 1) {
+          const key = `evict-probe-${i}`;
+          setCacheEntry(key, {
+            user: { id: key },
+            expireAt: Date.now() + 60000,
+            loadedAt: Date.now(),
+          });
+          inserted.push(key);
+        }
+        // 触发淘汰：最早写入的 500 条（本批前 500 条）被移除，其余保留
+        for (let i = 0; i < MAX / 2; i += 1) {
+          expect(getCacheEntry(`evict-probe-${i}`)).toBeUndefined();
+        }
+        for (let i = MAX / 2; i <= MAX + 1; i += 1) {
+          expect(getCacheEntry(`evict-probe-${i}`)).toBeTruthy();
+        }
+      } finally {
+        for (const key of inserted) deleteCacheEntry(key);
+      }
     });
   });
 });

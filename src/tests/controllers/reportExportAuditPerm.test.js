@@ -76,6 +76,11 @@ describe('/api/reports/export?type=audit 权限闸门', () => {
 
   afterAll(async () => {
     if (mongoose.connection.readyState !== 0) {
+      // P3-24：回收自建用户（exp_*）与角色（*_TEST）；upsert 的共享权限保留
+      await User.deleteMany({ username: new RegExp('^exp_') }).catch(() => {});
+      await Role.deleteMany({ code: { $in: ['EXPORT_ONLY_TEST', 'EXPORT_AUDIT_TEST'] } }).catch(
+        () => {}
+      );
       await mongoose.connection.close();
     }
   });

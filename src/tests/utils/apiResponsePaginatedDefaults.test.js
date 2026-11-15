@@ -11,6 +11,7 @@
 'use strict';
 
 const ApiResponse = require('../../utils/apiResponse');
+const logger = require('../../utils/logger');
 
 const makeRes = () => ({
   statusCode: null,
@@ -64,5 +65,30 @@ describe('U5 paginated 分页字段兜底', () => {
     });
     expect(res2.body.pagination.hasMore).toBe(true);
     expect(res2.body.pagination.nextCursor).toBe('c1');
+  });
+
+  test('非数值 meta 字段按契约回退默认值，但必须留 warn 信号（审计 2026-11-15）', () => {
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      const res = makeRes();
+      ApiResponse.paginated(res, [], { page: '2', limit: '10', total: null, totalPages: 3 });
+      const p = res.body.pagination;
+      // 修复前：'2' 被静默兜成 page=1、无任何信号；修复后：兜底行为不变（不破坏
+      // 既有调用方契约），但逐字段告警一次，让"调用方传错类型"可见。
+      expect(p.page).toBe(1);
+      expect(p.limit).toBe(0);
+      expect(p.total).toBeNull(); // 显式 null 仍按游标契约透传，不告警
+      expect(p.totalPages).toBe(3);
+      const warned = warnSpy.mock.calls.map((c) => String(c[0])).join('\n');
+      expect(warned).toContain('分页字段 page');
+      expect(warned).toContain('分页字段 limit');
+      expect(warned).not.toContain('分页字段 total'); // 合法数值与契约 null 都不告警
+
+      // 去重：同一字段重复出现只告一次（避免高频列表接口刷日志）
+      ApiResponse.paginated(makeRes(), [], { page: '5' });
+      expect(warnSpy.mock.calls.filter((c) => String(c[0]).includes('page'))).toHaveLength(1);
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });

@@ -64,8 +64,17 @@ jobs:
             echo "::error::非法的 tag 名：$RELEASE_TAG"
             exit 1
           fi
-          if ! git fetch --force origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}" 2>/dev/null; then
-            echo "::error::远端不存在 tag ${RELEASE_TAG}：拒绝发布"
+          auth_header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.https://github.com/.extraheader" GIT_CONFIG_VALUE_0="$auth_header" # 匿名 fetch 仅公开仓可行（persist-credentials:false 后本地无凭据）：经环境注入令牌，不进命令行、不落 .git/config
+          fetch_err="$(mktemp)" # stderr 留底：401/403 是权限问题，原样吞掉会把「无权限」误报成「tag 不存在」
+          trap 'rm -f "$fetch_err"' EXIT
+          if ! git fetch --force origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}" 2>"$fetch_err"; then
+            if grep -qiE "401|403|forbidden|unauthorized|access denied" "$fetch_err"; then
+              echo "::error::拉取 tag ${RELEASE_TAG} 被拒绝（令牌无权限或失效），并非 tag 不存在。原始错误："
+            else
+              echo "::error::远端不存在 tag ${RELEASE_TAG}：拒绝发布。原始错误："
+            fi
+            sed 's/^/  /' "$fetch_err"
             exit 1
           fi
           actual="$(git rev-list -n 1 "refs/tags/${RELEASE_TAG}")"

@@ -7,6 +7,19 @@ const request = require('supertest');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 
+/** 黑名单闸的测试开关：impl 非空时替代真实查询；默认透传真实实现，不影响既有用例 */
+const mockBlacklistControl = { impl: null };
+jest.mock('../../middleware/tokenBlacklist', () => {
+  const actual = jest.requireActual('../../middleware/tokenBlacklist');
+  return {
+    ...actual,
+    isTokenBlacklisted: async (token) =>
+      mockBlacklistControl.impl
+        ? mockBlacklistControl.impl(token)
+        : actual.isTokenBlacklisted(token),
+  };
+});
+
 describe('Auth Middleware', () => {
   const secret = process.env.JWT_SECRET || 'test-jwt-secret-for-testing-only';
   let app;
@@ -160,33 +173,84 @@ describe('Auth Middleware', () => {
     });
   });
 
-  describe('JWT Token 基础功能', () => {
-    test('应生成有效的 JWT token', () => {
-      const payload = { userId: '123', username: 'test', role: 'admin' };
-      const token = jwt.sign(payload, secret, { expiresIn: '24h' });
-      expect(token).toBeDefined();
-      expect(typeof token).toBe('string');
-      expect(token.split('.')).toHaveLength(3);
+  describe('authenticate 的令牌面判别（kid 选钥 / 限算法 / 黑名单 fail-closed）', () => {
+    // 原四例测的是 jsonwebtoken 库本身（sign/verify/改密钥/过期），对本仓没有回归判别力：
+    // 库自身的行为不归本仓管。本仓的判据在 authenticate 的接线上——kid 选钥、
+    // 算法白名单、黑名单闸及其 fail-closed。以下四例分别钉这些接线。
+
+    /** 造一个真实用户 + 与其 tokenVersion 匹配的有效令牌（过 authenticate 的账户闸） */
+    const makeUserWithToken = async (name) => {
+      const User = require('../../models/User');
+      const suffix = `${Date.now().toString(36)}${name}`;
+      const user = await User.create({
+        username: `authcase${suffix}`,
+        email: `authcase${suffix}@example.com`,
+        password: 'Test@1234Zz9',
+      });
+      const token = jwt.sign(
+        { userId: String(user._id), username: user.username, tokenVersion: user.tokenVersion ?? 0 },
+        secret,
+        { expiresIn: '24h' }
+      );
+      return token;
+    };
+
+    test('header.kid 指向未知密钥 → 401 AUTH_TOKEN_INVALID（kid 选钥的拒绝腿）', async () => {
+      // 单密钥模式下 currentKid 为空串；配置了密钥集时取一个必然不存在的派生 kid——
+      // 两种配置下它都不是有效密钥
+      const { signingKids } = require('../../utils/jwtKeys');
+      const currentKid = signingKids().access;
+      const unknownKid = currentKid ? `${currentKid}-rotated-away` : 'zz-unknown-kid';
+      const token = jwt.sign({ userId: '123', tokenVersion: 0 }, secret, {
+        expiresIn: '24h',
+        header: { kid: unknownKid },
+      });
+
+      const res = await request(app).get('/protected').set('Authorization', `Bearer ${token}`);
+      expect(res.status).toBe(401);
+      // 未知 kid 归入「令牌无效」（401），不得落成 500：前端只在 401 触发刷新/登出
+      expect(res.body.errors.errorCode).toBe('AUTH_TOKEN_INVALID');
     });
 
-    test('应验证有效 token', () => {
-      const payload = { userId: '123', username: 'test' };
-      const token = jwt.sign(payload, secret, { expiresIn: '24h' });
-      const decoded = jwt.verify(token, secret);
-      expect(decoded.userId).toBe('123');
-      expect(decoded.username).toBe('test');
+    test('非白名单算法（HS512）签名 → 401 AUTH_TOKEN_INVALID（算法白名单收口）', async () => {
+      // authenticate 只允许 HS256：同一把密钥换成 HS512 签名必须被拒。
+      // 这是 jwt.verify 的 algorithms 白名单判据，比上面 alg:none 一例更一般的形态。
+      const token = jwt.sign({ userId: '123', tokenVersion: 0 }, secret, {
+        algorithm: 'HS512',
+        expiresIn: '24h',
+      });
+
+      const res = await request(app).get('/protected').set('Authorization', `Bearer ${token}`);
+      expect(res.status).toBe(401);
+      expect(res.body.errors.errorCode).toBe('AUTH_TOKEN_INVALID');
     });
 
-    test('应拒绝无效签名', () => {
-      const payload = { userId: '123' };
-      const token = jwt.sign(payload, secret, { expiresIn: '24h' });
-      expect(() => jwt.verify(token, 'wrong-secret')).toThrow();
+    test('已吊销令牌（黑名单命中）→ 401 AUTH_TOKEN_REVOKED', async () => {
+      const { blacklistToken } = require('../../middleware/tokenBlacklist');
+      const token = await makeUserWithToken('Revoke');
+      await blacklistToken(token, Math.floor(Date.now() / 1000) + 3600);
+
+      const res = await request(app).get('/protected').set('Authorization', `Bearer ${token}`);
+      expect(res.status).toBe(401);
+      expect(res.body.errors.errorCode).toBe('AUTH_TOKEN_REVOKED');
     });
 
-    test('应拒绝过期的 token', () => {
-      const payload = { userId: '123', exp: Math.floor(Date.now() / 1000) - 10 };
-      const token = jwt.sign(payload, secret);
-      expect(() => jwt.verify(token, secret)).toThrow(/expired/);
+    test('黑名单服务故障必须 fail-closed → 503 SECURITY_SERVICE_UNAVAILABLE', async () => {
+      const token = await makeUserWithToken('FailClosed');
+      mockBlacklistControl.impl = async () => {
+        const err = new Error('Token blacklist service unavailable');
+        err.code = 'BLACKLIST_SERVICE_UNAVAILABLE';
+        throw err;
+      };
+      try {
+        const res = await request(app).get('/protected').set('Authorization', `Bearer ${token}`);
+        expect(res.status).toBe(503);
+        // 与 authenticate 的 mapAuthFailure 口径一致：安全服务不可用是 503，
+        // 既不是「令牌无效」（401）也不是笼统 500——查不到结论时放行等于取消防线
+        expect(res.body.errors.errorCode).toBe('SECURITY_SERVICE_UNAVAILABLE');
+      } finally {
+        mockBlacklistControl.impl = null; // 还原：不得影响本文件其他用例
+      }
     });
   });
 });

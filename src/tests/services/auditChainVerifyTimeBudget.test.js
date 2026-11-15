@@ -78,12 +78,16 @@ describe('verifyAuditChain 的 maxTimeMS（服务层）', () => {
     return docs.reverse();
   }
 
-  test('带预算：find 第三参就是 { maxTimeMS }，第二参 null 是 projection 占位', async () => {
+  test('带预算：find 第三参就是 { maxTimeMS }，第二参是链校验投影（P2-01）', async () => {
     const { model, findCalls } = makeBudgetSpyModel(chainDocs(3));
     const report = await verifyAuditChain(model, { maxRecords: 10, maxTimeMS: 4321 });
 
     expect(findCalls).toHaveLength(1);
-    expect(findCalls[0][1]).toBeNull();
+    // P2-01：第二参从 null 占位改为链校验投影（只取白名单字段，不拖全文档进内存）。
+    // 本文件后段 jest.mock 了 auditChainVerify，取真实投影须走 requireActual
+    expect(findCalls[0][1]).toEqual(
+      jest.requireActual('../../services/auditChainVerify').CHAIN_VERIFY_PROJECTION
+    );
     expect(findCalls[0][2]).toEqual({ maxTimeMS: 4321 });
     // 预算不是"传到了"就算完：核验本身必须照常产出结论
     expect(report.total).toBe(3);

@@ -12,6 +12,9 @@
  * 进程崩溃时续租停止，锁按最后一个 PX 自然到期——不会永久占锁。
  */
 
+const logger = require('./logger');
+const metrics = require('./metrics');
+
 let frozen = false;
 
 /** 进入链写入临界区前调用：冻结窗口内直接失败，由调用方回退（缓冲重试 / 无哈希降级） */
@@ -31,6 +34,16 @@ const reset = () => {
 
 const isFrozen = () => frozen;
 
+const renewalBudgetMs = (ttlMs) =>
+  require('./envNumber').readPositiveNumberEnv(
+    'AUDIT_CHAIN_ZOMBIE_RENEWAL_BUDGET_MS',
+    Math.max(ttlMs * 10, 60000),
+    {
+      onInvalid: (name, raw, d) =>
+        logger.error(`${name}=${JSON.stringify(raw)} 非法（须为正的毫秒数），已按默认 ${d} 处理`),
+    }
+  );
+
 /**
  * 僵尸 fn 落定前的收尾：保持/续租分布式锁；落定后重同步再解冻、释放。
  * @param {Promise} work 仍在飞行的临界区 fn
@@ -44,7 +57,20 @@ const waitForZombie = (work, distLock, { ttlMs, resync }) => {
   if (distLock && typeof distLock.renew === 'function') {
     // 续租间隔取租约的 1/3：留两次重试余量。下限 10ms 只防极小配置下的忙循环。
     const renewEveryMs = Math.max(10, Math.floor(ttlMs / 3));
+    const renewDeadline = Date.now() + renewalBudgetMs(ttlMs);
     renewTimer = setInterval(() => {
+      if (Date.now() >= renewDeadline) {
+        clearInterval(renewTimer); // P3 续租上界：超界停手，让锁按 PX 过期（无限续租=链锁永久占死）
+        renewTimer = null;
+        logger.error(
+          `审计链僵尸写入超过续租上界（ttl=${ttlMs}ms），已停止续租分布式锁——锁将按 PX 过期，` +
+            '其余实例可接管；请排查悬挂的审计写入（Mongo 无响应/网络半开等）'
+        );
+        try {
+          metrics.incSecurityAlert('audit_chain_zombie_renewal_exceeded', 'high');
+        } catch (_) {}
+        return;
+      }
       Promise.resolve(distLock.renew(ttlMs)).catch(() => {});
     }, renewEveryMs);
     if (renewTimer.unref) renewTimer.unref();

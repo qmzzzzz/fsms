@@ -163,14 +163,20 @@ describe('模块入库闭包：解析得到的本地引用，目标必须已入�
   });
 
   test('反向自证：指向「盘上有、未入库」的目标必须被点名', () => {
-    // 在仓库里造一个未入库的夹具（名字用 .zz 前缀且**不是** *.test.js：
-    // 既避开 testMatch，也避开 testTreePurity 的测试树判据，只测本条自己）
-    const fixture = path.join(ROOT, 'src', `.zzmodtrack-${process.pid}-fixture.js`);
+    // 夹具写进 **.jesttmp/**（.gitignore 内，参照 mongooseTeardownLedger 同类先例）而
+    // 不是 src/：测试运行期往扫描根里写/删文件，会与并行的全仓扫描发生 ENOENT 竞态；
+    // .jesttmp 本就不在 git 里，"盘上有、未入库"的原场景不变。名字仍用 .zz 前缀且
+    // **不是** *.test.js：既避开 testMatch，也避开 testTreePurity 的测试树判据。
+    const tmpDir = path.join(ROOT, '.jesttmp');
+    fs.mkdirSync(tmpDir, { recursive: true });
+    const fixture = path.join(tmpDir, `.zzmodtrack-${process.pid}-fixture.js`);
     fs.writeFileSync(fixture, 'module.exports = 1;\n', 'utf8');
     try {
+      // 引用方也放在 .jesttmp/ 下：相对说明符 `./<basename>` 按引用方所在目录解析，
+      // 恰好指向上面那个盘上存在、git 里没有的文件——正是本闸要点名的形状
       const modules = [
         {
-          file: path.join(ROOT, 'src', 'app.js'),
+          file: path.join(tmpDir, 'referrer.js'),
           source: `require('./${path.basename(fixture)}');\n`,
         },
       ];

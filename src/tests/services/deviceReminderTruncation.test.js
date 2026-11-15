@@ -21,9 +21,9 @@
  * `reportWorkbookService.js:13`（恰好等于上限不得误报截断）、`models/FireDevice.js:235`。
  *
  * 【夹具口径】
- * 种子设备全部落在同一个 `location.building`，每次扫描都带该范围：不带范围就是全库扫描，
- * 会看见**同一 worker 库里其他测试文件**留下的设备（`setup.js` 按 JEST_WORKER_ID 分库，
- * 同库内文件串行而非隔离），任何精确计数断言都会变成随机数。
+ * 种子设备全部落在同一个 `location.building`，每次扫描都带该范围：不带范围的扫描会命中/
+ * 写入 deviceReminder 的**进程级全局缓存**（模块内缓存跨测试文件存活），任何精确计数
+ * 断言都会变成取决于执行顺序的随机数；带范围扫描不进全局缓存，计数恒收敛在本 building 内。
  */
 
 const mongoose = require('mongoose');

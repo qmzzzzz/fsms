@@ -66,6 +66,10 @@ describe('deviceCode 上限：路由与模型同一口径', () => {
       () => {}
     );
     if (mongoose.connection.readyState !== 0) {
+      // P3-24：回收自建操作员账号与角色（stamp 前缀 / ZZDC_ 前缀）
+      await User.deleteMany({ username: new RegExp(`^${stamp}`) }).catch(() => {});
+      const Role = require('../models/Role');
+      await Role.deleteMany({ code: new RegExp(`^ZZDC_`) }).catch(() => {});
       await mongoose.connection.close();
     }
   });

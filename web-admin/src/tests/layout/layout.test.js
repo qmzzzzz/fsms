@@ -981,26 +981,26 @@ describe('布局 · 路由联动与面包屑', () => {
 })
 
 describe('布局 · 语言切换', () => {
-  test('切到 English：i18n / store / sessionStorage / html lang / 菜单与面包屑文案全部跟随', async () => {
+  test('切到 English：i18n / store / localStorage / html lang / 菜单与面包屑文案全部跟随', async () => {
     const c = mountLayout({ initialRoute: '/devices' })
     await settleRouter(c.router)
     await flush(10)
     // 先切到中文：jsdom 的 navigator.language 是 en-US，若直接从「已是 en-US」
-    // 的初始态出发，断言 html lang / sessionStorage 时会与初始值重合而掩盖
+    // 的初始态出发，断言 html lang / localStorage 时会与初始值重合而掩盖
     // 「切换链路被拆掉」这类退化。必须先切到非默认语言，再切回英文。
     const first = await openByClick(iconByPath(c, Operation), '语言下拉')
     expect(dropdownItemLabels(first)).toEqual(['中文', 'English'])
     click(dropdownItem(first, '中文'))
     await pollUntil(() => i18n.global.locale.value === 'zh-CN', 'i18n 切到 zh-CN')
     expect(document.documentElement.getAttribute('lang')).toBe('zh-CN')
-    expect(window.sessionStorage.getItem('locale')).toBe('zh-CN')
+    expect(window.localStorage.getItem('locale')).toBe('zh-CN')
     expect(menuLabels(c)).toEqual(MENU_KEYS.map(label))
 
     const popper = await openByClick(iconByPath(c, Operation), '语言下拉（第二次）')
     click(dropdownItem(popper, 'English'))
     await pollUntil(() => i18n.global.locale.value === 'en-US', 'i18n 切到 en-US')
     expect(currentApp.language).toBe('en-US')
-    expect(window.sessionStorage.getItem('locale')).toBe('en-US')
+    expect(window.localStorage.getItem('locale')).toBe('en-US')
     expect(document.documentElement.getAttribute('lang')).toBe('en-US')
     // 用词表字面量断言，避免「用 t() 比 t()」的恒真比较
     expect(menuLabels(c)).toEqual([

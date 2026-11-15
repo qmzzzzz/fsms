@@ -14,6 +14,7 @@ const { computeFingerprint } = require('../../utils/fingerprint');
 const { clientIpForSecurityDecision } = require('../../utils/ipUtils');
 const authService = require('../../services/authService');
 const metrics = require('../../utils/metrics');
+const { errText } = require('../../utils/auditWriteFailure');
 const { rejectUnknownOutcome } = require('./shared');
 
 /**
@@ -282,8 +283,12 @@ const refreshToken = asyncHandler(async (req, res) => {
       fingerprint: computeFingerprint(req),
     });
   } catch (error) {
-    // 刷新链路上的任何未预期异常（含数据库故障）
-    // 一律按「无效的刷新令牌」拒绝，不把内部错误细节暴露给客户端
+    logger.error(`刷新令牌处理异常（按无效刷新令牌拒绝）：${errText(error)}`); // 审计2026-11-15 故障须留痕
+    try {
+      metrics.incSecurityAlert('refresh_session_failure', 'medium');
+    } catch (_) {
+      /* 指标端不可用时仅保留日志 */
+    }
     return ApiResponse.codeError(res, 'REFRESH_TOKEN_INVALID');
   }
 

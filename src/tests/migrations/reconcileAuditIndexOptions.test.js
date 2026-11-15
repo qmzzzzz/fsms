@@ -13,6 +13,22 @@ const { RETENTION_SECONDS } = require('../../constants/retention');
 
 const COLLECTION = 'auditlogs';
 
+/**
+ * 专用后缀库隔离（照 deploy/rollbackDrillRestoreVerification.test.js 的先例）：
+ * 本套件是唯一在共享 worker 库上反复改写 auditlogs 索引形态的迁移套件
+ * （beforeEach dropIndexes + 迁移内 collMod/重建），索引形态是本套件自己的夹具，
+ * 不该当跨套件共享状态用。改在同一 mongod 的后缀库上执行：先关旧连接再连
+ * （worker 复用时 readyState !== 0 会沿用旧连接，改动又会落回共享库），afterAll 丢库回收。
+ */
+const DB_SUFFIX = '_reconcile_idx_opts';
+const isolatedUri = () => {
+  const uri = process.env.MONGODB_URI;
+  const qIndex = uri.indexOf('?');
+  const base = qIndex === -1 ? uri : uri.slice(0, qIndex);
+  const query = qIndex === -1 ? '' : uri.slice(qIndex);
+  return base + DB_SUFFIX + query;
+};
+
 const getIndex = async (name) => {
   const list = await mongoose.connection.db.collection(COLLECTION).indexes();
   return list.find((i) => i.name === name) || null;
@@ -23,9 +39,11 @@ describe('迁移：auditlogs 索引选项对齐', () => {
   let silenceLog;
 
   beforeAll(async () => {
-    if (mongoose.connection.readyState === 0) {
-      await mongoose.connect(process.env.MONGODB_URI);
+    // worker 进程复用：上个套件若留下未关的连接（指向共享库），先关掉再连专用库
+    if (mongoose.connection.readyState !== 0) {
+      await mongoose.connection.close();
     }
+    await mongoose.connect(isolatedUri());
     coll = mongoose.connection.db.collection(COLLECTION);
     // 迁移内部用 console.log 输出进度，测试期静默避免噪音
     silenceLog = jest.spyOn(console, 'log').mockImplementation(() => {});
@@ -34,6 +52,8 @@ describe('迁移：auditlogs 索引选项对齐', () => {
   afterAll(async () => {
     silenceLog.mockRestore();
     if (mongoose.connection.readyState !== 0) {
+      // 独立库随连接一起丢弃：索引夹具不留在共享 mongod 上
+      await mongoose.connection.db.dropDatabase().catch(() => {});
       await mongoose.connection.close();
     }
   });

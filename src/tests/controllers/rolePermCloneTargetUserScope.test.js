@@ -109,7 +109,12 @@ describe('克隆内置角色给他人：targetUser 必须落在操作者的数�
   });
 
   afterAll(async () => {
-    if (mongoose.connection.readyState !== 0) await mongoose.connection.close();
+    if (mongoose.connection.readyState !== 0) {
+      // P3-24：回收自建用户（用户名均以 stamp 结尾）与角色（角色码均以大写 stamp 结尾）
+      await User.deleteMany({ username: new RegExp(`${stamp}$`) }).catch(() => {});
+      await Role.deleteMany({ code: new RegExp(`${stamp.toUpperCase()}$`) }).catch(() => {});
+      await mongoose.connection.close();
+    }
   });
 
   const signFor = (user) =>

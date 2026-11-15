@@ -80,4 +80,14 @@ describe('INP 口径为 P75（P3-69）', () => {
     const inp = await collect([10, 40, 20, 30])
     expect(inp.value).toBe(30)
   })
+
+  test('INP 样本封顶：仅保留最近 50 条，更早的样本不参与统计（P3-20）', async () => {
+    // 前 10 条是久远的高延迟交互（9999），后 50 条是 10..59：
+    // 封顶后只统计最近 50 条 → P75 = sorted[ceil(50*0.75)-1] = 47；
+    // 若不封顶（60 条全参与）P75 会是 54，且 9999 一旦留在样本里更会直接污染结果。
+    const samples = Array.from({ length: 60 }, (_, i) => (i < 10 ? 9999 : i))
+    const inp = await collect(samples)
+    expect(inp.value).toBe(47)
+    expect(inp.value).not.toBe(9999)
+  })
 })

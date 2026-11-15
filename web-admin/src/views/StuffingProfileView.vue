@@ -161,6 +161,7 @@ import i18n from '@/i18n'
 import stuffingProfileZhCN from '@/i18n/locales/stuffingProfile.zh-CN'
 import stuffingProfileEnUS from '@/i18n/locales/stuffingProfile.en-US'
 import { api, isCanceledError } from '@/utils/api'
+import { REAUTH_TICKET_ERROR_CODES, readReauthErrorCode } from '@/utils/reauthError'
 import { formatTime, localDateStr } from '@/utils/datetime'
 import { useLatestRequest } from '@/composables/useLatestRequest'
 import { markReauthVerified } from '@/utils/reauthTicket'
@@ -241,7 +242,6 @@ const charsetText = (code) => {
 }
 
 // ===== 二次验证（与审计/攻击画像同一套服务端会话窗口）=====
-const REAUTH_TICKET_ERROR_CODES = ['REAUTH_TICKET_REQUIRED', 'REAUTH_TICKET_INVALID']
 const reauthVisible = ref(false)
 const reauthSubmitting = ref(false)
 let pendingReauth = false
@@ -249,19 +249,6 @@ let pendingReauth = false
 const requireReauth = () => {
   pendingReauth = true
   reauthVisible.value = true
-}
-
-const readReauthErrorCode = async (e) => {
-  const data = e?.response?.data
-  if (data?.errors?.errorCode) return data.errors.errorCode
-  if (typeof Blob !== 'undefined' && data instanceof Blob) {
-    try {
-      return JSON.parse(await data.text())?.errors?.errorCode || ''
-    } catch (_) {
-      return ''
-    }
-  }
-  return ''
 }
 
 const loadProfile = async () => {

@@ -22,6 +22,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const yamlLite = require('./configDriftYaml');
 
 const ROOT = path.resolve(__dirname, '..');
 const BASELINE_PATH = path.join(ROOT, 'deployment/config-drift-baseline.json');
@@ -87,11 +88,10 @@ function composeItems(rootDir) {
   const file = path.join(rootDir, 'docker-compose.yml');
   const text = readIfExists(file);
   if (text === null) return {};
-  const yaml = require('js-yaml');
-  // compose 的 --wait 用法里会写 !override / !reset 这类自定义 tag；js-yaml 默认把它们当未知 tag
-  // 直接抛错。这里只剥掉**行尾位置**的 tag 本身（取值里的 '!' 不动），保留键与后续块结构。
+  // compose 会写 !override / !reset 标签：解析前只剥掉**行尾位置**的标签本身（取值里的 '!' 不动）。
+  // 解析用仓内零依赖的 configDriftYaml——js-yaml 是传递依赖，npm ci --omit=dev 的镜像里没有它。
   const withoutTags = text.replace(/^(\s*[\w.-]+:\s*)![A-Za-z][\w-]*\s*$/gm, '$1');
-  const parsed = yaml.load(withoutTags);
+  const parsed = yamlLite.parse(withoutTags);
   const services = (parsed && parsed.services) || {};
   const items = {};
   for (const [name, service] of Object.entries(services)) {

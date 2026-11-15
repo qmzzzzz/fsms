@@ -126,6 +126,36 @@ describe('usePullToRefresh 下拉刷新', () => {
     expect(throwing.api().refreshing.value).toBe(false)
   })
 
+  test('onRefresh 返回被拒 Promise：不产生未处理拒绝，状态正确复位且可再次触发', async () => {
+    // 契约：composable 内部以 Promise.resolve(result).catch(() => {}).finally(复位)
+    // 吞掉业务拒绝——若该兜底被删，这里的拒绝会作为 unhandledrejection 冒泡，
+    // vitest 会直接把本文件判红，故「本用例通过」本身即是不产生未处理拒绝的证据。
+    const onRefresh = vi.fn(() => Promise.reject(new Error('refresh network down')))
+    const { el, api } = await mountPull(onRefresh)
+
+    el.dispatchEvent(touch('touchstart', 100))
+    el.dispatchEvent(touch('touchmove', 300))
+    el.dispatchEvent(touch('touchend', 300))
+    expect(onRefresh).toHaveBeenCalledTimes(1)
+    expect(hapticMock).toHaveBeenCalledWith(15)
+    expect(api().refreshing.value).toBe(true)
+    expect(api().y.value).toBe(80) // 刷新期间指示条锁在门槛处
+
+    await flush(4)
+    // 拒绝路径同样走 finally：状态正确复位，不把用户锁在「刷新中」
+    expect(api().refreshing.value).toBe(false)
+    expect(api().y.value).toBe(0)
+
+    // 失败不锁死手势：复位后可再次下拉并重新触发刷新
+    el.dispatchEvent(touch('touchstart', 100))
+    el.dispatchEvent(touch('touchmove', 300))
+    el.dispatchEvent(touch('touchend', 300))
+    expect(onRefresh).toHaveBeenCalledTimes(2)
+    await flush(4)
+    expect(api().refreshing.value).toBe(false)
+    expect(api().y.value).toBe(0)
+  })
+
   test('不在顶部不启动：el.scrollTop 与 window.scrollY 任一越界都忽略', async () => {
     const { fn } = deferredRefresh()
     const { el, api } = await mountPull(fn)

@@ -237,8 +237,11 @@ router.beforeEach(async (to, from, next) => {
     return
   }
 
-  // 未登录访问需要认证的页面 -> 登录页
+  // 未登录访问需要认证的页面 -> 登录页。
+  // P3-11：目标路径经 authStore.postLoginRedirect 回传（不走 URL query，
+  // 缩小开放重定向面），登录成功侧做站内校验后跳回，非法值落 /dashboard
   if (to.meta.requiresAuth !== false && !authenticated) {
+    authStore.postLoginRedirect = to.fullPath
     next('/login')
     return
   }

@@ -429,6 +429,7 @@ import { localDateStr as sharedLocalDateStr } from '@/utils/datetime'
 import { usePermission } from '@/composables/usePermission'
 import { useLatestRequest } from '@/composables/useLatestRequest'
 import { useRealtimeRefresh } from '@/composables/useRealtimeRefresh'
+import { withSyncLock } from '@/utils/withSyncLock'
 import DeviceReminderDialog from '@/components/DeviceReminderDialog.vue'
 import DeviceMaintenanceDialog from '@/components/DeviceMaintenanceDialog.vue'
 
@@ -664,7 +665,7 @@ const handleDelete = async (row) => {
   }
 }
 
-const submitForm = async () => {
+const submitForm = withSyncLock(async () => {
   if (!formRef.value) return
   try {
     const valid = await formRef.value.validate()
@@ -710,7 +711,7 @@ const submitForm = async () => {
   } finally {
     dialog.submitting = false
   }
-}
+})
 
 const resetForm = () => {
   dialog.form = {

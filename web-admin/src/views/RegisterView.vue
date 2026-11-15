@@ -766,7 +766,8 @@ const onRegister = async () => {
 }
 
 const resetForm = () => {
-  registerFormRef.value.resetFields()
+  // ref 可能尚未挂载（对话框/过渡期触发重置）：判空防解引用崩溃
+  registerFormRef.value?.resetFields()
   stepDirection.value = 'back'
   activeStep.value = 0
   beginStepTransition()

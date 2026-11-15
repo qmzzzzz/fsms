@@ -130,14 +130,14 @@ async function recordHoneypotLogin({
   credentialShape,
 } = {}) {
   const honeypot = honeypotNameOf(username);
-  const punishTarget = resolvePunishTarget(attribution, ip);
-  const normalizedIp = normalizeIP(punishTarget) || punishTarget;
+  const punishTarget = resolvePunishTarget(attribution, ip); // P3：归一化失败不回落原文（不成就不成键）
+  const normalizedIp = normalizeIP(punishTarget); // 失败 ⇒ null：审计不写 ip 键、标记/告警记 null
   try {
     await AuditLog.create({
       action: ALERT_TYPES.HONEYPOT_LOGIN,
       category: 'auth',
       username,
-      ip: normalizedIp,
+      ...(normalizedIp ? { ip: normalizedIp } : {}), // 归一化失败 ⇒ 审计行无 ip 键
       userAgent,
       fingerprint,
       method,
@@ -237,13 +237,13 @@ async function recordHoneypotProbe({
   const honeypot = honeypotNameOf(username);
   // F1：惩罚/留痕目标按 resolvePunishableIp 的裁定取（punishIp）；PUBLIC_PEER_HEADER 下 punishIp 已是 socket 对端——伪造 XFF 的探测不再落到受害者 IP 名下
   const punishTarget = resolvePunishTarget(attribution, ip);
-  const normalizedIp = normalizeIP(punishTarget) || punishTarget;
+  const normalizedIp = normalizeIP(punishTarget); // P3：失败不回落原文——审计不写 ip 键，meta 记 null
   try {
     await AuditLog.create({
       action: ALERT_TYPES.HONEYPOT_PROBE,
       category: 'security',
       username,
-      ip: normalizedIp,
+      ...(normalizedIp ? { ip: normalizedIp } : {}), // 归一化失败 ⇒ 审计行无 ip 键
       method,
       path,
       success: true,

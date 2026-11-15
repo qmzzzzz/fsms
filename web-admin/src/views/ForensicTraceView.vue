@@ -630,6 +630,7 @@ import { usePermission } from '@/composables/usePermission'
 import { useLatestRequest } from '@/composables/useLatestRequest'
 import { actionLabel } from '@/utils/auditLabels'
 import { triggerReasonLabel, triggerCodeOf } from '@/utils/forensicLabels'
+import { copyText } from '@/utils/copyText'
 
 const { t } = useI18n()
 const { hasPerm } = usePermission()
@@ -989,32 +990,7 @@ const applyRouteQuery = () => {
   return Boolean(ip || fingerprint || ipSegment)
 }
 
-/** 复制当前判据的深链：换个人打开就是同一次溯源，不用重新手输 */
-const copyText = async (text) => {
-  try {
-    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-      await navigator.clipboard.writeText(text)
-      return true
-    }
-  } catch (_) {
-    // 非安全上下文 / 权限被拒：落到 textarea 兜底
-  }
-  let area = null
-  try {
-    area = document.createElement('textarea')
-    area.value = text
-    area.setAttribute('readonly', '')
-    area.style.position = 'fixed'
-    area.style.opacity = '0'
-    document.body.appendChild(area)
-    area.select()
-    return typeof document.execCommand === 'function' && document.execCommand('copy')
-  } catch (_) {
-    return false
-  } finally {
-    area?.remove()
-  }
-}
+/** 复制当前判据的深链：换个人打开就是同一次溯源，不用重新手输（实现收口 utils/copyText） */
 
 const handleCopyLink = async () => {
   if (copyingLink.value) return

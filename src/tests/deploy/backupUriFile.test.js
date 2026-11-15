@@ -873,7 +873,7 @@ describe('显式 MONGODB_URI 的内容校验与脱敏回显', () => {
     test('stat 不可用 ⇒ 必须拒绝（不能拿「工具在不在」当「这一次判得出来」）', () => {
       const r = callHydrate({ stubs: { stat: '#!/bin/sh\nexit 1\n' } });
       expect(r.out).toContain('rc=1');
-      expect(r.out).toMatch(/stat 不可用/);
+      expect(r.out).toMatch(/stat -c %s 与 stat -f %z 都不可用/); // 2026-11-15 审计：报错点名 GNU/BSD 两种 stat 形态
     });
 
     test('tr 退化成 cat ⇒ 必须拒绝（互补计数之和 ≠ 总字节数）', () => {

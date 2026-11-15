@@ -23,6 +23,7 @@ const {
   passwordChangeUserLimiter,
 } = require('../middleware/rateLimit');
 const { body, param } = require('express-validator');
+const { consumeValidation } = require('../middleware/validateQuery');
 const { mustBeString } = require('../utils/validationRules');
 const { MAX_DATA_URI_CHARS } = require('../utils/avatarImage');
 const ApiResponse = require('../utils/apiResponse');
@@ -34,6 +35,7 @@ const {
   rejectEncPlaintextCoexistence,
   passwordStrengthCheck,
   buildChangePasswordValidation,
+  reauthCredentialValidation,
 } = require('../middleware/security/reauthCredentialRules');
 
 // 验证规则
@@ -292,8 +294,12 @@ router.post('/refresh', strictLimiter, refreshTokenBodyValidation, authControlle
  * @route   GET /api/auth/session
  * @desc    轻量会话探测（返回是否已登录，始终 200，不触发 token 刷新链）
  * @access  Public
+ *
+ * 审计 2026-11-15：本端点未认证即可达且判定要打库/黑名单（isAccessTokenValid /
+ * isRefreshTokenValid），与 /captcha-status 同族——补 strictLimiter 桶，避免成为
+ * 唯一没有任何专属限流的认证面端点。
  */
-router.get('/session', authController.getSessionStatus);
+router.get('/session', strictLimiter, authController.getSessionStatus);
 
 /**
  * @route   GET /api/auth/me
@@ -374,6 +380,15 @@ router.post('/logout', authenticateForLogout, refreshTokenBodyValidation, authCo
  */
 router.get('/mfa/status', authenticate, mfaController.getMfaStatus);
 
+/** mfaCode 格式闸（审计 2026-11-15）：格式非法必须在 requireReAuthentication 之前拒绝（否则先烧共享 MFA 失败锁），仍回 MFA_CODE_FORMAT（契约归 mfaController） */
+const rejectMalformedMfaCode = (req, res, next) => {
+  const code = typeof req.body?.mfaCode === 'string' ? req.body.mfaCode.trim() : '';
+  if (!/^\d{6}$/.test(code)) {
+    return ApiResponse.codeError(res, 'MFA_CODE_FORMAT');
+  }
+  return next();
+};
+
 /**
  * @route   POST /api/auth/mfa/enroll
  * @desc    生成 MFA 密钥（开启第一步，返回 secret 与 otpauth URI）
@@ -383,11 +398,14 @@ router.get('/mfa/status', authenticate, mfaController.getMfaStatus);
  * encCurrentPassword 由 requireReAuthentication 消费：密文轨解密失败一律
  * AUTH_ENCRYPTED_CREDENTIAL_INVALID（fail-closed），strict 模式拒绝明文轨与并存
  * ——策略收敛在中间件，enroll/enable 无需重复声明校验器。
+ * 审计 2026-11-15：补 reauthCredentialValidation + consumeValidation（此前唯二未挂凭据契约校验的端点之一）。
  */
 router.post(
   '/mfa/enroll',
   authenticate,
   strictLimiter,
+  reauthCredentialValidation,
+  consumeValidation(),
   requireReAuthentication(),
   mfaController.mfaEnroll
 );
@@ -411,13 +429,12 @@ router.post(
   // 尝试速度压到同一档。限流器挂载的一致性本身就是可核查的安全属性——漏挂的
   // 那一个端点永远是最先被扫到的。
   strictLimiter,
+  // 审计 2026-11-15：格式闸提到再验证之前——原先的 body('mfaCode') 链挂在再验证之后且从不消费，
+  // 格式非法的码会先烧一次共享 MFA 失败锁才被拒。见 rejectMalformedMfaCode 注释。
+  rejectMalformedMfaCode,
   // 确认开启是**真正改变安全状态**的一步：会话劫持者若只凭 mfaCode 就能启用，
   // 等于用受害者刚扫过的密钥把自己的认证器锁进账户。此处追加当前密码复检。
   requireReAuthentication(),
-  body('mfaCode')
-    .trim()
-    .matches(/^\d{6}$/)
-    .withMessage('两步验证码应为 6 位数字'),
   mfaController.mfaEnable
   // PERMISSION-EXEMPT: 本人资源：启用本人 MFA（需二次验证）
 );

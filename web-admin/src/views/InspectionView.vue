@@ -262,6 +262,7 @@ import { useListLoadState } from '@/composables/useListLoadState'
 import { formatTime } from '@/utils/datetime'
 import { usePermission } from '@/composables/usePermission'
 import { useLatestRequest } from '@/composables/useLatestRequest'
+import { withSyncLock } from '@/utils/withSyncLock'
 import InspectionForm from '@/components/InspectionForm.vue'
 import InspectionCompleteForm from '@/components/InspectionCompleteForm.vue'
 import InspectionReviewForm from '@/components/InspectionReviewForm.vue'
@@ -449,7 +450,7 @@ const handleAdd = () => {
   formReadonly.value = false
   visible.value = true
 }
-const handleStart = async (row) => {
+const handleStart = withSyncLock(async (row) => {
   try {
     await ElMessageBox.confirm(
       `${t('messages.startConfirm')}「${row.title}」?`,
@@ -466,7 +467,7 @@ const handleStart = async (row) => {
       // 已由拦截器提示
     }
   }
-}
+})
 const handleComplete = (row) => {
   currentInspection.value = row
   completeVisible.value = true
@@ -480,8 +481,8 @@ const detail = (row) => {
   formReadonly.value = true
   visible.value = true
 }
-const handleDelete = (row) => {
-  ElMessageBox.confirm(
+const handleDelete = withSyncLock((row) => {
+  return ElMessageBox.confirm(
     `${t('messages.deleteConfirm')}「${row.title}」?`,
     t('messages.confirmTitle'),
     { type: 'warning' }
@@ -496,7 +497,7 @@ const handleDelete = (row) => {
       }
     })
     .catch(() => {})
-}
+})
 
 // 取消巡检（开放档位 → cancelled；可选原因写入 executionLog 的 remark）
 const handleCancel = async (row) => {

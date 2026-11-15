@@ -88,6 +88,8 @@
  */
 
 const {
+  PAYLOAD_FIELDS_V1,
+  PAYLOAD_FIELDS_V6,
   canonicalPayload,
   canonicalPayloadV2LegacyBatch,
   computeHash,
@@ -98,6 +100,19 @@ const {
 // 链接性窗口：父可在**已扫侧最近 256 条哈希**里，或**未扫侧 ≤ 该值个位次**的前瞻里；
 // 远小于任何有意义的删除批量 ⇒ 删除可检出；插入伪造不可检，见文件头「已知检出上限」
 const LINK_WINDOW_SIZE = 256;
+
+const CHAIN_VERIFY_PROJECTION = Object.freeze({
+  _id: 1, // 断裂样本（sampleOf）与链首认领（claimHead）
+  hash: 1, // P2-01 链校验投影：只取「链字段 ∪ 载荷白名单」，不拖完整审计文档进内存
+  prevHash: 1,
+  hmac: 1,
+  hashVersion: 1, // 选 payload 口径
+  hashFailure: 1, // hash_compute_failed 归因（良性缺口，不计 breaks）
+  ...Object.fromEntries(
+    // 必须覆盖 v1~v6 并集：少一个字段，那个版本整体假 hash_mismatch
+    [...new Set([...PAYLOAD_FIELDS_V1, ...PAYLOAD_FIELDS_V6])].map((field) => [field, 1])
+  ),
+});
 
 // 单次校验的记录上限：审计集合可达千万级，全量校验必须由离线脚本分段执行。
 // 接口侧默认只校验最近一段，避免长事务与内存膨胀。
@@ -344,11 +359,10 @@ const fetchChainWindow = async (AuditLog, scan) => {
   //    以及消费方对 `find` 的既有断言都不该因为一个"默认不生效"的参数而漂移
   //    （`maxTimeMS: 0` 在服务端本就是"不限"，实测接受，所以发 0 只是多一个签名）；
   // ③ 第二参是 projection，写成 `find(filter, { maxTimeMS })` 会被当成投影而不是选项，
-  //    是个静默失效的经典坑，故必须 `find(filter, null, { maxTimeMS })` 显式占位。
-  // 实测 mongoose 8.24.1：`find(f, null, {maxTimeMS:2500}).options.maxTimeMS === 2500`，
-  // 与链式 `.maxTimeMS()` 落进同一个 options 袋（到驱动层等价）。
+  //    是个静默失效的经典坑，故预算必须落第三参；第二参即链校验投影（P2-01，只读白名单）。
+  // 实测 mongoose 8.24.1：`find(f, null, {maxTimeMS:2500}).options.maxTimeMS === 2500`，与链式 `.maxTimeMS()` 落进同一个 options 袋（到驱动层等价）。
   const windowOptions = scan.maxTimeMS > 0 ? { maxTimeMS: scan.maxTimeMS } : undefined;
-  const window = await AuditLog.find(scan.filter, null, windowOptions)
+  const window = await AuditLog.find(scan.filter, CHAIN_VERIFY_PROJECTION, windowOptions)
     .sort({ _id: scan.fromLatest ? -1 : 1 })
     .limit(scan.maxRecords)
     .lean();
@@ -622,4 +636,5 @@ module.exports = {
   LINK_WINDOW_SIZE,
   DEFAULT_MAX_RECORDS,
   HARD_MAX_RECORDS,
+  CHAIN_VERIFY_PROJECTION,
 };

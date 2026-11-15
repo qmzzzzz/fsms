@@ -77,118 +77,17 @@ function mongodName(key) {
     .join('_');
 }
 
-/**
- * 读取集合的全部索引；集合尚不存在（全新库首次 migrate）按"没有索引"处理。
- * 放过 NamespaceNotFound（codeName 或 code 26）与 code 48（NamespaceExists）：宽口径 catch 会把
- * 鉴权失败/选主超时读成"没有索引" → 静默不补齐却打印成功（同 20260831000000 / 20261101000000 的处置）。
- */
-const listIndexes = async (db, coll) => {
-  try {
-    return await db.collection(coll).indexes();
-  } catch (err) {
-    if (err && (err.codeName === 'NamespaceNotFound' || err.code === 26 || err.code === 48))
-      return [];
-    throw err;
-  }
-};
-
-const getIndex = async (db, coll, name) =>
-  (await listIndexes(db, coll)).find((i) => i.name === name) || null;
-
-/** key 的签名：**顺序**是 key 的一部分（反序/漏 _id 与声明的三键形态不是同一条索引） */
-const keySig = (key) =>
-  Object.keys(key)
-    .map((k) => k + ':' + key[k])
-    .join('|');
-
-const sameKey = (actualKey, expectedKey) =>
-  !!actualKey && keySig(actualKey) === keySig(expectedKey);
-
-/**
- * collation 的**缺省值**。mongod 8.0.34 实测：声明过的 collation 在 indexes() 里被展开成全字段，
- * 未声明 collation 的索引则**没有** collation 字段。所以要拿声明的半截 collation 去比，必须先补默认值。
- */
-const COLLATION_DEFAULTS = {
-  locale: 'simple',
-  caseLevel: false,
-  caseFirst: 'off',
-  strength: 3,
-  numericOrdering: false,
-  alternate: 'non-ignorable',
-  maxVariable: 'punct',
-  normalization: false,
-  backwards: false,
-};
-
-/**
- * collation 归一化：补默认值，只留用户可设字段。
- * · null 表示**没有** collation —— 与「有 collation 但全用默认值」是两回事，不能混同。
- * · **不比 version**：它是服务端按 ICU 版本回填的，换 mongod 版本就会变。
- */
-const collationSig = (collation) => {
-  if (!collation) return null;
-  const norm = {};
-  for (const field of Object.keys(COLLATION_DEFAULTS)) {
-    norm[field] = field in collation ? collation[field] : COLLATION_DEFAULTS[field];
-  }
-  return norm;
-};
-
-/** 递归按键排序后序列化：partialFilterExpression 里的键序是写法差异，不该算漂移 */
-const stableJson = (value) => {
-  if (value === undefined) return 'null';
-  if (Array.isArray(value)) return '[' + value.map(stableJson).join(',') + ']';
-  if (value && typeof value === 'object') {
-    const keys = Object.keys(value).sort();
-    const body = keys.map((k) => JSON.stringify(k) + ':' + stableJson(value[k])).join(',');
-    return '{' + body + '}';
-  }
-  return JSON.stringify(value);
-};
-
-/** TTL 归一化：null 表示不是 TTL 索引 */
-const ttlSig = (spec) =>
-  typeof spec.expireAfterSeconds === 'number' ? spec.expireAfterSeconds : null;
-
-/**
- * 索引 spec 的**完整签名** —— 幂等判据的唯一依据。
- * 组成：key 有序签名 + collation 全字段 + unique/sparse/hidden/expireAfterSeconds/
- * partialFilterExpression；声明里没有的选项一律按「不存在」(false / null) 处理。
- * 因此「实测多了 unique:true」「多了 sparse」「多了 partial」「多了 hidden」「多了任一
- * collation 字段」都算漂移。background 不进签名：8.0 起它只是建索引期的 no-op，不回读。
- *
- * 判据覆盖但**不可构造**（写成注释而非用例，避免造出 mongod 直接拒的形态）：
- *   · 复合 key + expireAfterSeconds ⇒ 8.0.34 实测 code 67 CannotCreateIndex
- *     （"TTL indexes are single-field indexes"）；本迁移七条目标全是复合 key，该漂移不可达；
- *   · collation.caseFirst:'upper' 在 strength<=2 下建不出来（code 2 BadValue，实测），
- *     strength:3 才可构造，构造后会被 specSig 判为漂移并重建。
- */
-const specSig = (spec) =>
-  stableJson({
-    key: keySig(spec.key),
-    collation: collationSig(spec.collation),
-    unique: !!spec.unique,
-    sparse: !!spec.sparse,
-    hidden: !!spec.hidden,
-    expireAfterSeconds: ttlSig(spec),
-    partialFilterExpression: spec.partialFilterExpression || null,
-  });
-
-/**
- * 异名索引是否与声明**冲突**（即 mongod 的 85 判据成立，必须删掉才能建出目标）。
- * 判据：mongod 的 85 只比 {key, unique, sparse, partialFilterExpression, collation}，
- * **hidden 与 name 都不进判据**；这四维全同则无论名字如何都抛 85。
- * 因此本函数**刻意不比 hidden**：hidden 的差异不构成并存理由，比较它反而会放过冲突。
- * expireAfterSeconds 由调用处单独判定（它同样会抛 85，但删了会丢留存语义）。
- */
-const isEquivalentTwin = (actual, declared) =>
-  !!actual &&
-  keySig(actual.key) === keySig(declared.key) &&
-  stableJson(collationSig(actual.collation)) === stableJson(collationSig(declared.collation)) &&
-  !!actual.unique === !!declared.unique &&
-  !!actual.sparse === !!declared.sparse &&
-  stableJson(actual.partialFilterExpression || null) ===
-    stableJson(declared.partialFilterExpression || null);
+// 幂等判据收口到 _lib/indexSpec（P2-35）：specSig/collationSig/isEquivalentTwin/dropIndexIfExists
+// 等曾在本文件与其余 5 个迁移各抄一份且已漂移，现统一 require 共享模块，判据口径逐字段不变。
+const {
+  listIndexes,
+  getIndex,
+  sameKey,
+  ttlSig,
+  specSig,
+  isEquivalentTwin,
+  dropIndexIfExists,
+} = require('./_lib/indexSpec');
 
 module.exports = {
   REPLACE,
@@ -250,14 +149,3 @@ module.exports = {
     }
   },
 };
-
-/** 按名删；不存在（含集合不存在）即跳过，不让 down()/清理路径因"本来就没有"而中断 */
-async function dropIndexIfExists(db, coll, name) {
-  try {
-    await db.collection(coll).dropIndex(name);
-    console.log(coll + '.' + name + ' 已删除');
-  } catch (err) {
-    if (err && (err.codeName === 'IndexNotFound' || err.code === 27 || err.code === 26)) return;
-    throw err;
-  }
-}

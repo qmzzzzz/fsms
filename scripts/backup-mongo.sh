@@ -2,6 +2,8 @@
 
 # MongoDB 备份脚本
 # 用法: ./scripts/backup-mongo.sh [backup_dir]
+#   backup_dir 缺省为 <仓库根>/backups——按本脚本自身位置解析，与执行时的 cwd 无关
+#   （cron/手工在任意目录跑，产物都落在同一处）；显式传参（deploy 传绝对路径）不受影响。
 #
 # 环境变量：
 #   MONGODB_URI             必填（或用 MONGODB_URI_FILE 指向密钥文件），含凭据的连接串
@@ -39,7 +41,9 @@ set -euo pipefail
 # 加密/解密/校验和的唯一实现（与 restore-mongo.sh 共用，P1-①）
 . "$(dirname "$0")/backupCrypto.sh"
 
-BACKUP_DIR=${1:-"./backups"}
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# 缺省目录按脚本自身位置解析（<仓库根>/backups），不随调用方 cwd 漂移（说明见文件头）
+BACKUP_DIR=${1:-"$SCRIPT_DIR/../backups"}
 # 时间戳带秒。原先是 %Y%m%d-%H%M（只到分钟）：同一分钟内两次备份会算出**同名**文件，
 # 而 mongodump --archive 是覆盖写——事故现场手工补的那一份会静默吃掉整点 cron 那一份
 # （scripts/deploy.js 每次发布前也走这里，与 cron 撞在同一分钟完全可能）。

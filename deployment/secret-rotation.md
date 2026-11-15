@@ -27,6 +27,24 @@ compose 的 `secrets: file:` 在 Linux 上是 bind mount，容器内保留宿主
 tmpfs 删掉，三者是这条链的组成部分（契约见
 `src/tests/deploy/appSecretEntrypoint.test.js`）。
 
+### 宿主侧低权服务消费 secret 的属组化（2026-11-15，P2-31）
+
+宿主机上以**专用低权账号**运行的 systemd 服务（如
+`fsms-access-review.service` 的 `User=fsms-review`）同样读不到 0600 的
+`./secrets/*`—— DynamicUser 即弃 UID 或与部署用户无关的专用账号都一样。
+口径与容器侧同源：**不回落明文 .env**，按需把该服务点名要用的那一份密钥
+属组化到服务组，其余密钥维持 0600 不动：
+
+```bash
+sudo chgrp fsms-review ./secrets/mongodb_uri   # 只放开本服务要读的那一份
+sudo chmod 0640        ./secrets/mongodb_uri
+```
+
+这是 0640（组可读）而非 0644（世界可读）：能进 `fsms-review` 组的账号仍只有
+运维显式加入的那些。不要把整个 `./secrets/` 目录或全部密钥一起属组化——
+每多一份组可读的密钥，就多一条「拿到服务组任意账号 ≈ 拿到该密钥」的路径。
+轮换该密钥后重跑这两条（`generate-secrets.js --force` 会重置权限位）。
+
 ## 执行位置与 `*_FILE` 前缀（本手册所有命令行的前提，不是可选说明）
 
 本手册里的 `node scripts/…` 与 `./scripts/….sh` 一律在**宿主机**执行，原因有两条，
@@ -129,12 +147,13 @@ mongod 启动前由 entrypoint 复制到 `/tmp/mongo.key` 并收紧到 0400
 服务端日志的 `publicKeySha256` 字段。另注意静态私钥无前向保密：一旦泄露须按
 口令泄露处置（强制改密），预案见 `SECURITY.md`「登录口令加密的密钥管理」。
 
-### ⚠️ HMAC_SECRET 的六重影响：请按这张表读，不要按小节读
+### ⚠️ HMAC_SECRET 的七重影响：请按这张表读，不要按小节读
 
-上表 HMAC_SECRET 一行只写了审计链。**`HMAC_SECRET` 在本仓有六个消费点**，
-其中只有第 1 个有迁移工具——另外五个换钥后都没有迁移手段（第 2~4 个**静默失效**，
+上表 HMAC_SECRET 一行只写了审计链。**`HMAC_SECRET` 在本仓有七个消费点**，
+其中只有第 1 个有迁移工具——另外六个换钥后都没有迁移手段（第 2~4 个**静默失效**，
 第 5 个会让检查点核验**全量报 signature_invalid**，第 6 个只会让在途的升级请求
-被代理拒绝执行——**可自愈**，但错误的换钥时机仍会卡住一次发布）：
+被代理拒绝执行——**可自愈**，但错误的换钥时机仍会卡住一次发布；第 7 个让存量
+取证副本里的口令摘要无法用新钥复算——没有明文，旧副本按旧钥留档即可）：
 
 | #   | 消费点（路径按仓库根写全，行号会漂移、判据是文件） | 用途                                   | 轮换后                             | 迁移手段                                               |
 | --- | -------------------------------------------------- | -------------------------------------- | ---------------------------------- | ------------------------------------------------------ |
@@ -144,6 +163,7 @@ mongod 启动前由 entrypoint 复制到 `/tmp/mongo.key` 并收紧到 0400
 | 4   | `src/utils/encryption.js:189`                      | `HMACSigner` 数据签名密钥              | 存量签名全部失配                   | ❌ 无                                                  |
 | 5   | `src/services/auditChainCheckpoint.js:62`          | 审计链检查点签名                       | 存量检查点全部验签失败             | ❌ 无（轮换前留档、轮换后另起文件，见第 5 点）         |
 | 6   | `src/services/upgradeService.js`                   | 升级请求签名（应用签发、宿主代理验签） | 在途请求验签失败、被移入 rejected/ | ❌ 无需迁移（请求 30 分钟内过期，重发即可；见第 6 点） |
+| 7   | `src/services/forensicCapturePayload.js`           | 取证副本口令/恢复码摘要的 pepper       | 存量副本摘要失配（无法复算）       | ❌ 无（没有明文就无法重算）                            |
 
 > **这张表是单一来源**：`src/tests/config/hmacSecretConsumersSingleSource.test.js`
 > 会扫描 `src/`（排除测试与配置装载面）下所有 `HMAC_SECRET` / `hmacSecret` 的消费点，

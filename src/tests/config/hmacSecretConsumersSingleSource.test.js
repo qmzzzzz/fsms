@@ -32,6 +32,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { jsCodeOnly } = require('../helpers/jsCodeOnly');
 
 const ROOT = path.join(__dirname, '../../..');
 const SRC_DIR = path.join(ROOT, 'src');
@@ -48,6 +49,7 @@ const EXPECTED_CONSUMERS = [
   'src/utils/encryption.js', // HMACSigner 数据签名密钥
   'src/services/auditChainCheckpoint.js', // 审计链签名检查点（S-8）
   'src/services/upgradeService.js', // 升级请求签名（应用签发、宿主代理验签）
+  'src/services/forensicCapturePayload.js', // 取证副本口令/恢复码摘要的 pepper（P2-05：缺 pepper 只存长度不落摘要）
 ];
 
 /**
@@ -55,7 +57,7 @@ const EXPECTED_CONSUMERS = [
  * 只认「从配置/环境**读出**密钥」这一形态：`hmacSecretOf(...)` 把已取出的密钥当参数
  * 传递给下游（auditAnchorSink、auditChainVerify）不是新消费点——密钥来源仍是
  * auditChainCheckpoint / auditChain。按裸标识符 `hmacSecret` 匹配会把这类下游
- * 全部卷进清单，轮换手册就得为同一把钥写多行，反而稀释"真正需要轮换预案"的那六个。
+ * 全部卷进清单，轮换手册就得为同一把钥写多行，反而稀释"真正需要轮换预案"的那七个。
  */
 const KEY_ACCESS_PATTERN =
   /require\(['"]\.\.\/config['"]\)\.hmacSecret|config\.hmacSecret|process\.env\.HMAC_SECRET/;
@@ -87,8 +89,12 @@ describe('HMAC_SECRET 消费点清单的单一来源', () => {
   });
 
   test('源码里的消费点集合必须恰好等于登记清单（新增消费点须同步登记）', () => {
+    // P3-12：扫描前先剥注释（jsCodeOnly，全仓文本闸的统一口径）——
+    // 注释/文档里仿写的 `process.env.HMAC_SECRET` 示例不再被当成消费点而造成假红
     const found = sourceFiles
-      .filter((rel) => KEY_ACCESS_PATTERN.test(fs.readFileSync(path.join(ROOT, rel), 'utf8')))
+      .filter((rel) =>
+        KEY_ACCESS_PATTERN.test(jsCodeOnly(fs.readFileSync(path.join(ROOT, rel), 'utf8')))
+      )
       .sort();
     expect(found).toEqual([...EXPECTED_CONSUMERS].sort());
   });
@@ -108,8 +114,8 @@ describe('HMAC_SECRET 消费点清单的单一来源', () => {
       expect(doc).toMatch(/恢复码/);
     });
 
-    test('手册必须写明消费点总数为六个（防止表格被悄悄删行）', () => {
-      expect(doc).toMatch(/六个消费点/);
+    test('手册必须写明消费点总数为七个（防止表格被悄悄删行）', () => {
+      expect(doc).toMatch(/七个消费点/);
     });
 
     test('手册必须说明"只有第 1 个有迁移工具"这一非对称事实', () => {

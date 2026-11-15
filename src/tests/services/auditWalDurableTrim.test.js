@@ -20,6 +20,13 @@ const path = require('path');
 const cap = require('../../services/auditWalCap');
 const wal = require('../../services/auditBufferWal');
 
+// P3-20：快照原值，afterAll 按原值归还（而非一律 delete），不抹掉前序套件的原设定
+const SAVED_WAL_ENV = {
+  AUDIT_WAL_MAX_BYTES: process.env.AUDIT_WAL_MAX_BYTES,
+  AUDIT_WAL_STAT_INTERVAL: process.env.AUDIT_WAL_STAT_INTERVAL,
+  AUDIT_WAL_ALLOW_DURABLE_TRIM: process.env.AUDIT_WAL_ALLOW_DURABLE_TRIM,
+};
+
 /** 一条 WAL 行；durable=true 时带上 outbox 的持久化承诺标记 */
 const walLine = (seq, durable) =>
   `${JSON.stringify({
@@ -79,9 +86,10 @@ describe('审计 WAL 超限裁剪按持久化承诺分级', () => {
   });
 
   afterAll(() => {
-    delete process.env.AUDIT_WAL_ALLOW_DURABLE_TRIM;
-    delete process.env.AUDIT_WAL_MAX_BYTES;
-    delete process.env.AUDIT_WAL_STAT_INTERVAL;
+    for (const [key, value] of Object.entries(SAVED_WAL_ENV)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
     try {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     } catch (_) {

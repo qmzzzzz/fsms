@@ -155,11 +155,42 @@ const fireAlarmSchema = new mongoose.Schema(
         remark: String,
       },
     ],
+    processLogCount: { type: Number, default: 0, min: 0 }, // P2-08：留痕总条数载体
   },
   {
     timestamps: true,
   }
 );
+
+const PROCESS_LOG_CAP = 200; // P2-08：processLog 尾部封顶（同 maintenanceRecord/executionLog 口径），截断可数不静默
+
+fireAlarmSchema.pre('validate', function (next) {
+  if (!Array.isArray(this.processLog)) return next();
+  const total = Math.max(this.processLogCount || 0, this.processLog.length);
+  if (this.processLog.length > PROCESS_LOG_CAP) {
+    this.processLog = this.processLog.slice(this.processLog.length - PROCESS_LOG_CAP);
+  }
+  if (this.isNew || this.isModified('processLog')) this.processLogCount = total;
+  next();
+});
+
+const capProcessLogPush = (update) => {
+  if (!update || typeof update !== 'object' || !update.$push || !update.$push.processLog) return;
+  const entry = update.$push.processLog;
+  if (entry && typeof entry === 'object' && !Array.isArray(entry) && Array.isArray(entry.$each)) {
+    return;
+  }
+  update.$push.processLog = {
+    $each: Array.isArray(entry) ? entry : [entry],
+    $slice: -PROCESS_LOG_CAP,
+  };
+  update.$inc = { ...(update.$inc || {}), processLogCount: 1 };
+};
+
+fireAlarmSchema.pre(['findOneAndUpdate', 'updateOne', 'updateMany'], function (next) {
+  capProcessLogPush(this.getUpdate());
+  next();
+});
 
 // 自动生成报警编号（使用 autoIncrement 插件，基于 counters 原子计数器）
 //

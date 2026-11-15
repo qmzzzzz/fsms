@@ -125,6 +125,27 @@ describe('Top-6 后半：各类"整组加载失败"形态必须被拦下', () =>
     expect(validateAlertRules(rule({ expr: 'increase(x_total[1h30m]) > 0' }))).toEqual([]);
   });
 
+  test('PromQL 子查询 [区间:步长] 是合法形态（2026-11-15 审计：不得误报）', () => {
+    for (const expr of [
+      'avg_over_time(x_total[5m:1m]) > 0',
+      'max_over_time(sum(rate(x_bucket[5m]))[1h:1m]) > 0',
+      'x_total[5m:]', // 步长可省略：省略即取全局求值步长
+    ]) {
+      expect({ expr, problems: validateAlertRules(rule({ expr })) }).toMatchObject({
+        expr,
+        problems: [],
+      });
+    }
+  });
+
+  test('子查询的非法形态仍被拒绝（多于一个冒号 / 步长非法）', () => {
+    for (const expr of ['x_total[5m:1min]', 'x_total[5m:1m:2m]', 'x_total[:1m]']) {
+      expect(validateAlertRules(rule({ expr }))).toEqual([
+        expect.stringContaining('区间向量时长非法'),
+      ]);
+    }
+  });
+
   test('for 时长非法', () => {
     expect(validateAlertRules(rule({ forText: '1min' }))).toEqual([
       expect.stringContaining('for 时长非法'),

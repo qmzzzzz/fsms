@@ -10,10 +10,9 @@
  *   - 密文轨下明文 confirmPassword 与解密结果不一致 → 400
  *   - 全密文轨成功改密（confirmPassword 缺省以解密结果为准）
  *
- * 注意 passwordChangeLimiter 为 5 次/15 分钟（userId+IP 组合键）：
- * 限流键是「userId+IP」，各用户各自计数。前三条用例对一个账号共 3 个请求；
- * 第四条（成功改密）改用专属账号，自身 1 个请求——两账号均未触及上限。
- * 往任一账号追加改密请求前，先核对它当前已用的次数。
+ * 注意 passwordChangeLimiter 为 5 次/15 分钟（userId+IP 组合键），各用户各自计数。
+ * P3-23：此前前三条用例共享同一账号的预算（3/5 已用），与第四条存在隐式顺序耦合；
+ * 现改为**每条用例独立账号**（makeAccount），预算互不串用，任意顺序都成立。
  */
 
 const request = require('supertest');
@@ -24,8 +23,6 @@ const { buildLoginEnvelope, randomPassword } = require('../helpers/buildLoginEnv
 describe('S5 改密密文轨（/api/security/change-password）', () => {
   let app;
   let User;
-  let user;
-  let token;
   const PASSWORD = randomPassword();
   const NEW_PASSWORD = randomPassword();
   const stamp = `ec${Date.now()}`.replace(/\d/g, (d) => 'abcdefghij'[Number(d)]);
@@ -35,16 +32,6 @@ describe('S5 改密密文轨（/api/security/change-password）', () => {
       await mongoose.connect(process.env.MONGODB_URI);
     }
     User = require('../../models/User');
-    user = await User.create({
-      username: `${stamp}enc`,
-      email: `${stamp}enc@example.com`,
-      password: PASSWORD,
-    });
-    token = jwt.sign(
-      { userId: String(user._id), username: user.username, tokenVersion: 0 },
-      process.env.JWT_SECRET,
-      { expiresIn: '24h' }
-    );
     const { createApp } = require('../../app');
     app = createApp();
   });
@@ -56,31 +43,50 @@ describe('S5 改密密文轨（/api/security/change-password）', () => {
     }
   });
 
-  const put = (body) =>
+  /** 每条用例自建专属账号并自行签发令牌：凭据状态（口令/tokenVersion）是账号私有的，
+   * 改密又是破坏性操作——共享账号会让用例间产生隐式顺序依赖与限流预算串用（P3-23）。 */
+  const makeAccount = async (suffix) => {
+    const u = await User.create({
+      username: `${stamp}${suffix}`,
+      email: `${stamp}${suffix}@example.com`,
+      password: PASSWORD,
+    });
+    const tk = jwt.sign(
+      { userId: String(u._id), username: u.username, tokenVersion: 0 },
+      process.env.JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+    return { u, tk };
+  };
+
+  const putWith = (tk, body) =>
     request(app)
       .put('/api/security/change-password')
-      .set('Authorization', `Bearer ${token}`)
+      .set('Authorization', `Bearer ${tk}`)
       .send(body);
 
   test('encCurrentPassword 密文无效 → 400 AUTH_ENCRYPTED_CREDENTIAL_INVALID', async () => {
+    const { tk } = await makeAccount('t1');
     const garbage = await buildLoginEnvelope('', { raw: { v: 999, x: 'a', y: 'b' } });
-    const res = await put({ encCurrentPassword: garbage, encNewPassword: 'whatever' });
+    const res = await putWith(tk, { encCurrentPassword: garbage, encNewPassword: 'whatever' });
     expect(res.status).toBe(400);
     expect(res.body.errors.errorCode).toBe('AUTH_ENCRYPTED_CREDENTIAL_INVALID');
   });
 
   test('encNewPassword 密文无效 → 400 AUTH_ENCRYPTED_CREDENTIAL_INVALID', async () => {
+    const { tk } = await makeAccount('t2');
     const goodCurrent = await buildLoginEnvelope(PASSWORD, { aad: 'password:current' });
     const garbage = await buildLoginEnvelope('', { raw: { v: 1, x: 'not-a-key' } });
-    const res = await put({ encCurrentPassword: goodCurrent, encNewPassword: garbage });
+    const res = await putWith(tk, { encCurrentPassword: goodCurrent, encNewPassword: garbage });
     expect(res.status).toBe(400);
     expect(res.body.errors.errorCode).toBe('AUTH_ENCRYPTED_CREDENTIAL_INVALID');
   });
 
   test('密文轨下明文 confirmPassword 与解密结果不一致 → 400', async () => {
+    const { tk } = await makeAccount('t3');
     const goodCurrent = await buildLoginEnvelope(PASSWORD, { aad: 'password:current' });
     const goodNew = await buildLoginEnvelope(NEW_PASSWORD, { aad: 'password:new' });
-    const res = await put({
+    const res = await putWith(tk, {
       encCurrentPassword: goodCurrent,
       encNewPassword: goodNew,
       confirmPassword: 'TotallyDifferent1!x',
@@ -90,28 +96,16 @@ describe('S5 改密密文轨（/api/security/change-password）', () => {
   });
 
   test('全密文轨成功改密（confirmPassword 缺省以解密结果为准）', async () => {
-    // 【顺序无关修复】改密是**破坏性**操作：口令被永久改掉、tokenVersion 递增，
-    // 该账号此前签发的令牌全部作废。此前本用例复用共享的 user/token，随机顺序下
-    // 它先跑时，前三条用例手里的 token 已被吊销 → 一律 401 而非各自期望的 400
-    // （seed=42 实测：两条期望 400 实得 401）。凭据状态属账号私有：
-    // 本用例自建专属账号并自行签发令牌，不改动、也不依赖其他用例的账号。
-    const chgUser = await User.create({
-      username: `${stamp}chg`,
-      email: `${stamp}chg@example.com`,
-      password: PASSWORD,
-    });
-    const chgToken = jwt.sign(
-      { userId: String(chgUser._id), username: chgUser.username, tokenVersion: 0 },
-      process.env.JWT_SECRET,
-      { expiresIn: '24h' }
-    );
+    // 改密是**破坏性**操作：口令被永久改掉、tokenVersion 递增，
+    // 该账号此前签发的令牌全部作废——本用例同样使用专属账号。
+    const { u: chgUser, tk: chgToken } = await makeAccount('chg');
 
     const goodCurrent = await buildLoginEnvelope(PASSWORD, { aad: 'password:current' });
     const goodNew = await buildLoginEnvelope(NEW_PASSWORD, { aad: 'password:new' });
-    const res = await request(app)
-      .put('/api/security/change-password')
-      .set('Authorization', `Bearer ${chgToken}`)
-      .send({ encCurrentPassword: goodCurrent, encNewPassword: goodNew });
+    const res = await putWith(chgToken, {
+      encCurrentPassword: goodCurrent,
+      encNewPassword: goodNew,
+    });
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
 

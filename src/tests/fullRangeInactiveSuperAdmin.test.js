@@ -61,13 +61,21 @@ describe('全网段名单守卫：停用超管不再等于超管', () => {
     const [secConfig] = await Promise.all([seedPerm('security:config')]);
 
     // 内置超管角色：code 与 isBuiltIn 必须同时命中（utils/superAdmin.js）
-    superRole = await Role.create({
-      code: 'SUPER_ADMIN',
-      name: '内置超级管理员',
-      level: 10,
-      isBuiltIn: true,
-      permissions: [],
-    });
+    // P2-19：SUPER_ADMIN 是共享内置码，改 upsert 幂等取用，不再直接 create
+    //（同 worker 多文件各自播种时会撞 code 唯一键 E11000 假红）
+    superRole = await Role.findOneAndUpdate(
+      { code: 'SUPER_ADMIN' },
+      {
+        $setOnInsert: {
+          code: 'SUPER_ADMIN',
+          name: '内置超级管理员',
+          level: 10,
+          isBuiltIn: true,
+          permissions: [],
+        },
+      },
+      { upsert: true, new: true }
+    );
     secRole = await Role.create({
       code: `FR_SEC_${stamp}`,
       name: '安全配置管理员',
@@ -93,7 +101,14 @@ describe('全网段名单守卫：停用超管不再等于超管', () => {
 
   afterAll(async () => {
     await IPBlacklist.deleteMany({ ip: FULL_RANGE }).catch(() => {});
+    // P2-19：按创建清单回收自建文档（两个账号 + 两个角色），不留跨文件残留
     if (mongoose.connection.readyState !== 0) {
+      await User.deleteMany({
+        username: { $in: [`fr_op_${stamp}`, `fr_plain_${stamp}`] },
+      }).catch(() => {});
+      await Role.deleteMany({
+        code: { $in: ['SUPER_ADMIN', `FR_SEC_${stamp}`] },
+      }).catch(() => {});
       await mongoose.connection.close();
     }
   });

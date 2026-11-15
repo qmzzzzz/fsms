@@ -101,7 +101,7 @@ const getCookies = (req) => {
  *
  * 不能在这里 `require('ms')`——它是 jsonwebtoken 的传递依赖，不在本仓 package.json 里。语法表因此只能存在两份，漂移由用例把守而不是由注释把守： src/tests/utils/durationToMsParity.test.js 的期望值一律由 `jwt.sign` + `jwt.decode` 现场反推，任何一侧改口径就会红。
  *
- * 纯数字串（如 '5000'）按毫秒解释，与 jsonwebtoken 对纯数字串的处理一致（实测两侧都是 5 秒）；数值入参（typeof number）本函数按毫秒、jsonwebtoken 按秒—— 仓内没有传数值的调用方（env 读出来必是字符串），故不改动。
+ * 纯数字串（如 '5000'）按毫秒解释，与 jsonwebtoken 对纯数字串的处理一致（实测两侧都是 5 秒）；数值入参（typeof number）在 jsonwebtoken 按秒解释、曾与本函数的毫秒解释同值两解——审计 2026-11-15 起数值入参直接抛 TypeError（仓内调用点已核实全部传 env 字符串），从根上杜绝分叉。
  *
  */
 const MINUTE_MS = 60 * 1000;
@@ -146,7 +146,11 @@ const DURATION_UNIT_MS = {
 };
 
 const durationToMs = (expr, fallbackMs) => {
-  if (typeof expr === 'number' && Number.isFinite(expr)) return expr;
+  if (typeof expr === 'number') {
+    throw new TypeError(
+      'durationToMs 不接受数值入参：jsonwebtoken 对数值按秒解释，与本函数历史毫秒语义分歧；请传时长字符串（如 "7d"、"3600000"）'
+    );
+  }
   if (typeof expr !== 'string') return fallbackMs;
   // 单位可省略（省略＝毫秒，对应 ms 把纯数字串当毫秒偏移的分支）；符号位保留——
   // 否则 '-1h' 会落到 fallbackMs，把一个本该立即过期的配置值读成 7 天（放宽方向）

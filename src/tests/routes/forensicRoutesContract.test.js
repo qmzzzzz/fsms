@@ -23,6 +23,7 @@ const BASE = '/api/security/forensic';
 describe('取证溯源接口契约（T5/T6）', () => {
   let app;
   let token;
+  let savedTrustProxyHops;
 
   beforeAll(async () => {
     if (mongoose.connection.readyState === 0) await mongoose.connect(process.env.MONGODB_URI);
@@ -58,6 +59,8 @@ describe('取证溯源接口契约（T5/T6）', () => {
 
     // 客户端身份判据只在开着 trust proxy 时才认 XFF（test 环境默认 hops=0 ⇒ req.ip 恒为 socket 对端）。
     // 8d/8e 要造"取票与确认来自两个不同来源 IP"，必须先把代理拓扑声明成生产形态（反代 1 跳）。
+    // P3-19：快照原值，afterAll 归还——TRUST_PROXY_HOPS=1 若跨文件泄漏会改写其他套件的 req.ip 判定
+    savedTrustProxyHops = process.env.TRUST_PROXY_HOPS;
     process.env.TRUST_PROXY_HOPS = '1';
     const { createApp } = require('../../app');
     app = createApp();
@@ -71,6 +74,8 @@ describe('取证溯源接口契约（T5/T6）', () => {
       await Role.deleteMany({ code: `ZFRC_ALL${stamp}` }).catch(() => {});
       await mongoose.connection.close();
     }
+    if (savedTrustProxyHops === undefined) delete process.env.TRUST_PROXY_HOPS;
+    else process.env.TRUST_PROXY_HOPS = savedTrustProxyHops;
   });
 
   const get = (p, q) =>

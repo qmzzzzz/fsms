@@ -10,14 +10,23 @@ afterEach(() => {
   vi.resetModules()
   vi.unstubAllGlobals()
   sessionStorage.clear()
+  localStorage.clear()
   document.documentElement.removeAttribute('lang')
 })
 
-/** 以给定的 sessionStorage / navigator 状态重新加载模块（模块顶层有副作用） */
-const load = async ({ saved = null, lang = 'zh-CN', omitLang = false } = {}) => {
+/** 以给定的存储 / navigator 状态重新加载模块（模块顶层有副作用） */
+const load = async ({
+  saved = null,
+  legacySaved = null,
+  lang = 'zh-CN',
+  omitLang = false,
+} = {}) => {
   vi.resetModules()
   sessionStorage.clear()
-  if (saved !== null) sessionStorage.setItem('locale', saved)
+  localStorage.clear()
+  // P3-08：语言偏好主存 localStorage；legacySaved 模拟旧版 sessionStorage 残留
+  if (saved !== null) localStorage.setItem('locale', saved)
+  if (legacySaved !== null) sessionStorage.setItem('locale', legacySaved)
   // omitLang：整个移除 language 属性（不是传 undefined —— 解构默认值会把它变回 'zh-CN'，
   // 那样测的仍是正常路径，抓不到「未做回退」的退化）
   vi.stubGlobal('navigator', omitLang ? {} : { language: lang })
@@ -55,17 +64,23 @@ describe('i18n 入口：默认语言推导', () => {
 })
 
 describe('i18n 入口：setLocale / getLocale', () => {
-  test('setLocale 同步三处：locale 状态、sessionStorage、<html lang>', async () => {
+  test('setLocale 同步三处：locale 状态、localStorage、<html lang>（P3-08）', async () => {
     const mod = await load({ lang: 'zh-CN' })
     mod.setLocale('en-US')
     expect(mod.getLocale()).toBe('en-US')
-    expect(sessionStorage.getItem('locale')).toBe('en-US')
+    expect(localStorage.getItem('locale')).toBe('en-US')
     expect(document.documentElement.getAttribute('lang')).toBe('en-US')
     // 切换回来也必须同步（不能只写一次）
     mod.setLocale('zh-CN')
     expect(mod.getLocale()).toBe('zh-CN')
-    expect(sessionStorage.getItem('locale')).toBe('zh-CN')
+    expect(localStorage.getItem('locale')).toBe('zh-CN')
     expect(document.documentElement.getAttribute('lang')).toBe('zh-CN')
+  })
+
+  test('旧版 sessionStorage 偏好仍被识别并回填 localStorage（P3-08 兼容旧值）', async () => {
+    const mod = await load({ legacySaved: 'en-US', lang: 'zh-CN' })
+    expect(mod.getLocale()).toBe('en-US')
+    expect(localStorage.getItem('locale')).toBe('en-US')
   })
 
   test('setLocale 真的切换了译文取用（不是只改状态不生效）', async () => {
@@ -75,7 +90,7 @@ describe('i18n 入口：setLocale / getLocale', () => {
     expect(mod.default.global.t('common.save')).toBe('Save')
   })
 
-  test('sessionStorage 写入抛异常时 setLocale 不崩（隐私模式容错）', async () => {
+  test('localStorage 写入抛异常时 setLocale 不崩（隐私模式容错）', async () => {
     const mod = await load({ lang: 'zh-CN' })
     const spy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
       throw new Error('QuotaExceededError')
@@ -89,7 +104,7 @@ describe('i18n 入口：setLocale / getLocale', () => {
     }
   })
 
-  test('sessionStorage 读取抛异常时模块仍能加载（回退浏览器语言）', async () => {
+  test('存储读取抛异常时模块仍能加载（回退浏览器语言）', async () => {
     vi.resetModules()
     const spy = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
       throw new Error('SecurityError')

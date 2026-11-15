@@ -12,6 +12,14 @@ const {
   sanitizeAuditHeaders,
 } = require('./auditLogSanitizer');
 const { stripControlChars, stripControlCharsDeep } = require('../utils/helpers');
+const { AUDIT_LOG_ACTIONS } = require('../constants/audit');
+
+const DELETE_OPERATION_ACTIONS = new Set(
+  AUDIT_LOG_ACTIONS.filter((a) => a.endsWith('_delete') || a === 'batch_delete_users')
+);
+const BATCH_OPERATION_ACTIONS = new Set(
+  AUDIT_LOG_ACTIONS.filter((a) => a.includes('batch')) // P3：batch 同上，对照枚举精确匹配
+);
 
 /**
  * 审计写入前的统一清洗（req.params / req.query 专用）：先剥控制字符归一键名，再按键脱敏。
@@ -132,8 +140,8 @@ const applyWriteStatics = (schema) => {
     duration
   ) {
     const riskFactors = [];
-    if (action.includes('delete')) riskFactors.push('delete_operation');
-    if (action.includes('batch')) riskFactors.push('batch_operation');
+    if (DELETE_OPERATION_ACTIONS.has(action)) riskFactors.push('delete_operation');
+    if (BATCH_OPERATION_ACTIONS.has(action)) riskFactors.push('batch_operation');
     if (res.statusCode >= 400) riskFactors.push('error_response');
 
     const forwardedFor = req.get('x-forwarded-for');

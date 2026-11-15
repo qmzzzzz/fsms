@@ -27,7 +27,8 @@ const { execFileSync } = require('child_process');
 
 const ROOT = path.resolve(__dirname, '..');
 const TABLE = path.resolve(ROOT, 'deployment', 'mongod-artifacts.json');
-const CACHE_ROOT = process.env.MONGOD_PROVISION_DIR || path.join(os.tmpdir(), 'fsms-mongod');
+const CACHE_ROOT =
+  process.env.MONGOD_PROVISION_DIR || path.join(os.homedir(), '.cache', 'fsms-mongod'); // 私有缓存根（0700）：共享 tmpdir 的可预测子目录可被同机用户投毒后被执行
 
 /** 归一化架构名：Node 的 arm64 对应 MongoDB 的 aarch64 */
 function normalizeArch(arch) {
@@ -110,11 +111,29 @@ function download(url, dest, redirects = 0) {
   });
 }
 
+function sha256File(file) {
+  const hash = crypto.createHash('sha256');
+  const fd = fs.openSync(file, 'r');
+  try {
+    const buf = Buffer.allocUnsafe(1024 * 1024);
+    for (;;) {
+      const n = fs.readSync(fd, buf, 0, buf.length, null);
+      if (n <= 0) break;
+      hash.update(buf.subarray(0, n));
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  return hash.digest('hex');
+}
+
 function isCached(extractDir, binaryRel, sha256) {
   const marker = path.join(extractDir, '.sha256');
   const binary = path.join(extractDir, binaryRel);
   try {
-    return fs.readFileSync(marker, 'utf8').trim() === sha256 && fs.existsSync(binary);
+    if (fs.readFileSync(marker, 'utf8').trim() !== sha256) return false;
+    if (!fs.existsSync(binary)) return false;
+    return sha256File(binary) === sha256; // 命中也要重算：标记与二进制可被各自替换（投毒），该路径会被测试进程执行
   } catch {
     return false;
   }
@@ -144,8 +163,17 @@ async function main() {
     process.stdout.write(`${binary}\n`);
     return;
   }
+  if (fs.existsSync(extractDir)) {
+    console.error('[provision-mongod] 缓存缺失或与锚值不符，删除后重新下载'); // 按投毒处理：重走「下载→对锚→解压」，下载路径本身 fail-closed
+    fs.rmSync(extractDir, { recursive: true, force: true });
+  }
 
-  fs.mkdirSync(CACHE_ROOT, { recursive: true });
+  fs.mkdirSync(CACHE_ROOT, { recursive: true, mode: 0o700 });
+  try {
+    fs.chmodSync(CACHE_ROOT, 0o700); // 既有目录可能偏宽，创建后一律再收紧一次
+  } catch {
+    /* Windows/ACL 平台 chmod 不可用时跳过：目录创建 mode 已按 0700 */
+  }
   const archive = path.join(CACHE_ROOT, `${key}.tgz.part`);
   console.error(`[provision-mongod] 下载 ${artifact.url}`);
   const actual = await download(artifact.url, archive);
@@ -182,4 +210,12 @@ if (require.main === module) {
   });
 }
 
-module.exports = { detectTarget, distroFromOsRelease, findArtifact, normalizeArch };
+module.exports = {
+  detectTarget,
+  distroFromOsRelease,
+  findArtifact,
+  normalizeArch,
+  sha256File,
+  isCached,
+  CACHE_ROOT,
+};

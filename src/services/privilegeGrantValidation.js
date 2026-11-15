@@ -15,12 +15,12 @@ const grantError = (message, statusCode, code, errors = undefined) =>
   new ApiError(message, statusCode, errors, code);
 
 const clampDurationHours = (raw) => {
-  const hours = Number(raw);
-  if (!Number.isFinite(hours) || hours < MIN_GRANT_HOURS || hours > MAX_GRANT_HOURS) {
+  const hours = Number(raw); // Number.isInteger 同时挡 NaN/Infinity/小数：报错文案写"整数"就不再四舍五入收小数
+  if (!Number.isInteger(hours) || hours < MIN_GRANT_HOURS || hours > MAX_GRANT_HOURS) {
     const range = MIN_GRANT_HOURS + '-' + MAX_GRANT_HOURS;
     throw grantError('有效期需为 ' + range + ' 小时之间的整数', 400, 'PRIVILEGE_DURATION_INVALID');
   }
-  return Math.round(hours);
+  return hours;
 };
 
 const normalizeCodes = (codes) => {

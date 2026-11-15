@@ -41,17 +41,16 @@ describe('RBAC 控制器全覆盖（批次 A）', () => {
     );
     // 内置超管角色：unique 索引 + pre-save 强制 isBuiltIn——必须用 Role.create
     // 语义（findOneAndUpdate 的 $setOnInsert 不触发 pre-save，会留下
-    // isBuiltIn 缺失的文档使全部内置保护失效）；文件间冲突用 findOne 先查
-    let builtInSuper = await Role.findOne({ code: 'SUPER_ADMIN' });
-    if (!builtInSuper) {
-      builtInSuper = await Role.create({
+    // isBuiltIn 缺失的文档使全部内置保护失效）；文件间冲突用 findOne 先查。
+    // 本文件只消费"SUPER_ADMIN 必须在场"这一事实，不留死变量（P3-15）。
+    if (!(await Role.findOne({ code: 'SUPER_ADMIN' }))) {
+      await Role.create({
         name: '超级管理员',
         code: 'SUPER_ADMIN',
         level: 10,
         permissions: [wildcardPerm._id],
       });
     }
-    void builtInSuper;
     const superRole = await Role.create({
       name: '超管_批次A',
       code: `SUPER_ADMIN_RA_${stamp}`,
@@ -98,7 +97,6 @@ describe('RBAC 控制器全覆盖（批次 A）', () => {
       { expiresIn: '24h' }
     );
     roleId = String(superRole._id);
-    void builtInSuper;
 
     adminToken = jwt.sign(
       { userId: selfUserId, username: admin.username, tokenVersion: 0 },
@@ -159,11 +157,15 @@ describe('RBAC 控制器全覆盖（批次 A）', () => {
       .post('/api/roles')
       .send({ name: '重复', code: `RARA_${stamp.toUpperCase()}`, level: 3 });
     expect(dup.status).toBe(400);
+    // P3-15：写路径 400 必须成对断言错误码——重复编码是 ROLE_CODE_TAKEN，
+    // 不是格式校验失败，两者后续动作不同
+    expect(dup.body.errors.errorCode).toBe('ROLE_CODE_TAKEN');
 
     const badCode = await authed()
       .post('/api/roles')
       .send({ name: '坏码', code: 'lower-case!', level: 3 });
     expect(badCode.status).toBe(400);
+    expect(badCode.body.errors.errorCode).toBe('VALIDATION_FAILED');
 
     // *:* 铸造拒绝是**无条件**的：本接口一律不得**铸造**保留通配角色，超管也不例外。
     // 依据 utils/superAdmin.js:29-37「不得铸造 / 不得乱分配，且必须引用本常量」——
@@ -220,11 +222,14 @@ describe('RBAC 控制器全覆盖（批次 A）', () => {
 
     const builtin = await Role.findOne({ code: 'SUPER_ADMIN' });
     const builtinRename = await authed().put(`/api/roles/${builtin._id}`).send({ name: '改名' });
-    // 实测 403（内置角色改名 → BUILTIN_ROLE_NAME_LEVEL_LOCKED）
+    // 403 + BUILTIN_ROLE_NAME_LEVEL_LOCKED 成对断言（内置角色改名的专用拒绝码）
     expect(builtinRename.status).toBe(403);
+    expect(builtinRename.body.errors.errorCode).toBe('BUILTIN_ROLE_NAME_LEVEL_LOCKED');
 
     const badStatus = await authed().put(`/api/roles/${roleId}`).send({ status: 'bogus' });
     expect(badStatus.status).toBe(400);
+    // 非法 status 走专用码 ROLE_STATUS_INVALID，与字段格式校验失败区分
+    expect(badStatus.body.errors.errorCode).toBe('ROLE_STATUS_INVALID');
   });
 
   test('角色：分配权限（权限子集/层级拦截）+ 删除自定义角色；内置删除被拒', async () => {
@@ -300,6 +305,8 @@ describe('RBAC 控制器全覆盖（批次 A）', () => {
         module: 'ra',
       });
     expect(dup.status).toBe(400);
+    // P3-15：重复编码的 400 带明确文案（服务层预检抛 ApiError，不经 11000 兜底）
+    expect(dup.body.message).toBe('权限编码已存在');
 
     const updated = await authed().put(`/api/permissions/${created.body.data._id}`).send({
       name: 'RA临时改名',
@@ -347,6 +354,9 @@ describe('RBAC 控制器全覆盖（批次 A）', () => {
         password: PASSWORD,
       });
     expect(dup.status).toBe(400);
+    // P3-15：建号路径对重名有前置预检（create.js:193），文案点名「用户名已存在」
+    // 而非 11000 兜底的「资源已存在」——成对断言防两套口径漂移
+    expect(dup.body.message).toBe('用户名已存在');
 
     const superRole = await Role.findOne({ code: 'SUPER_ADMIN' });
     const grantSuper = await authed()
@@ -396,8 +406,9 @@ describe('RBAC 控制器全覆盖（批次 A）', () => {
   });
 
   test('用户：删除（self 拒绝 / 超管目标拒绝 / 正常删除 / 批量删除）', async () => {
-    // self
+    // self：400 + CANNOT_DELETE_SELF 成对断言
     const selfDel = await authed().delete(`/api/users/${selfUserId}`);
+    expect(selfDel.status).toBe(400);
     expect(selfDel.body.errors?.errorCode).toBe('CANNOT_DELETE_SELF');
 
     // 携带内置超管角色的用户：层级校验（同级 403）先于超管专属保护触发——
@@ -422,13 +433,14 @@ describe('RBAC 控制器全覆盖（批次 A）', () => {
     });
     expect((await authed().delete(`/api/users/${victim._id}`)).status).toBe(200);
 
-    // 批量删除：混入不存在 ID → 400；合法 → 200
+    // 批量删除：混入不存在 ID → 400 + USER_ID_NOT_FOUND_IN_LIST；合法 → 200
     const badBatch = await authed()
       .delete('/api/users/batch')
       .send({
         ids: [String(new mongoose.Types.ObjectId())],
       });
     expect(badBatch.status).toBe(400);
+    expect(badBatch.body.errors.errorCode).toBe('USER_ID_NOT_FOUND_IN_LIST');
 
     // 合法批量删除：目标必须真的可删。原实现错把 superUser（SUPER_ADMIN）当目标，
     // 而批量接口对超管目标整批拒绝（CANNOT_DELETE_SUPER_ADMIN），断言无从写起，

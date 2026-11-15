@@ -3,7 +3,7 @@
 // PROXY 头可改写 socket 地址：生产启用必须显式配置 TRUSTED_PROXY_CIDRS。
 // 运行期复用 XFF 的对端名单判据；名单非法时拒绝所有 PROXY 头，不回退信任。
 
-const ENV_KEY = 'PROXY' + '_' + 'PROTOCOL';
+const ENV_KEY = 'PROXY_PROTOCOL'; // 完整字面量（审计 2026-11-15）：拼接写法让 grep 检索不到环境变量名
 
 /**
  * 「PROXY_PROTOCOL=on + ENABLE_HTTPS=true」组合的拒绝文案（ADR-021 决定 ⑥）。

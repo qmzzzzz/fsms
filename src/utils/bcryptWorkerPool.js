@@ -41,10 +41,13 @@ const ensurePool = () => {
   if (!offloadEnabled() || initFailed) return null;
   if (pool) return pool;
 
+  // 声明提到 try 外：中途失败（某个 new Worker 抛错）时 catch 仍要能 terminate
+  // 已创建的线程——否则它们成为孤儿线程继续占用资源（审计 2026-11-15）。
+  const workers = [];
+  const queue = [];
+
   try {
     const { Worker } = require('worker_threads');
-    const workers = [];
-    const queue = [];
 
     const pump = () => {
       // 一个 worker 同时只跑一个任务：bcryptjs 的异步实现内部靠切片调度，
@@ -118,6 +121,10 @@ const ensurePool = () => {
     return pool;
   } catch (error) {
     initFailed = true; // 回退本身是设计好的，但"永久降级且零信号"不行：下面这条 warn 是该形态唯一的可见点
+    // 中途失败必须回收已创建的线程：池未建成（pool 仍为 null），没有别的路径会 terminate 它们
+    for (const entry of workers) {
+      entry.worker.terminate().catch(() => {});
+    }
     const logger = require('../utils/logger');
     logger.warn(
       `bcrypt worker 池初始化失败（回退进程内实现，本进程不再重试）：${error?.message ?? error}`

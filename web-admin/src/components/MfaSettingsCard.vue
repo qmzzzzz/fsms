@@ -598,13 +598,6 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-/* 父视图的 scoped 样式不穿透子组件内部元素，此处自带同值定义 */
-.card-header {
-  font-family: var(--xf-font-display);
-  font-weight: 600;
-  letter-spacing: var(--xf-tracking-wide);
-}
-
 .profile-form {
   width: 100%;
   max-width: 520px;

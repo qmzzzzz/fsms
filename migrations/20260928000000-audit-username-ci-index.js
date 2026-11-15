@@ -41,129 +41,19 @@ const INDEX_NAME = 'username_ci_timestamp';
 const KEY = { username: 1, timestamp: -1 };
 const COLLECTION = 'auditlogs';
 
-/**
- * 读取集合的全部索引；集合尚不存在（全新库首次 migrate）按"没有索引"处理。
- * 放过 NamespaceNotFound（codeName 或 code 26）与 code 48（NamespaceExists）：宽口径 catch 会把鉴权失败/选主超时读成"没有索引"
- * → 静默不补齐却打印成功（同 20260831000000 的处置）。
- */
-const listIndexes = async (db) => {
-  try {
-    return await db.collection(COLLECTION).indexes();
-  } catch (err) {
-    if (err?.codeName === 'NamespaceNotFound' || err?.code === 26 || err?.code === 48) return [];
-    throw err;
-  }
-};
-
-const getIndex = async (db, name) => (await listIndexes(db)).find((i) => i.name === name) || null;
-
-/** key 的签名：**顺序**是 key 的一部分（反序对「username 等值 + timestamp 排序」不可用） */
-const keySig = (key) =>
-  Object.entries(key)
-    .map(([k, v]) => `${k}:${v}`)
-    .join('|');
-
-const sameKey = (actual) => !!actual && keySig(actual) === keySig(KEY);
-
-/**
- * collation 的**缺省值**。mongod 8.0.34 实测：声明过的 collation 在 indexes() 里被展开成全字段
- * （locale/caseLevel/caseFirst/strength/numericOrdering/alternate/maxVariable/normalization/
- * backwards/version），未声明 collation 的索引则**没有** collation 字段。所以拿声明的半截
- * collation（如 {locale,strength}）去比，必须先补默认值，否则 caseLevel 之类的漂移比不出来。
- */
-const COLLATION_DEFAULTS = {
-  locale: 'simple',
-  caseLevel: false,
-  caseFirst: 'off',
-  strength: 3,
-  numericOrdering: false,
-  alternate: 'non-ignorable',
-  maxVariable: 'punct',
-  normalization: false,
-  backwards: false,
-};
-
-/**
- * collation 归一化：补默认值，只留用户可设字段。
- * · `null` 表示**没有** collation —— 与「有 collation 但全用默认值」是两回事，不能混同
- *   （否则「声明要 collation、实际没建」这种最要命的漂移会被判成一致）。
- * · **不比 `version`**：它是服务端按 ICU 版本回填的（实测 '57.1'），用户设不了，
- *   换 mongod 版本就会变；拿它做判据等于把一次升级当成全线漂移。
- */
-const collationSig = (collation) => {
-  if (!collation) return null;
-  const norm = {};
-  for (const [field, fallback] of Object.entries(COLLATION_DEFAULTS)) {
-    norm[field] = field in collation ? collation[field] : fallback;
-  }
-  return norm;
-};
-
-/** 递归按键排序后序列化：partialFilterExpression 里的键序是写法差异，不该算漂移 */
-const stableJson = (value) => {
-  if (value === undefined) return 'null';
-  if (Array.isArray(value)) return '[' + value.map(stableJson).join(',') + ']';
-  if (value && typeof value === 'object') {
-    const keys = Object.keys(value).sort();
-    const body = keys.map((k) => JSON.stringify(k) + ':' + stableJson(value[k])).join(',');
-    return '{' + body + '}';
-  }
-  return JSON.stringify(value);
-};
-
-/** TTL 归一化：`null` 表示不是 TTL 索引 */
-const ttlSig = (spec) =>
-  typeof spec.expireAfterSeconds === 'number' ? spec.expireAfterSeconds : null;
-
-/**
- * 索引 spec 的**完整签名** —— 幂等判据的唯一依据。
- * 组成：key 有序签名 + collation 全字段 + unique/sparse/hidden/expireAfterSeconds/
- * partialFilterExpression；声明里没有的选项一律按「不存在」(`false` / `null`) 处理。
- * 因此「实测多了 unique:true」「多了 sparse」「多了 partial」「多了 hidden」「collation 多/少了
- * 某个字段」都会算漂移。`background` 不进签名：8.0 起它只是建索引期的 no-op，不会被回读。
- *
- * 判据覆盖但**不可构造**（写成注释而非用例，避免造出 mongod 直接拒的形态）：
- *   · 复合 key + expireAfterSeconds ⇒ 8.0.34 实测 code 67 CannotCreateIndex
- *     （"TTL indexes are single-field indexes, compound indexes do not support TTL"）；
- *     本迁移 KEY 是复合 key，故该漂移不可达（单字段目标才会遇到，见 20260926000000 的处置）；
- *   · collation.caseFirst:'upper' 在**本迁移声明的 collation 下**建不出来：8.0.34 实测
- *     `{locale:'en',strength:2,caseFirst:'upper'}` 抛 code 2 BadValue（"'caseFirst' is invalid
- *     unless 'caseLevel' is on or 'strength' is greater than 2"）⇒ 不可构造；判据仍覆盖它——
- *     把 strength 提到 3 就能构造，实测 `{locale:'en',strength:3,caseFirst:'upper'}` 建成后
- *     会被 specSig 判为漂移并重建（work 里 probe12c 的 S7 一格）。
- */
-const specSig = (spec) =>
-  stableJson({
-    key: keySig(spec.key),
-    collation: collationSig(spec.collation),
-    unique: !!spec.unique,
-    sparse: !!spec.sparse,
-    hidden: !!spec.hidden,
-    expireAfterSeconds: ttlSig(spec),
-    partialFilterExpression: spec.partialFilterExpression || null,
-  });
+// 幂等判据收口到 _lib/indexSpec（P2-35）：specSig/collationSig/isEquivalentTwin 等曾在本文件与
+// 其余 5 个迁移各抄一份且已漂移，现统一 require 共享模块，判据口径逐字段不变。
+const {
+  listIndexes,
+  sameKey,
+  ttlSig,
+  specSig,
+  isEquivalentTwin,
+  dropIndexIfExists,
+} = require('./_lib/indexSpec');
 
 /** 本迁移声明的形态：up() 只建这一条，不带任何其它选项 */
 const DECLARED = { key: KEY, collation: COLLATION };
-
-/**
- * 异名索引是否与声明**冲突**（即 mongod 的 85 判据成立，必须删掉才能建出目标）。
- * 判据：mongod 的 85 只比 {key, unique, sparse, partialFilterExpression, collation}，
- * **hidden 与 name 都不进判据**。实测（8.0.34）：两条同 key 索引并存合法，当且仅当它们在
- * 上述四维里**至少有一维不同**；这四维全同则无论名字如何都抛 85——`hidden:true` 的异名索引
- * 同样抛（原文 "An equivalent index already exists with a different name and options"）⇒
- * 与声明冲突，删它是唯一出路（不删则 createIndex 抛 85，整次 migrate 中断）。
- * 因此本函数**刻意不比 hidden**：hidden 的差异不构成并存理由，比较它反而会放过冲突。
- * expireAfterSeconds 由调用处单独判定（它同样会抛 85，但删了会丢留存语义，见 up() 的登记）。
- */
-const isEquivalentTwin = (actual) =>
-  !!actual &&
-  keySig(actual.key) === keySig(DECLARED.key) &&
-  stableJson(collationSig(actual.collation)) === stableJson(collationSig(DECLARED.collation)) &&
-  !!actual.unique === !!DECLARED.unique &&
-  !!actual.sparse === !!DECLARED.sparse &&
-  stableJson(actual.partialFilterExpression || null) ===
-    stableJson(DECLARED.partialFilterExpression || null);
 
 module.exports = {
   COLLATION,
@@ -172,7 +62,7 @@ module.exports = {
   KEY,
 
   async up(db) {
-    const all = await listIndexes(db);
+    const all = await listIndexes(db, COLLECTION);
     const named = all.find((i) => i.name === INDEX_NAME) || null;
     if (named && specSig(named) === specSig(DECLARED)) {
       // 整 spec 一致 ⇒ 本迁移要的形态已在位，无需重建。
@@ -198,8 +88,8 @@ module.exports = {
     // 登记：expireAfterSeconds 差异实测也会抛 85，但「删了丢留存」与「不删则 migrate 中断」
     // 不可兼得，故走保守侧（不删）；本迁移目标是复合 key，TTL 建不上
     // （实测 code 67 CannotCreateIndex），该分支不可达。
-    for (const twin of all.filter((i) => i.name !== INDEX_NAME && sameKey(i.key))) {
-      if (isEquivalentTwin(twin) && ttlSig(twin) === ttlSig(DECLARED)) {
+    for (const twin of all.filter((i) => i.name !== INDEX_NAME && sameKey(i.key, KEY))) {
+      if (isEquivalentTwin(twin, DECLARED) && ttlSig(twin) === ttlSig(DECLARED)) {
         await db.collection(COLLECTION).dropIndex(twin.name);
         // 删除不可逆（down() 只按名删、恢复不了 twin）⇒ 日志是唯一证据，必须打全 spec
         console.log(
@@ -220,11 +110,7 @@ module.exports = {
   },
 
   async down(db) {
-    if (await getIndex(db, INDEX_NAME)) {
-      await db.collection(COLLECTION).dropIndex(INDEX_NAME);
-      console.log(`${INDEX_NAME} 已删除`);
-    } else {
-      console.log(`${INDEX_NAME} 不存在，跳过`);
-    }
+    const dropped = await dropIndexIfExists(db, COLLECTION, INDEX_NAME);
+    if (!dropped) console.log(`${INDEX_NAME} 不存在，跳过`);
   },
 };

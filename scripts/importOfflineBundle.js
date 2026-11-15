@@ -71,8 +71,9 @@ function runCapture(file, args) {
  */
 function sha256File(file) {
   const hash = crypto.createHash('sha256');
-  const fd = fs.openSync(file, 'r');
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0)); // O_NOFOLLOW 收口 lstat→open 的 TOCTOU 窗（对齐 hotUpgradeQueue 单 fd 读法），fstat 作用在 fd 上无窗口
   try {
+    if (!fs.fstatSync(fd).isFile()) throw new Error(`校验对象不是普通文件：${file}`);
     const buf = Buffer.allocUnsafe(1024 * 1024);
     for (;;) {
       const n = fs.readSync(fd, buf, 0, buf.length, null);

@@ -196,13 +196,8 @@ const strictConsumers = (h) => strictConsumersIn(consumerFiles, h);
  * 例外不是免检——第 5 条用例当场验证它成立的前提行存在。
  */
 const INDIRECT_EXPORT = [
-  {
-    rel: 'services/reportDashboardService.js',
-    name: '__test',
-    via: 'controllers/reportController.js',
-    premise: '...dashboardService.__test',
-    reason: 'reportController.__test 展开复用本模块 __test，用例 require 的是 controller',
-  },
+  // 2026-11-16：reportDashboardService::__test 原登记为经 reportController 重导出的间接消费；
+  // 现测试树已有直连 require 本模块的严口径消费方，例外前提不再成立，按"逐字相等"判据移出。
 ];
 
 const keyOf = (h) => `${h.rel}::${h.name}`;
@@ -413,8 +408,8 @@ describe('测试钩子导出门禁：`_`/`__` 前缀的生产导出必须有真�
     expect(modelFiles).toEqual(barreled.map((name) => `models/${name}.js`));
   });
 
-  it('钩子总数钉死：只许减不许增（当前 40 个），且成员可点名', () => {
-    expect(hooks.length).toBe(40);
+  it('钩子总数钉死：只许减不许增（当前 41 个），且成员可点名', () => {
+    expect(hooks.length).toBe(41);
     const keys = hooks.map(keyOf);
     for (const must of [
       // worker 线程池是模块级单例：强制 worker 模式的用例必须能 terminate 并复位池，
@@ -453,6 +448,9 @@ describe('测试钩子导出门禁：`_`/`__` 前缀的生产导出必须有真�
       // 供 proxyProtocolParser.test.js 直接逐格钉判据；公开入口
       // parseProxyProtocolHeader 已在真实 socket 集成里覆盖，分步出口只服务纯函数层。
       'utils/proxyProtocol.js::_internal',
+      // 权限缓存的模块级 Map 是单例：用例必须能预填到超限并复位，否则
+      // "超限淘汰一半"只能靠真实 2000 人角色链造数（慢且时序脆）。
+      'services/userPermissionService.js::__test',
     ])
       expect(keys).toContain(must);
   });

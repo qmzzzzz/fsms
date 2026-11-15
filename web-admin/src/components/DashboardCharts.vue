@@ -293,6 +293,37 @@ const daysAgoFrom = (base, n) => {
   return d
 }
 
+// 最近一次成功拉取的数据快照（原始聚合 + 失败位 + 窗口基准）：
+// 语言/主题切换只本地重渲染，不重拉报表接口（P3）
+let lastSnapshot = null
+
+const renderCharts = (snapshot) => {
+  const { base, alarmByDay, deviceByType, failed } = snapshot
+  // 处理报警数据 - 按天统计
+  // 生成最近7天的日期：同样按日历日回退，保证 X 轴日期串与请求窗口同口径
+  const dates = []
+  const counts = []
+  for (let i = 6; i >= 0; i--) {
+    const date = daysAgoFrom(base, i)
+    const dateStr = toLocalDateStr(date)
+    const dayData = alarmByDay.find((d) => d._id === dateStr)
+    // X 轴标签刻意用 locale 短格式（MM-DD）：轴宽有限，定长串会挤爆刻度。
+    // 数据表格的时间列才需要 utils/datetime 的定长口径，两者诉求不同。
+    dates.push(date.toLocaleDateString(locale.value, { month: '2-digit', day: '2-digit' }))
+    counts.push(dayData?.count || 0)
+  }
+
+  // 处理设备类型数据
+  const deviceTypeData = deviceByType.map((item) => ({
+    name: deviceTypeLabel(item._id) || item._id || t('common.all'),
+    count: item.count || 0,
+  }))
+
+  // 使用处理后的数据初始化图表
+  const processedAlarmData = dates.map((date, index) => ({ _id: date, count: counts[index] }))
+  initCharts(processedAlarmData, deviceTypeData, failed)
+}
+
 const doLoad = async () => {
   // P3-39：图表数据全部来自 report 接口
   if (!canShowCharts()) return
@@ -311,39 +342,17 @@ const doLoad = async () => {
       api.reports.getDevices({}).catch(() => null),
     ])
 
-    // 处理报警数据 - 按天统计
     const alarmByDay = alarmRes?.data?.data?.byDay || []
-    // 生成最近7天的日期：同样按日历日回退，保证 X 轴日期串与请求窗口同口径
-    const base = new Date()
-    // 时间基准快照一次：逐次 new Date() 会在跨午夜瞬间取错日历日
-    const dates = []
-    const counts = []
-    for (let i = 6; i >= 0; i--) {
-      const date = daysAgoFrom(base, i)
-      const dateStr = toLocalDateStr(date)
-      const dayData = alarmByDay.find((d) => d._id === dateStr)
-      // X 轴标签刻意用 locale 短格式（MM-DD）：轴宽有限，定长串会挤爆刻度。
-      // 数据表格的时间列才需要 utils/datetime 的定长口径，两者诉求不同。
-      dates.push(date.toLocaleDateString(locale.value, { month: '2-digit', day: '2-digit' }))
-      counts.push(dayData?.count || 0)
-    }
-
-    // 处理设备类型数据
     const deviceByType = deviceRes?.data?.data?.byType || []
-
-    const deviceTypeData = deviceByType.map((item) => ({
-      name: deviceTypeLabel(item._id) || item._id || t('common.all'),
-      count: item.count || 0,
-    }))
-
-    // 使用处理后的数据初始化图表
-    const processedAlarmData = dates.map((date, index) => ({ _id: date, count: counts[index] }))
-    initCharts(processedAlarmData, deviceTypeData, {
+    const failed = {
       // null 只有一个成因：那条请求 rejected（成功但空集合会是 `{data:{data:{}}}`）。
       // 这里把它当成"这一格没取到"而不是"这一格是零"。
       trend: alarmRes === null,
       pie: deviceRes === null,
-    })
+    }
+    // 时间基准快照一次：逐次 new Date() 会在跨午夜瞬间取错日历日
+    lastSnapshot = { base: new Date(), alarmByDay, deviceByType, failed }
+    renderCharts(lastSnapshot)
   } catch (e) {
     // 使用空数据初始化图表
     initCharts([], [], { trend: true, pie: true })
@@ -376,18 +385,23 @@ const load = () => {
   return loadInFlight
 }
 
-// 语言切换时重建图表标签；骨架屏阶段容器未挂载则跳过（首屏完成后另行初始化）
+// 语言切换时重建图表标签：数据已就绪时只用快照本地重渲染，不重拉报表接口（P3）；
+// 数据尚未就绪（骨架屏阶段容器刚挂载）时退回 load() 走既有 in-flight 复用
 watch(locale, () => {
-  if (trendChartRef.value) load()
+  if (!trendChartRef.value) return
+  if (lastSnapshot) renderCharts(lastSnapshot)
+  else load()
 })
 
 // 主题切换后按新配色重建（H5）。Canvas 渲染器读不到 CSS 变量，颜色只能在
-// setOption 时按主题现算；而「切主题」不触发数据刷新，故这里显式驱动一次。
-// 与 locale 切换共用 load()（含 in-flight 复用），不新增请求形状。
+// setOption 时按主题现算；「切主题」本不触发数据刷新，故这里本地重渲染一次，
+// 不重拉接口（P3）。数据未就绪时同上退回 load()。
 watch(
   () => appStore.isDarkMode,
   () => {
-    if (trendChartRef.value) load()
+    if (!trendChartRef.value) return
+    if (lastSnapshot) renderCharts(lastSnapshot)
+    else load()
   }
 )
 
@@ -409,15 +423,13 @@ defineExpose({ load })
 </script>
 
 <style scoped>
-/* 父视图的 scoped 样式不穿透子组件内部元素，此处自带同值定义 */
+/* 父视图的 scoped 样式不穿透子组件内部元素；字体排印取 global.css 的
+   .card-header 基类，此处只保留本卡片额外的布局/字号/颜色 */
 .card-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  font-family: var(--xf-font-display);
-  font-weight: 600;
   font-size: var(--xf-font-size-base);
-  letter-spacing: var(--xf-tracking-wide);
   color: var(--xf-gray-800);
 }
 

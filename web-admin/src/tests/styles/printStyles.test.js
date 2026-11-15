@@ -43,14 +43,58 @@ const ruleBody = (selector) => {
   return bodies.length ? bodies.join('\n') : null
 }
 
+/**
+ * 按花括号配平剥出首个 @media print 块（P2-26）。
+ *
+ * 旧实现 `/@media\s+print\s*\{[\s\S]*\}\s*$/` 贪婪回溯：`\}` 一路退到文件
+ * 最后一个 `}`，把 print 块**之后**的规则也一起吞进匹配里再整体删掉——
+ * 「块后污染屏幕」对它恒真，闸门没有牙。这里改为定位块起点后逐字符配平
+ * 花括号，返回块前/块后剩余文本：包裹性 = 块前只有空白 且 块后只有空白。
+ */
+const stripPrintBlock = (css) => {
+  const openMatch = css.match(/@media\s+print\s*\{/)
+  if (!openMatch) return { found: false, before: css, after: '' }
+  const bodyStart = css.indexOf('{', openMatch.index)
+  let depth = 0
+  let blockEnd = -1
+  for (let i = bodyStart; i < css.length; i += 1) {
+    if (css[i] === '{') depth += 1
+    else if (css[i] === '}') {
+      depth -= 1
+      if (depth === 0) {
+        blockEnd = i
+        break
+      }
+    }
+  }
+  // 花括号不配平（不该发生）：按未找到处理，让调用方断言失败
+  if (blockEnd === -1) return { found: false, before: css, after: '' }
+  return {
+    found: true,
+    before: css.slice(0, openMatch.index),
+    after: css.slice(blockEnd + 1),
+  }
+}
+
 describe('打印样式层：整层被 @media print 包裹（不污染屏幕渲染）', () => {
-  test('全部规则位于 @media print 块内：屏幕态零影响', () => {
-    // 前提自证：文件里确实有 @media print，且没有裸在媒体查询之外的规则块
-    expect(CSS).toMatch(/@media\s+print\s*\{/)
-    // 剥掉 @media print {...} 整体后不应残留任何 { } 规则（@page 允许在外——
-    // 它本身就只在打印上下文生效；本文件将其放在块内，故一并剥除后应无规则）。
-    const withoutPrint = CSS.replace(/@media\s+print\s*\{[\s\S]*\}\s*$/, '')
-    expect(withoutPrint.trim()).toBe('')
+  test('全部规则位于 @media print 块内：块前块后均无屏幕规则', () => {
+    // 前提自证：文件里确实有一个可配平的 @media print 块
+    const { found, before, after } = stripPrintBlock(CSS)
+    expect(found).toBe(true)
+    // 块前与块后都只允许空白：无论把屏幕规则加在块前还是块后，这里都会红
+    //（@page 已包含在块内，故不再单独豁免）
+    expect(before.trim()).toBe('')
+    expect(after.trim()).toBe('')
+  })
+
+  test('反例自证：print 块之后追加屏幕规则时，包裹性闸门必须判红', () => {
+    // 证明闸门有牙：旧贪婪正则会把块后追加的规则连同 print 块一起吞掉（恒绿）；
+    // 配平剥块后 blockEnd 落在 print 块真正的终点，追加的屏幕规则留在 after 里。
+    const polluted = `${CSS}\n.sidebar { display: flex; }\n`
+    const { found, after } = stripPrintBlock(polluted)
+    expect(found).toBe(true)
+    expect(after.trim()).not.toBe('')
+    expect(after).toContain('.sidebar')
   })
 
   test('引入顺序：main.js 中 print.css 位于全部样式层之后（覆盖权）', () => {

@@ -33,6 +33,8 @@ describe('设备报废终态：旧快照不得覆盖终态', () => {
 
   afterAll(async () => {
     if (mongoose.connection.readyState !== 0) {
+      // 本套件造出的设备夹具统一回收（deviceName 是本文件专用的固定名，不误删他套件数据）
+      await FireDevice.deleteMany({ deviceName: '测试灭火器' }).catch(() => {});
       await mongoose.connection.close();
     }
   });

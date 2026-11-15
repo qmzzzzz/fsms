@@ -256,7 +256,11 @@ ipBlacklistSchema.statics.blockIP = async function (rawIp, options = {}) {
   } = options;
   // findOneAndUpdate 默认不跑 schema 校验，pre('validate') 覆盖不到这里
   const ip = normalizeEntryIp(rawIp);
-  const asked = durationMs > 0 ? durationMs : 0; // 非正/NaN 一律按永久（旧 expiresAt 口径）
+  const askedMs = Number(durationMs);
+  if (!Number.isFinite(askedMs) || askedMs < 0) {
+    throw new TypeError(`封禁时长 durationMs 须为非负有限数值，收到：${String(durationMs)}`); // P2-09 fail-loud：脏值进 $add/$max 管道会产出非法到期或静默永久
+  }
+  const asked = askedMs; // 0=业务永久语义保持（与旧 expiresAt 口径一致）
   const now = new Date();
 
   const filter = { ip, type };

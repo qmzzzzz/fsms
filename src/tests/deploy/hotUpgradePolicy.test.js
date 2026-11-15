@@ -185,6 +185,8 @@ describe('命令行解析', () => {
     const opts = policy.parseArgs(['--status-file', '/var/lib/fsms/upgrade/status/a.json']);
     expect(opts.statusFile).toBe('/var/lib/fsms/upgrade/status/a.json');
     expect(policy.parseArgs([]).statusFile).toBe('');
+    // 值里含 = 时不得被 split 截断（2026-11-15 审计）：只在第一个 = 处切分
+    expect(policy.parseArgs(['--status-file=/tmp/a=b/c.json']).statusFile).toBe('/tmp/a=b/c.json');
   });
 
   test('未知参数必须报错：`--dryrun` 被静默忽略就等于真的去改生产', () => {

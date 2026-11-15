@@ -1,6 +1,7 @@
 /** 取证清单的保留与归档（B-5）。 一天一个文件会一直堆下去（默认 flush 2s 一次 ⇒ 理论上限约 4.3 万行/天）。 清理动作本身是**销毁证据**，所以口径比普通日志严得多： - 只**归档**不删除：挪到 .discarded/，证据仍在盘上。 - 只认 `<YYYY-MM-DD>.jsonl` 形状：锁文件、别的日志混在同目录时一律不碰。 - 当天文件永不清理（它还在被写）。 - 归档失败不抛：清理是尽力而为，不能反过来拖垮主流程。 - 归档条数计数可见。 默认保留 60 天 = 取证保留期（30 天）的两倍：数据被 TTL 清掉之后， 清单还要能再撑一段，用来证明「那批记录当时确实存在过」。 / / */
 const fs = require('fs');
 const { toEpochMs } = require('../utils/helpers');
+const { businessDateParts } = require('../constants/timezone');
 const path = require('path');
 
 const DISCARD_DIR = '.discarded';
@@ -29,7 +30,7 @@ const readKeepDays = () => {
 function pruneManifest({ dir, keepDays, today } = {}) {
   const target = dir || path.join(path.resolve(__dirname, '..', '..'), 'logs', 'forensic-manifest');
   const keep = keepDays != null ? keepDays : readKeepDays();
-  const now = today || new Date().toISOString().slice(0, 10);
+  const now = today || businessDateParts().dateStr; // P3：按业务时区取「今天」（清单是业务日键；UTC 口径在上海 00:00–08:00 会差一天）
   let names;
   try {
     names = fs.readdirSync(target);

@@ -4791,6 +4791,125 @@
         }
       }
     },
+    "/readyz": {
+      "get": {
+        "tags": ["System"],
+        "summary": "就绪探针（Mongo/Redis 连通性 + 多实例与事务拓扑判据）",
+        "responses": {
+          "200": {
+            "description": "依赖齐备，可接流量，返回 { status: 'ready' }"
+          },
+          "503": {
+            "description": "Mongo/Redis 未就绪或拓扑阻断，返回 { status: 'unready' }"
+          }
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "tags": ["System"],
+        "summary": "Prometheus 指标抓取端点（QPS/延迟直方图/错误计数/安全告警计数）",
+        "description": "运维抓取面（O-8）。应用层鉴权：内网/回环放行 + 可选 METRICS_TOKEN（Bearer）作为 Nginx 限源之外的第二道防线。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "text/plain; version=0.0.4; charset=utf-8 指标流"
+          }
+        }
+      }
+    },
+    "/api/metrics": {
+      "get": {
+        "tags": ["System"],
+        "summary": "运行指标 JSON 快照（管理面，需 security:audit 权限）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "返回 { summary, latency, routes, alerts, series, process }"
+          }
+        }
+      }
+    },
+    "/api-docs": {
+      "get": {
+        "tags": ["System"],
+        "summary": "Swagger UI 交互式文档页",
+        "description": "生产环境默认关闭（ENABLE_API_DOCS=true 开启）；开启后经 DOCS_USERNAME / DOCS_PASSWORD Basic Auth 保护，且文档限流先于口令比对。",
+        "responses": {
+          "200": {
+            "description": "HTML 文档页"
+          }
+        }
+      }
+    },
+    "/api-docs.json": {
+      "get": {
+        "tags": ["System"],
+        "summary": "OpenAPI 规范 JSON（本文档产物）",
+        "description": "生产环境默认关闭（ENABLE_API_DOCS=true 开启）；开启后经 DOCS_USERNAME / DOCS_PASSWORD Basic Auth 保护，且文档限流先于口令比对。",
+        "responses": {
+          "200": {
+            "description": "返回 openapi.json 全文"
+          }
+        }
+      }
+    },
+    "/csp-report": {
+      "post": {
+        "tags": ["System"],
+        "summary": "CSP 违规上报（浏览器自动发起）",
+        "description": "单向通知：恒回 204，解析失败也不回错误码（避免客户端控制台二次噪音）。限流 5 分钟 60 条/IP，上报体上限 16kb。",
+        "responses": {
+          "204": {
+            "description": "上报已接收（无响应体）"
+          }
+        }
+      }
+    },
+    "/client-errors": {
+      "post": {
+        "tags": ["System"],
+        "summary": "前端异常 / Web Vitals 上报",
+        "description": "异常可能发生在会话失效后（401 跳转途中），故不要求认证。恒回 204；限流 5 分钟 30 批/IP，每批最多 20 条。",
+        "responses": {
+          "204": {
+            "description": "上报已接收（无响应体）"
+          }
+        }
+      }
+    },
+    "/.well-known/security.txt": {
+      "get": {
+        "tags": ["System"],
+        "summary": "安全联络信息（RFC 9116 规范路径）",
+        "description": "Contact / Expires / Preferred-Languages 固定下发，Canonical 取 SECURITY_TXT_CANONICAL 或 ALLOWED_HOSTS 首项（都不配则省略该行），Policy 按 SECURITY_POLICY_URL 下发。",
+        "responses": {
+          "200": {
+            "description": "text/plain; charset=utf-8，Cache-Control: public, max-age=86400"
+          }
+        }
+      }
+    },
+    "/security.txt": {
+      "get": {
+        "tags": ["System"],
+        "summary": "安全联络信息（根路径兼容位置，同一处理器）",
+        "description": "Contact / Expires / Preferred-Languages 固定下发，Canonical 取 SECURITY_TXT_CANONICAL 或 ALLOWED_HOSTS 首项（都不配则省略该行），Policy 按 SECURITY_POLICY_URL 下发。",
+        "responses": {
+          "200": {
+            "description": "text/plain; charset=utf-8，Cache-Control: public, max-age=86400"
+          }
+        }
+      }
+    },
     "/api/security/forensic/trace": {
       "get": {
         "tags": ["Security"],

@@ -26,7 +26,7 @@ const { auditClientAddress } = require('../utils/ipUtils');
 
 /** Mongoose 坏 ObjectId 错误 */
 const respondCastError = (err, req, res) => {
-  logger.warn(`CastError: ${err.path} - ${err.message}`);
+  logger.warn(`CastError: ${err.path} - ${stripControlChars(err.message, 512)}`); // 防日志注入
   return ApiResponse.error(res, '资源 ID 格式无效', 400);
 };
 

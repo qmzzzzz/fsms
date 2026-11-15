@@ -387,3 +387,25 @@ describe('签名导出：可离线复核', () => {
     expect(a.pkg.digest).toBe(b.pkg.digest);
   });
 });
+
+describe('P3 溯源判据：超长指纹显式截断 + 死字段清理', () => {
+  test('超长指纹（>32 位）⇒ 截断到 32 位精确匹配并留 warn 痕迹（不把格式非法伪装成 0 条）', () => {
+    const logger = require('../../utils/logger');
+    const spy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    const full = 'a'.repeat(32);
+    const c = trace.conditionOf({ fingerprint: full + 'deadbeef' });
+    // 修复前：40 位输入原样做等值匹配 ⇒ 库内 32 位指纹恒 0 条，读起来像"这个指纹没出现过"
+    expect(c.fingerprint).toBe(full);
+    expect(spy).toHaveBeenCalledWith(expect.stringContaining('超长'));
+  });
+
+  test('31 位短指纹仍走前缀锚定（截断只针对超长，不伤合法短前缀）', () => {
+    const c = trace.conditionOf({ fingerprint: 'b'.repeat(31) });
+    expect(c.fingerprint).toEqual({ $regex: '^' + 'b'.repeat(31) });
+  });
+
+  test('state.lastError 死字段已删除：stats 只含 queries（从不赋值的字段不许再对外暴露）', () => {
+    expect(trace.getTraceStats()).toEqual({ queries: 0 });
+    expect('lastError' in trace.getTraceStats()).toBe(false);
+  });
+});

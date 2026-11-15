@@ -223,8 +223,13 @@ function exprProblems(where, expr) {
   }
   for (const m of expr.matchAll(/\[([^\]]*)\]/g)) {
     const dur = m[1].trim();
-    if (!DURATION_RE.test(dur)) {
-      problems.push(`${where}：区间向量时长非法「[${dur}]」（合法形如 [5m] / [1h30m]）`);
+    const parts = dur.split(':'); // 子查询 [区间:步长]（如 [5m:1m]，步长可省略）合法：两段各自按时长判，多于一个冒号仍拒
+    const illegal =
+      parts.length > 2 ||
+      !DURATION_RE.test(parts[0].trim()) ||
+      (parts.length === 2 && parts[1].trim() !== '' && !DURATION_RE.test(parts[1].trim()));
+    if (illegal) {
+      problems.push(`${where}：区间向量时长非法「[${dur}]」（合法形如 [5m] / [1h30m] / [5m:1m]）`);
     }
   }
   return problems;

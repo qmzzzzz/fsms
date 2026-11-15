@@ -87,7 +87,11 @@
         {{ $t('attackProfile.suggestionsTitle') }}
       </h3>
       <ol class="suggestion-list">
-        <li v-for="code in profile.suggestions || []" :key="code" class="suggestion-item">
+        <li
+          v-for="(code, index) in profile.suggestions || []"
+          :key="index + '-' + code"
+          class="suggestion-item"
+        >
           {{ $t('attackProfile.suggestion.' + code) }}
         </li>
       </ol>

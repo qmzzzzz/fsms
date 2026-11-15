@@ -184,6 +184,7 @@ jobs:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         # fail-closed：两种模式都不成立时**拒绝执行**，
         # 而不是“没配密钥就跳过部署并报绿”——后者会让人以为已发布。
         run: |
@@ -201,15 +202,67 @@ jobs:
             echo "部署方式：SSH（DEPLOY_HOST 已配置）"
             exit 0
           fi
+          # P2-33：无 SSH 密钥时旧实现只 ::warning 就落到 self-hosted——若仓库没有带 deploy 标签的在线 runner，job 会永远停在「等 runner」。
+          deploy_runners="$(gh api --paginate -H "Authorization: Bearer $GITHUB_TOKEN" "/repos/${GITHUB_REPOSITORY}/actions/runners?per_page=100" | jq -s '[.[].runners[]? | select(.status == "online" and ([.labels[].name] | index("deploy")))] | length')" # 无带 deploy 标签的在线 runner ⇒ 显式失败，消除无限排队
+          if [[ "${deploy_runners}" -eq 0 ]]; then
+            echo "::error::未配置 SSH 部署密钥，且仓库没有带 deploy 标签的在线自托管 runner：本次部署将无限排队，已拒绝执行。"
+            echo "        处置（二选一）：① 在部署机注册带 deploy 标签的自托管 runner；② 配置 DEPLOY_HOST / DEPLOY_USER / DEPLOY_SSH_KEY / DEPLOY_KNOWN_HOSTS 走 SSH 模式。"
+            exit 1
+          fi
           echo "mode=self-hosted" >> "$GITHUB_OUTPUT"
-          echo "部署方式：自托管 runner（未配 SSH 密钥，将在带 deploy 标签的 runner 上执行）"
-          echo "::warning::未配置 DEPLOY_HOST/DEPLOY_SSH_KEY：若仓库也没有自托管 runner，本次部署将停在“等 runner”上。"
+          echo "部署方式：自托管 runner（已确认存在 ${deploy_runners} 个带 deploy 标签的在线 runner）"
+
+  # 模式无关的实跑演练（P2-33）：dry_run=true 时在 hosted runner 上走一遍
+  # checkout → compose 配置渲染 → deploy.js --dry-run（打印与执行同源的发布计划）。
+  # 不做任何 SSH 投递、不改任何远端状态；凭据契约缺失会在 deploy.js 的
+  # validatePreflight（exit 2）处显式失败——把“首次配置缺哪个 secret”在演练期暴露出来，
+  # 而不是留到真实发布当天。镜像的 digest 解析与 cosign 验签已由 preflight 完成，
+  # 本 job 消费的是验签后的不可变 image_ref。
+  dry-run:
+    needs: preflight
+    if: inputs.dry_run == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          clean: true
+
+      - name: Render compose config and print the release plan (no delivery)
+        env:
+          # 与 self-hosted 路径同源的 env 契约（dry-run 不执行变更，但校验同一份前置判据）
+          APP_IMAGE: ${{ needs.preflight.outputs.image_ref }}
+          DEPLOY_REQUIRE_DIGEST_PIN: 'true'
+          CORS_ORIGIN: ${{ secrets.CORS_ORIGIN }}
+          ALLOWED_HOSTS: ${{ secrets.ALLOWED_HOSTS }}
+          TRUSTED_PROXY_CIDRS: ${{ secrets.TRUSTED_PROXY_CIDRS }}
+          BACKUP_RPO_HOURS: ${{ secrets.BACKUP_RPO_HOURS }}
+          BACKUP_RTO_HOURS: ${{ secrets.BACKUP_RTO_HOURS }}
+          DEPLOY_ENFORCE_OFFSITE: 'true'
+          BACKUP_REQUIRE_OFFSITE: 'true'
+          BACKUP_OFFSITE_CMD: ${{ secrets.BACKUP_OFFSITE_CMD }}
+          BACKUP_OFFSITE_DIR: ${{ secrets.BACKUP_OFFSITE_DIR }}
+          ALERTMANAGER_CONFIG_PATH: ${{ secrets.ALERTMANAGER_CONFIG_PATH }}
+          ALLOW_PLACEHOLDER_ALERT_WEBHOOK: ${{ secrets.ALLOW_PLACEHOLDER_ALERT_WEBHOOK }}
+          DEPLOY_STRATEGY: ${{ inputs.strategy }}
+          SKIP_BACKUP: ${{ inputs.skip_backup }}
+        run: |
+          set -euo pipefail
+          # compose 配置渲染：compose 的 `${VAR:?}` 漏配在这一步就报，而不是等真实切换
+          docker compose config >/dev/null
+          args=(--dry-run)
+          [[ "$SKIP_BACKUP" == "true" ]] && args+=(--skip-backup)
+          node scripts/deploy.js "${args[@]}"
 
   # 模式 A：自托管 runner（部署机上已注册，标签 deploy）
   deploy-self-hosted:
     needs: preflight
     if: needs.preflight.outputs.mode == 'self-hosted'
     runs-on: [self-hosted, deploy]
+    timeout-minutes: 40
     environment: ${{ inputs.environment }}
     steps:
       - name: Checkout (clean deployment workspace)
@@ -322,6 +375,7 @@ jobs:
     needs: preflight
     if: needs.preflight.outputs.mode == 'ssh'
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     environment: ${{ inputs.environment }}
     steps:
       - name: Configure SSH

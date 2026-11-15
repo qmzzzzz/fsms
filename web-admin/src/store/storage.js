@@ -3,8 +3,8 @@
  *
  * 分工：
  * - 认证令牌：httpOnly cookie（JS 不可读，见 I-01）
- * - 会话身份界面状态（currentUser/permissions）与主题偏好：localStorage
- * - 标签页级临时状态（计数器、语言、迁移残留）：sessionStorage
+ * - 会话身份界面状态（currentUser/permissions）与主题/语言偏好：localStorage
+ * - 标签页级临时状态（计数器、迁移残留）：sessionStorage
  */
 
 /**

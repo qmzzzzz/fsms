@@ -706,10 +706,10 @@ jobs:
         # 2026-09-28 补上第二半：原实现只断言 skipped==0，而且把「日志里根本没有汇总行」
         # 默认读成 skipped=0 —— 于是跑崩 / 配置错 / 被 --project 过滤成空集时**照样通过**。
         # 现改为 fail-closed：汇总行必须存在，且 passed 有下界。
-        # 下界 = 16 条无条件旅程（6 个 spec） × 2 个 project = 32，不是"覆盖率阈值"，
+        # 下界 = 17 条无条件旅程（6 个 spec） × 2 个 project = 34，不是"覆盖率阈值"，
         # 而是「旅程被静默裁剪」的告警；确实要删旅程时同步改这个数字，
         # 让删减在 diff 里可见（与 eslint.ratchet.json 收紧必须走评审同一条纪律）。
-        # 刻意只数**无条件**旅程：另有 9 条 `test.skip(cond)` 条件旅程，它们跑不跑
+        # 刻意只数**无条件**旅程：另有 6 条 `test.skip(cond)` 条件旅程，它们跑不跑
         # 由 E2E_USER/E2E_PASS 是否注入决定，把它算进下界会在凭据缺失时把门禁
         # 变成"永远红"；而它们真被跳过时下方 `skipped > 0` 已经判红，不在此处重复计。
         # 该数字不再靠人工同步：由 src/tests/playwrightConfig.test.js 的
@@ -728,7 +728,7 @@ jobs:
             const skipped = num(/(\d+)\s+skipped/);
             const failed = num(/(\d+)\s+failed/);
             const hasSummary = /(\d+)\s+passed/.test(log);
-            const MIN_PASSED = 32;
+            const MIN_PASSED = 34;
             const problems = [];
             if (!hasSummary) problems.push('日志里没有 N passed 汇总行：E2E 未跑完或 reporter 形态已变（原实现会把它读成 0 并通过）');
             if (passed < MIN_PASSED) problems.push('通过数 ' + passed + ' 低于下界 ' + MIN_PASSED + '：旅程被静默裁剪？');

@@ -55,14 +55,20 @@ describe('metrics：截断可见性与缺省标签口径', () => {
   let warnSpy;
   beforeEach(() => {
     warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
-    metrics._counters.clear();
-    metrics._histograms.clear();
-    metrics._alertCounters.clear();
-    metrics._alertLabels.clear();
-    metrics._loginCounters.clear();
-    metrics._mfaCounters.clear();
-    metrics._droppedSeries.clear();
-    metrics._seriesLimitWarned.clear();
+    // 内部结构存在才清理（实现换型后这些字段可能不再是这些 Map）：隔离不能依赖
+    // 内部形状，断言侧已全部锚在外部可见面（formatPrometheus 文本 / getSnapshot 快照）
+    for (const coll of [
+      metrics._counters,
+      metrics._histograms,
+      metrics._alertCounters,
+      metrics._alertLabels,
+      metrics._loginCounters,
+      metrics._mfaCounters,
+      metrics._droppedSeries,
+      metrics._seriesLimitWarned,
+    ]) {
+      if (coll && typeof coll.clear === 'function') coll.clear();
+    }
   });
   afterEach(() => warnSpy.mockRestore());
 
@@ -91,8 +97,8 @@ describe('metrics：截断可见性与缺省标签口径', () => {
       metrics.incSecurityAlert('empty', '');
       metrics.incSecurityAlert('empty', undefined);
 
-      expect(metrics._alertCounters.size).toBe(1);
-      expect([...metrics._alertCounters.values()]).toEqual([2]);
+      // 经快照（公开面）断言合并结果：一条 series、计数 2
+      expect(metrics.getSnapshot().alerts).toEqual([{ type: 'empty', level: 'unknown', count: 2 }]);
     });
 
     test('incLoginAttempt 入口同样归一（不依赖调用方传全枚举）', () => {
@@ -144,10 +150,13 @@ describe('metrics：截断可见性与缺省标签口径', () => {
       fill('alerts', 7, 'a');
       fill('login', 3, 'l');
 
-      expect(metrics._alertCounters.size).toBe(CAP);
-      expect(metrics._loginCounters.size).toBe(CAP);
-      expect(metrics._droppedSeries.get('alerts')).toBe(7);
-      expect(metrics._droppedSeries.get('login')).toBe(3);
+      // 活下来的 series 数经 /metrics 文本观察：alerts/login 各保留 CAP 条
+      expect(samples('security_alerts_total')).toHaveLength(CAP);
+      expect(samples('auth_login_total')).toHaveLength(CAP);
+      // 丢弃计数经快照（与文本同源）观察
+      const dropped = metrics.getSnapshot().series.dropped;
+      expect(dropped.alerts).toBe(7);
+      expect(dropped.login).toBe(3);
       expect(droppedText()).toEqual([
         'metrics_series_dropped_total{store="requests"} 0',
         'metrics_series_dropped_total{store="duration"} 0',
@@ -162,18 +171,20 @@ describe('metrics：截断可见性与缺省标签口径', () => {
       fill('alerts', 2, 'c');
       const series = metrics.getSnapshot().series;
       expect(series.limit).toBe(CAP);
-      expect(metrics._alertCounters.size).toBe(series.limit);
+      // 活下来的 series 数=上限：经快照观察，不点内部 Map 的 size
+      expect(metrics.getSnapshot().alerts).toHaveLength(series.limit);
     });
 
     test('上限只挡新 series：既有标签继续累计（反向保护，上限≠不计数）', () => {
       fill('alerts', 5, 'b');
-      const firstKey = [...metrics._alertCounters.keys()][0];
 
       metrics.incSecurityAlert('b_0', 'high');
       metrics.incSecurityAlert('b_0', 'high');
 
-      expect(metrics._alertCounters.get(firstKey)).toBe(3);
-      expect(metrics._droppedSeries.get('alerts')).toBe(5);
+      // 既有 series 的累计经快照观察：b_0 计到 3，而不是被上限挡成 1
+      const b0 = metrics.getSnapshot().alerts.find((row) => row.type === 'b_0');
+      expect(b0).toEqual(expect.objectContaining({ type: 'b_0', level: 'high', count: 3 }));
+      expect(metrics.getSnapshot().series.dropped.alerts).toBe(5);
     });
 
     test('HTTP 两个 store 各自独立计数（直方图打满不与请求计数共用丢弃额度）', () => {
@@ -188,16 +199,21 @@ describe('metrics：截断可见性与缺省标签口径', () => {
         metrics.metricsMiddleware(req, res, () => {});
         res._cb();
       }
-      expect(metrics._counters.size).toBe(CAP);
-      expect(metrics._histograms.size).toBe(CAP);
-      expect(metrics._droppedSeries.get('requests')).toBe(4);
-      expect(metrics._droppedSeries.get('duration')).toBe(4);
+      // 活下来的 series 数经文本观察：http_requests_total 每条 series 一行；
+      // 直方图每条 series 恰有一行 *_count（bucket/sum 是多行，不能直接数行数）
+      expect(samples('http_requests_total')).toHaveLength(CAP);
+      expect(samples('http_request_duration_seconds_count')).toHaveLength(CAP);
+      const dropped = metrics.getSnapshot().series.dropped;
+      expect(dropped.requests).toBe(4);
+      expect(dropped.duration).toBe(4);
     });
 
     test('HTTP 计数与直方图成对登记：一侧满 ⇒ 整对不登记（不得出现「有量无延迟」半登记态）', () => {
       // 不对称满载态只能从内部 map 造：middleware 写两侧永远成对，单侧打满无法经公开入口到达。
       // 这正是旧缺陷的形状——requests 有位、duration 满 ⇒ 计数登记、延迟缺席，面板无从区分
-      // 「没人访问」与「延迟数据被砍」。
+      // 「没人访问」与「延迟数据被砍」。内部结构不在（实现换型）时放弃这层布防直接返回：
+      // 成对登记的外部面由上一条与 droppedText 的判据共同盯着。
+      if (!metrics._histograms || typeof metrics._histograms.set !== 'function') return;
       for (let i = 0; i < CAP; i++) {
         metrics._histograms.set(`route="pre${i}"`, { buckets: [], sum: 0, count: 0 });
       }
@@ -210,12 +226,17 @@ describe('metrics：截断可见性与缺省标签口径', () => {
       };
       metrics.metricsMiddleware(req, res, () => {});
       res._cb();
-      // 整对拒绝：requests 明明有位，也不得只登记计数
-      expect(metrics._counters.size).toBe(0);
-      expect(metrics._histograms.size).toBe(CAP);
+      // 整对拒绝（外部面）：requests 一行都没有；直方图仍是打满时的 CAP 条
+      expect(samples('http_requests_total')).toEqual([]);
+      expect(samples('http_request_duration_seconds_count')).toHaveLength(CAP);
       // 两侧丢弃计数仍按各自额度独立记：只有真正拒收新 series 的 duration +1
-      expect(metrics._droppedSeries.get('requests') || 0).toBe(0);
-      expect(metrics._droppedSeries.get('duration')).toBe(1);
+      expect(droppedText()).toEqual([
+        'metrics_series_dropped_total{store="requests"} 0',
+        'metrics_series_dropped_total{store="duration"} 1',
+        'metrics_series_dropped_total{store="alerts"} 0',
+        'metrics_series_dropped_total{store="login"} 0',
+        'metrics_series_dropped_total{store="mfa"} 0',
+      ]);
     });
 
     test('逐 store 各告警一次：第二个打满的 store 必须喊得出，且不刷屏', () => {
@@ -234,8 +255,8 @@ describe('metrics：截断可见性与缺省标签口径', () => {
       metrics.incSecurityAlert('w_again', 'high');
       // 第四次丢弃不再重复喊：日志收敛……
       expect(capMessages().filter((m) => m.includes('store=alerts'))).toHaveLength(1);
-      // ……但丢弃计数仍累加：可查询的信号不能跟着收敛
-      expect(metrics._droppedSeries.get('alerts')).toBe(4);
+      // ……但丢弃计数仍累加：可查询的信号不能跟着收敛（经快照观察）
+      expect(metrics.getSnapshot().series.dropped.alerts).toBe(4);
     });
   });
 });

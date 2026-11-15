@@ -202,6 +202,7 @@ import { api } from '@/utils/api'
 import { haptic } from '@/utils/haptic'
 import { encryptPassword } from '@/utils/loginCipher'
 import { encryptionErrorMessage } from '@/utils/encryptionError'
+import { safeInternalPath } from '@/utils/internalPath'
 import { useAuthStore } from '@/store'
 import LiquidGlassButtons from '@/components/LiquidGlassButtons.vue'
 import AuthPrefs from '@/components/AuthPrefs.vue'
@@ -449,7 +450,11 @@ const onLogin = async () => {
       // 跳转前清理敏感字段，避免密码/动态口令残留在内存中
       loginForm.password = ''
       loginForm.mfaCode = ''
-      router.push(user.mustChangePassword ? '/profile' : '/dashboard')
+      // P3-11：守卫暂存的深链目标只接受站内路径（以 / 开头且非 //），
+      // 否则落 /dashboard；取用后立即清掉，避免残留影响下一次登录
+      const requested = authStore.postLoginRedirect
+      authStore.postLoginRedirect = null
+      router.push(user.mustChangePassword ? '/profile' : safeInternalPath(requested))
     } else {
       ElMessage.error(resp.message || t('login.failed'))
       // 验证码一次性消费：任何失败尝试后都必须换新的

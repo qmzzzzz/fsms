@@ -182,6 +182,11 @@ const REGISTERED_NON_MARKER = [
     why: '按 id 收敛的权限缓存回填（missing 由缓存 miss 集合派生）',
   },
   {
+    file: 'src/services/userPermissionService.js',
+    anchor: 'const users = await User.find({ _id: { $in: ids } })',
+    why: '按 id 收敛的审批人权限预热（ids 来自已鉴权请求的角色授权链，非用户名枚举面）',
+  },
+  {
     file: 'src/services/honeypotWatch.js',
     anchor: 'const taken = (await User.find({ isHoneypot: true })',
     why: '**有意不排除**：这条查询的对象**就是**蜜罐账户本身（取已有诱饵的 realName 供画像去重），排除它等于把去重集清空、允许两份同名画像',

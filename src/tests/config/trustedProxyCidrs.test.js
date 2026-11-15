@@ -47,7 +47,8 @@ const {
   clientIpForSecurityDecision,
 } = require('../../utils/ipUtils');
 
-const ENV_KEY = 'TRUSTED' + '_' + 'PROXY' + '_' + 'CIDRS';
+// 与生产侧同改（审计 2026-11-15）：环境变量名用完整字面量，保持 grep 可检索
+const ENV_KEY = 'TRUSTED_PROXY_CIDRS';
 
 /**
  * 替身 req：只带判据实际读取的面（与 clientIpSecurityDecision.test.js 同口径），

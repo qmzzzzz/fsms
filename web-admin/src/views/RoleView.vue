@@ -217,6 +217,7 @@ import { api } from '@/utils/api'
 import { acquireWebSocket, releaseWebSocket } from '@/utils/websocket'
 import { useRolePermissions } from '@/composables/useRolePermissions'
 import { useLatestRequest } from '@/composables/useLatestRequest'
+import { withSyncLock } from '@/utils/withSyncLock'
 import RoleFormDialog from '@/components/RoleFormDialog.vue'
 // D-2：角色列表与权限模块卡片拆为子组件
 import RoleListPanel from '@/components/RoleListPanel.vue'
@@ -415,7 +416,7 @@ const handleCurrentChange = async (row) => {
   await loadRolePermissions(row._id)
 }
 
-const handleDelete = async (row) => {
+const handleDelete = withSyncLock(async (row) => {
   try {
     await ElMessageBox.confirm(
       `${t('messages.deleteConfirm')}「${roleName(row)}」?`,
@@ -435,7 +436,7 @@ const handleDelete = async (row) => {
   } catch (e) {
     // 取消删除或失败原因已在拦截器统一提示
   }
-}
+})
 
 // 新建角色成功：刷新列表并选中新角色
 const onRoleCreated = async (newRole) => {

@@ -47,6 +47,49 @@ function collectSectionHeaders(text) {
   return headers;
 }
 
+function countUnescapedPipes(line) {
+  // GFM 表格里 `\|` 是字面量竖线：跳过转义对，只数未转义的列分隔符
+  let count = 0;
+  for (let i = 0; i < line.length; i += 1) {
+    if (line[i] === '\\') {
+      i += 1;
+      continue;
+    }
+    if (line[i] === '|') count += 1;
+  }
+  return count;
+}
+
+function tableColumnIssues(text) {
+  // 表格列数一致性（错位行曾漏检）：连续 `|` 行成表，首行为表头，列数不一致的行报行号
+  const issues = [];
+  const lines = String(text).split('\n');
+  let headerPipes = 0;
+  let tableStart = -1;
+  const flush = (endIdx) => {
+    for (let i = tableStart + 1; i <= endIdx; i += 1) {
+      const pipes = countUnescapedPipes(lines[i]);
+      if (pipes !== headerPipes) {
+        issues.push(
+          `表格第 ${i + 1} 行列数与表头不一致（${pipes - 1} 列，表头 ${headerPipes - 1} 列）`
+        );
+      }
+    }
+  };
+  for (let i = 0; i < lines.length; i += 1) {
+    const isRow = lines[i].trimStart().startsWith('|');
+    if (isRow && headerPipes === 0) {
+      tableStart = i;
+      headerPipes = countUnescapedPipes(lines[i]);
+    } else if (!isRow && headerPipes > 0) {
+      flush(i - 1);
+      headerPipes = 0;
+    }
+  }
+  if (headerPipes > 0) flush(lines.length - 1);
+  return issues;
+}
+
 /**
  * 结构判据（纯函数）。
  * @param {string} text CHANGELOG 全文（CRLF/LF 均可）
@@ -84,6 +127,8 @@ function checkChangelogStructure(text) {
       );
     }
   }
+
+  issues.push(...tableColumnIssues(normalized));
 
   return { ok: issues.length === 0, issues };
 }
@@ -125,6 +170,8 @@ module.exports = {
   UNRELEASED_KEY,
   sectionKey,
   collectSectionHeaders,
+  countUnescapedPipes,
+  tableColumnIssues,
   checkChangelogStructure,
   checkFile,
 };

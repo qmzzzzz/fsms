@@ -199,7 +199,15 @@ describe('silentErrors 不得吞掉 401 登出链（A1 回归）', () => {
     const err = await apiClient
       .get('/security/upgrade/jobs/job-6', { silentErrors: true })
       .catch((e) => e)
-    await sleep(20)
+    // 登出链是 fire-and-forget 的异步 IIFE（动态 import store + router.push）：
+    // 条件轮询终态，不按固定时长猜（P3-10）
+    await vi.waitFor(
+      () => {
+        expect(clearSpy).toHaveBeenCalledTimes(1)
+        expect(pushSpy).toHaveBeenCalledWith('/login')
+      },
+      { timeout: 2000, interval: 10 }
+    )
 
     expect(err?.response?.status).toBe(401)
     // 刷新确实被尝试过（不是提前短路）

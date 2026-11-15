@@ -14,6 +14,10 @@ describe('安全管理核心接口（冲 100%）', () => {
   let app;
   let adminToken;
   let adminPassword;
+  // P3-22：下面的用例会翻转全局 SystemConfig（注册开关/登录验证码开关），
+  // beforeAll 快照原配置，afterAll 按原样归还（原不存在则删除）并失效相关缓存
+  const CONFIG_KEYS = ['allowPublicRegistration', 'loginCaptchaEnabled'];
+  let savedConfigs = [];
   const stamp = `sc${Date.now()}`.replace(/\d/g, (d) => 'abcdefghij'[Number(d)]);
 
   beforeAll(async () => {
@@ -24,7 +28,11 @@ describe('安全管理核心接口（冲 100%）', () => {
     const Role = require('../../models/Role');
     const Permission = require('../../models/Permission');
     require('../../models/TokenBlacklist');
-    require('../../models/SystemConfig');
+    const SystemConfig = require('../../models/SystemConfig');
+    savedConfigs = (await SystemConfig.find({ key: { $in: CONFIG_KEYS } }).lean()).map((d) => ({
+      key: d.key,
+      value: d.value,
+    }));
 
     const wildcardPerm = await Permission.findOneAndUpdate(
       { code: '*:*' },
@@ -60,8 +68,25 @@ describe('安全管理核心接口（冲 100%）', () => {
     if (mongoose.connection.readyState !== 0) {
       const User = require('../../models/User');
       const Role = require('../../models/Role');
+      const SystemConfig = require('../../models/SystemConfig');
       await User.deleteOne({ username: `scadmin${stamp}` }).catch(() => {});
       await Role.deleteOne({ code: `SUPER_ADMIN_SC_${stamp}` }).catch(() => {});
+      // P3-22：把被翻转的全局配置按快照归还原值；原本不存在的键删除，
+      // 并失效三处进程内缓存，归还才对后续套件真正生效
+      try {
+        for (const { key, value } of savedConfigs) {
+          await SystemConfig.findOneAndUpdate({ key }, { $set: { value } }, { upsert: true });
+        }
+        const kept = savedConfigs.map((c) => c.key);
+        await SystemConfig.deleteMany({
+          key: { $in: CONFIG_KEYS.filter((k) => !kept.includes(k)) },
+        });
+        SystemConfig.invalidateRegistrationCache?.();
+        SystemConfig.invalidateLoginCaptchaCache?.();
+        SystemConfig.invalidateRegisterCaptchaCache?.();
+      } catch (_) {
+        /* 尽力归还 */
+      }
       await mongoose.connection.close();
     }
   });

@@ -21,6 +21,7 @@ const { ipKeyGenerator } = require('express-rate-limit');
 const {
   normalizeRateLimitIp,
   normalizeLoginRateKey,
+  loginUserLimitWarnMessage,
   LOGIN_RATE_KEY_MAX_CHARS,
   LOGIN_RATE_KEY_OVERSIZED,
   loginUserLimiter,
@@ -191,5 +192,39 @@ describe('登录账号桶键必须有界（未校验输入不得原样成为存�
     }
     // 修前：21 个长串 = 21 个独立桶 ⇒ 永不触顶（本断言红）；修后：同一个 ~oversized 桶 ⇒ 第 21 发 429
     expect(res.status).toBe(429);
+  });
+});
+
+describe('登录限流告警的日志注入防线（P2-07，审计 2026-11-15）', () => {
+  const makeReq = (username) => ({
+    body: { username },
+    ip: '198.51.100.88',
+    headers: {},
+    socket: { remoteAddress: '198.51.100.88' },
+    method: 'POST',
+    path: '/api/auth/login',
+  });
+
+  test('含换行的 username 不得把告警拆成多行（控制字符在插值前清洗）', () => {
+    const msg = loginUserLimitWarnMessage(
+      makeReq('admin\n2026-11-15 ERROR fake line planted by attacker')
+    );
+    expect(msg).not.toContain('\n');
+    expect(msg).not.toContain('\r');
+    // 控制字符被替换为空格而不是删除：行内内容仍可读，但不再换行伪造日志
+    expect(msg).toContain('admin 2026-11-15 error fake line planted by attacker');
+  });
+
+  test('插值基于归一化键（trim/小写）；界内原样、超长并入共享桶键', () => {
+    expect(loginUserLimitWarnMessage(makeReq('  ADMIN  '))).toContain('username=admin,');
+    const max64 = 'x'.repeat(LOGIN_RATE_KEY_MAX_CHARS);
+    expect(loginUserLimitWarnMessage(makeReq(max64))).toContain(`username=${max64},`);
+    // 超长 username：normalizeLoginRateKey 并入登记在案的共享桶键（见该函数注释）
+    const longMsg = loginUserLimitWarnMessage(makeReq('x'.repeat(200)));
+    expect(longMsg).toContain(`username=${LOGIN_RATE_KEY_OVERSIZED},`);
+  });
+
+  test('username 缺失时以 "-" 占位（不产生 undefined 字样）', () => {
+    expect(loginUserLimitWarnMessage(makeReq(undefined))).toContain('username=-,');
   });
 });

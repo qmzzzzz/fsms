@@ -26,6 +26,9 @@ const isWeak = (value) => {
   return weakSecretChecker(value);
 };
 
+const logger = require('../utils/logger');
+const { normalizeCorsOrigin } = require('./corsOrigins');
+
 const splitList = (raw) =>
   String(raw || '')
     .split(',')
@@ -92,6 +95,14 @@ function collectCorsOriginErrors(errors) {
       errors.push(
         `CORS_ORIGIN 含明文来源「${origin}」：生产环境必须使用 https（credentials:true 下` +
           ' http 来源可被网络攻击者注入）。仅开发环境允许 http://localhost'
+      );
+    }
+    const normalized = normalizeCorsOrigin(origin);
+    if (normalized !== origin) {
+      logger.warn(
+        `CORS_ORIGIN「${origin}」是浏览器永远不会发送的书写形态` +
+          '（主机名小写、https 省略 :443、http 省略 :80）；' +
+          `运行期已按归一化形态「${normalized}」参与比对，建议直接改写配置为规范形态`
       );
     }
   }

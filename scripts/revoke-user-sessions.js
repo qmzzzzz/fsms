@@ -7,8 +7,8 @@
  * 曾用旧凭据登录产生的会话必须全部作废——否则旧会话在令牌自然过期前仍然有效。
  *
  * 用法：
- *   node scripts/revoke-user-sessions.js <username>           # 演练（只看不动）
- *   ALLOWED_SOURCE_DB=<库名> node scripts/revoke-user-sessions.js <username> --apply   # 执行
+ *   node scripts/revoke-user-sessions.js <username>                        # 演练（只看不动）
+ *   ALLOWED_SOURCE_DB=<库名> node scripts/revoke-user-sessions.js <username> --apply --yes   # 执行
  *
  * 动作（--apply 时）：
  *   1. tokenVersion +1 —— 所有已签发的该用户 JWT 立即失效（鉴权每请求校验）；
@@ -31,12 +31,27 @@ const mongoose = require('mongoose');
 const { dbNameFromUri, hostFromUri, assertApplyAllowed } = require('./destructiveGuard');
 
 const argv = process.argv.slice(2);
-const username = argv.find((a) => !a.startsWith('--'));
-const apply = argv.includes('--apply');
+const positional = [];
+const argErrors = [];
+let apply = false;
+let yes = false;
+for (const token of argv) {
+  if (token === '--apply') apply = true;
+  else if (token === '--yes') yes = true;
+  else if (!token.startsWith('--')) positional.push(token);
+  else argErrors.push(`未知参数：${token}（可用：--apply / --yes，外加一个用户名）`);
+}
+if (positional.length !== 1) {
+  argErrors.push(`需要恰好一个用户名（收到 ${positional.length} 个）`);
+}
+const username = positional[0];
 
-if (!username) {
-  console.error('用法: node scripts/revoke-user-sessions.js <username> [--apply]');
-  process.exit(1);
+if (argErrors.length > 0 || (apply && !yes)) {
+  // --apply 是破坏性操作：对齐同族必须 --yes 双确认；手误（--aply）按未知参数拒绝，不静默降级成演练
+  for (const e of argErrors) console.error(e);
+  if (apply && !yes) console.error('--apply 必须与 --yes 同时给出（双确认后才执行破坏性操作）');
+  console.error('用法: node scripts/revoke-user-sessions.js <username> [--apply] --yes');
+  process.exit(2);
 }
 
 if (!process.env.MONGODB_URI) {

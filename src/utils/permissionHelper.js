@@ -6,6 +6,7 @@
 const User = require('../models/User');
 const Permission = require('../models/Permission');
 const logger = require('../utils/logger');
+const { errText } = require('./auditWriteFailure');
 
 /**
  * 取出用户已 populate 的角色列表，剔除可能的 null 洞（L-15）
@@ -195,8 +196,11 @@ const getMenuTree = async (userId) => {
 
     return tree;
   } catch (error) {
-    logger.error(`获取菜单树失败：${error.message}`);
-    return [];
+    logger.error(`获取菜单树失败：${errText(error)}`); // 故障不得与"无权限"同形：留计数并上抛（审计 2026-11-15）
+    try {
+      require('./metrics').incSecurityAlert('menu_tree_failure', 'medium');
+    } catch (_) {}
+    throw error;
   }
 };
 

@@ -33,28 +33,43 @@ const { randomPassword } = require('../helpers/buildLoginEnvelope');
 const ROOT = path.resolve(__dirname, '../..');
 const SCAN_DIRS = ['routes', 'controllers', 'middleware'];
 
-/** 从源码里收集被要求的权限码，返回 code → 出现位置 */
-function collectRequiredCodes() {
-  const required = new Map();
+/** 递归收集扫描目录下的全部 .js：权限判据散落在 controllers/*Controller/ 子目录里，非递归会漏掉一整层 */
+function collectScanFiles() {
   const files = [];
   for (const dir of SCAN_DIRS) {
-    const abs = path.join(ROOT, dir);
-    for (const f of fs.readdirSync(abs)) {
-      if (!f.endsWith('.js')) continue;
-      files.push({ name: `src/${dir}/${f}`, text: fs.readFileSync(path.join(abs, f), 'utf8') });
-    }
+    const walk = (current, rel) => {
+      for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+        const relName = `${rel}/${entry.name}`;
+        if (entry.isDirectory()) {
+          walk(path.join(current, entry.name), relName);
+        } else if (entry.name.endsWith('.js')) {
+          files.push({
+            name: `src/${relName}`,
+            text: fs.readFileSync(path.join(current, entry.name), 'utf8'),
+          });
+        }
+      }
+    };
+    walk(path.join(ROOT, dir), dir);
   }
+  return files;
+}
+
+/** 从源码里收集被要求的权限码，返回 code → 出现位置 */
+function collectRequiredCodes(files) {
+  const required = new Map();
   for (const { name, text } of files) {
     text.split(/\r?\n/).forEach((line, i) => {
       const codes = [
+        // 双参形态（如 hasPermission(userId, 'system:read')）与单参形态都要捕获，否则该码逃过对账
         ...[
           ...line.matchAll(
-            /(?:checkPermission|requirePermission|hasPermission|requireAnyPermission)\(\s*'([^']+)'/g
+            /(?:checkPermission|requirePermission|hasPermission|requireAnyPermission)\s*\(\s*(?:[A-Za-z_$][\w$.]*\s*,\s*)?'([^']+)'/g
           ),
         ].map((m) => m[1]),
         ...[
           ...line.matchAll(
-            /(?:checkPermission|requirePermission|hasAnyPermission|hasPermission)\(\s*\[([^\]]*)\]/g
+            /(?:checkPermission|requirePermission|hasAnyPermission|hasPermission)\s*\(\s*\[([^\]]*)\]/g
           ),
         ].flatMap((m) => [...m[1].matchAll(/'([^']+)'/g)].map((q) => q[1])),
       ];
@@ -67,14 +82,22 @@ function collectRequiredCodes() {
   return required;
 }
 
-const required = collectRequiredCodes();
+const SCAN_FILES = collectScanFiles();
+const required = collectRequiredCodes(SCAN_FILES);
 const catalogCodes = new Set(defaultPermissions.map((p) => p.code));
 
 describe('权限码对账（目录 ↔ 判据）', () => {
   test('前提：扫描确实覆盖了路由与控制器（否则下面的对账是空集假绿）', () => {
+    // 扫描面下限自证：仅顶层就有 57 个 .js，递归后 90+；缩水回非递归（漏掉 *Controller/ 子目录）即红
+    expect(SCAN_FILES.length).toBeGreaterThanOrEqual(80);
+    expect(SCAN_FILES.some((f) => f.name.startsWith('src/controllers/userController/'))).toBe(true);
     expect(required.size).toBeGreaterThan(25);
     expect(required.has('role:create')).toBe(true);
     expect(required.has('permission:create')).toBe(true);
+    // 双参形态必须真的被抽到（该调用点恰在子目录文件里，双重逃逸过旧闸）
+    expect(required.get('system:read') || []).toEqual(
+      expect.arrayContaining([expect.stringMatching(/userController\/read\.js:\d+$/)])
+    );
   });
 
   test('[A] 被路由/控制器要求的码，必须存在于权限目录里（可授予性）', () => {

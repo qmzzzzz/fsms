@@ -41,6 +41,11 @@ beforeEach(() => {
 
 afterEach(() => {
   rafSpy.mockRestore()
+  // 兜底卸载：用例中途断言失败时，已挂载实例不得泄漏到下一条用例
+  //（各用例末尾的显式 unmount 幂等，此处只接住「没走到」的异常路径）
+  active?.handle?.unmount()
+  active = null
+  rangeRef = null
 })
 
 /** 手动执行本帧收集到的 rAF 回调（指令靠它做首帧定位 + 开 live 类） */

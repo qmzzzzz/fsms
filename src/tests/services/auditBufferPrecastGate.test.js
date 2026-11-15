@@ -24,6 +24,12 @@ const path = require('path');
 const mongoose = require('mongoose');
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-precast-'));
+// P3-20：快照被改写的 env，文件级 afterAll 里先归还再删目录
+const SAVED_WAL_ENV = {
+  AUDIT_WAL_PATH: process.env.AUDIT_WAL_PATH,
+  AUDIT_WAL_MAX_BYTES: process.env.AUDIT_WAL_MAX_BYTES,
+  AUDIT_WAL_STAT_INTERVAL: process.env.AUDIT_WAL_STAT_INTERVAL,
+};
 process.env.AUDIT_WAL_PATH = path.join(tmpDir, 'precast-test.wal');
 process.env.AUDIT_WAL_MAX_BYTES = '100000';
 process.env.AUDIT_WAL_STAT_INTERVAL = '1000';
@@ -183,13 +189,9 @@ describe('批量审计写路径：串链前的预铸造闸', () => {
   });
 
   afterAll(async () => {
-    try {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
-    } catch (_) {
-      /* ignore */
-    }
-    // 连接关闭上移到**文件级** afterAll（本文件底部）：A7 describe 在本 describe
-    // 之后运行且其 flush 需要装载链尾（查库），这里关连接会让 A7 的批次静默回缓冲
+    // P3-20：tmpDir 不在这里删——A7 describe 在本 describe 之后运行，
+    // 其 flush 仍要写 AUDIT_WAL_PATH 指向的文件；目录保活到文件级 afterAll
+    // 连接关闭同理上移到**文件级** afterAll（本文件底部）：这里关连接会让 A7 的批次静默回缓冲
     // （insertMany spy 收空）。env 归还同理上移。
     delete process.env.AUDIT_FLUSH_BATCH_SIZE;
   });
@@ -466,12 +468,17 @@ describe('A7：flush 单轮批次上限（splice 截断，余量留待下一轮�
 // 连接关闭与 env 归还是**文件级**职责：A7 describe 在首个 describe 之后运行，
 // 其 flush 需要查库装载链尾——在 describe 级关连接会让 A7 的批次静默回缓冲。
 afterAll(async () => {
+  // P3-20：先归还 env（WAL 路径/容量/统计间隔 + 批次上限），再删临时目录——
+  // env 仍指向已删路径会让同 worker 后续套件把 WAL 写进不存在的目录
+  for (const [key, value] of Object.entries(SAVED_WAL_ENV)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  delete process.env.AUDIT_FLUSH_BATCH_SIZE;
   try {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   } catch (_) {
     /* ignore */
   }
   if (mongoose.connection.readyState !== 0) await mongoose.connection.close();
-  // 本文件在 require 前设的上限不能泄给同一 worker 里的后续文件（testMatch 顺序不定）
-  delete process.env.AUDIT_FLUSH_BATCH_SIZE;
 });

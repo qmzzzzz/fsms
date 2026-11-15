@@ -109,6 +109,32 @@ describe('B-1 跨进程锁：多进程同时追加不得把链写成分叉', () 
     expect(fs.existsSync(path.join(dir, LOCK.LOCK_FILE))).toBe(false);
   });
 
+  test('锁文件写入 CSPRNG owner token（首段 32 位 hex）；hostname/pid 仅排障', async () => {
+    const dir = tmpdir();
+    let content = null;
+    await LOCK.withLock(dir, {}, async () => {
+      content = fs.readFileSync(path.join(dir, LOCK.LOCK_FILE), 'utf8');
+    });
+    expect(/^[0-9a-f]{32}:.+:\d+$/.test(content)).toBe(true);
+  });
+
+  test('释放前比对 token：锁在临界区内被他人接管后，原持有者的释放不得删掉别人的新锁', async () => {
+    const dir = tmpdir();
+    fs.mkdirSync(dir, { recursive: true });
+    const lockPath = path.join(dir, LOCK.LOCK_FILE);
+    const r = await LOCK.withLock(dir, { timeoutMs: 1000 }, async () => {
+      // 临界区进行中，第三方接管（写入它自己 token 形态的锁文件——模拟超 staleMs 的长临界区）
+      fs.writeFileSync(lockPath, 'other-token:other-host:999', 'utf8');
+      return 'done';
+    });
+    expect(r.ok).toBe(true);
+    // 第三方的锁仍在：原持有者的释放没有把它一起删掉（互斥破防窗已关）
+    expect(fs.readFileSync(lockPath, 'utf8')).toBe('other-token:other-host:999');
+    // "没删到自己的锁"必须留痕，不许静默
+    expect(LOCK.getLockStats().releaseFailures).toBeGreaterThan(0);
+    fs.unlinkSync(lockPath); // 测试自清理，不影响后续用例
+  });
+
   test('锁超时必须 fail-visible：appendBatch 计 writeFailures 并给出可诊断原因', async () => {
     manifest.resetManifestState();
     const dir = tmpdir();

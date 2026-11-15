@@ -34,103 +34,17 @@ const REPLACE = [
   },
 ];
 
-/**
- * 读取集合的全部索引；集合尚不存在（全新库首次 migrate）按"没有索引"处理。
- * 放过 NamespaceNotFound（codeName 或 code 26）与 code 48：宽口径与
- * 20261101000000 / 20261021000000 家族同款（鉴权失败/选主超时被读成"没有索引"
- * 的风险由调用侧日志可见性兜住，不在此重复展开）。
- */
-const listIndexes = async (db, coll) => {
-  try {
-    return await db.collection(coll).indexes();
-  } catch (err) {
-    if (err?.codeName === 'NamespaceNotFound' || err?.code === 26 || err?.code === 48) return [];
-    throw err;
-  }
-};
-
-const getIndex = async (db, coll, name) =>
-  (await listIndexes(db, coll)).find((i) => i.name === name) || null;
-
-/** key 的签名：**顺序**是 key 的一部分（反序/漏 _id 与声明的形态不是同一条索引） */
-const keySig = (key) =>
-  Object.entries(key)
-    .map(([k, v]) => `${k}:${v}`)
-    .join('|');
-
-const sameKey = (actual, expected) => !!actual && keySig(actual) === keySig(expected);
-
-/**
- * collation 归一化与 20261101000000 同构：`null` 表示没有 collation；
- * 不比 `version`（服务端按 ICU 版本回填，用户设不了）。本迁移声明的目标不带 collation。
- */
-const COLLATION_DEFAULTS = {
-  locale: 'simple',
-  caseLevel: false,
-  caseFirst: 'off',
-  strength: 3,
-  numericOrdering: false,
-  alternate: 'non-ignorable',
-  maxVariable: 'punct',
-  normalization: false,
-  backwards: false,
-};
-
-const collationSig = (collation) => {
-  if (!collation) return null;
-  const norm = {};
-  for (const [field, fallback] of Object.entries(COLLATION_DEFAULTS)) {
-    norm[field] = field in collation ? collation[field] : fallback;
-  }
-  return norm;
-};
-
-/** 递归按键排序后序列化：partialFilterExpression 里的键序是写法差异，不该算漂移 */
-const stableJson = (value) => {
-  if (value === undefined) return 'null';
-  if (Array.isArray(value)) return '[' + value.map(stableJson).join(',') + ']';
-  if (value && typeof value === 'object') {
-    const keys = Object.keys(value).sort();
-    const body = keys.map((k) => JSON.stringify(k) + ':' + stableJson(value[k])).join(',');
-    return '{' + body + '}';
-  }
-  return JSON.stringify(value);
-};
-
-/** TTL 归一化：`null` 表示不是 TTL 索引（expiryDate 的 TTL 由业务保留期开关单独管） */
-const ttlSig = (spec) =>
-  typeof spec.expireAfterSeconds === 'number' ? spec.expireAfterSeconds : null;
-
-/** 索引 spec 的完整签名（幂等判据唯一依据），组成与 20261101000000.specSig 逐字段一致 */
-const specSig = (spec) =>
-  stableJson({
-    key: keySig(spec.key),
-    collation: collationSig(spec.collation),
-    unique: !!spec.unique,
-    sparse: !!spec.sparse,
-    hidden: !!spec.hidden,
-    expireAfterSeconds: ttlSig(spec),
-    partialFilterExpression: spec.partialFilterExpression || null,
-  });
-
-/**
- * 异名 twin 是否与声明在 mongod 的 85 判据上冲突（key/unique/sparse/partial/collation
- * 全同、hidden 与 name 不进判据）⇒ 必须删才能建出目标；语义有差异的 twin 保留待人判。
- */
-const isEquivalentTwin = (actual, declared) =>
-  !!actual &&
-  keySig(actual.key) === keySig(declared.key) &&
-  stableJson(collationSig(actual.collation)) === stableJson(collationSig(declared.collation)) &&
-  !!actual.unique === !!declared.unique &&
-  !!actual.sparse === !!declared.sparse &&
-  stableJson(actual.partialFilterExpression || null) ===
-    stableJson(declared.partialFilterExpression || null);
-
-const dropIndexIfExists = async (db, coll, name) => {
-  if (!(await getIndex(db, coll, name))) return;
-  await db.collection(coll).dropIndex(name);
-  console.log(`${coll}.${name} 已删除`);
-};
+// 幂等判据收口到 _lib/indexSpec（P2-35）：specSig/collationSig/isEquivalentTwin/dropIndexIfExists
+// 等曾在本文件与其余 5 个迁移各抄一份且已漂移，现统一 require 共享模块，判据口径逐字段不变。
+const {
+  listIndexes,
+  getIndex,
+  sameKey,
+  ttlSig,
+  specSig,
+  isEquivalentTwin,
+  dropIndexIfExists,
+} = require('./_lib/indexSpec');
 
 module.exports = {
   REPLACE,

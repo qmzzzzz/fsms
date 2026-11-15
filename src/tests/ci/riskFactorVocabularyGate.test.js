@@ -23,6 +23,7 @@
  */
 const fs = require('fs');
 const path = require('path');
+const { jsCodeOnly } = require('../helpers/jsCodeOnly');
 
 const ROOT = path.resolve(__dirname, '..', '..', '..');
 const SRC = path.join(ROOT, 'src');
@@ -75,7 +76,9 @@ function scan() {
     }
   };
   for (const file of walk(SRC)) {
-    const text = fs.readFileSync(file, 'utf8');
+    // P3-12：先剥注释再扫描——源码注释里的示例风险码（如文档举例）不再被当成
+    // 后端真实写入的码而造成假红（jsCodeOnly 是全仓文本闸的统一剥注释口径）
+    const text = jsCodeOnly(fs.readFileSync(file, 'utf8'));
     let idx = text.indexOf('riskFactors');
     while (idx >= 0) {
       const open = text.indexOf('[', idx);

@@ -25,6 +25,9 @@ describe('F-05 生成物目录必须跳过', () => {
     ['dist', '基础产物目录'],
     ['dist-debug', '--mode development 的产物'],
     ['dist-optimized', '优化产物'],
+    // P3-18：dist-tool 原挂在「不被误跳」组里却提前 return 零断言恒过——
+    // 按本文件自己的注释它是「产物族」的合法成员，移入本组给真实断言
+    ['dist-tool', 'dist- 前缀的产物族成员（合法跳过）'],
     ['coverage', '覆盖率'],
     ['coverage-zzmfa', '手工跑覆盖率时的带 tag 目录'],
     ['node_modules', '依赖'],
@@ -47,11 +50,10 @@ describe('F-05 生成物目录必须跳过', () => {
     expect(isSkippedDirName(name)).toBe(false);
   });
 
-  test.each(['distribution', 'distance', 'dist-tool', 'src', 'docs', 'web-admin'])(
+  test.each(['distribution', 'distance', 'src', 'docs', 'web-admin'])(
     '同前缀的源码目录不被误跳：%s',
     (name) => {
-      // `dist-tool` 是「产物族」的合法成员，故意跳过；这里只钉**非产物**的相似名。
-      if (name === 'dist-tool') return;
+      // 这里只钉**非产物**的相似名（dist-tool 已按产物族移入上方跳过组）
       expect(isSkippedDirName(name)).toBe(false);
     }
   );

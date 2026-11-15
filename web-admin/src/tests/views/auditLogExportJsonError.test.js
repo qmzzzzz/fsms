@@ -17,6 +17,7 @@ import { describe, test, expect, vi, beforeEach } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { resolveErrorMessage } from '@/utils/api'
+import { extractBlobErrorMessage } from '@/utils/reauthError'
 
 const SRC = resolve(__dirname, '../..')
 
@@ -50,10 +51,9 @@ const makeExportLogs = (deps) =>
   // eslint-disable-next-line no-new-func -- 见上方说明：无挂载器，只能以此 driver 执行真实函数体
   new Function(
     ...Object.keys(deps),
-    extractFn(sfc, 'extractBlobErrorMessage') +
-      '\n' +
-      extractFn(sfc, 'exportLogs') +
-      '\nreturn exportLogs'
+    // P3-15 起 extractBlobErrorMessage 收口到 utils/reauthError（视图内不再有本地定义），
+    // 这里以注入依赖的方式传入同一实现，被断言的仍是运行时行为
+    extractFn(sfc, 'exportLogs') + '\nreturn exportLogs'
   )(...Object.values(deps))
 
 const XLSX_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
@@ -67,9 +67,14 @@ const setupHarness = ({ response, thrown }) => {
     get: vi.fn(() => (thrown ? Promise.reject(thrown) : Promise.resolve(response))),
   }
   const exportLogs = makeExportLogs({
-    apiClient,
+    // P3-19：exportLogs 走 api.reports.export 封装，底层仍漏斗到同一个 apiClient.get 桩
+    api: {
+      reports: {
+        export: (params) => apiClient.get('/reports/export', { params, responseType: 'blob' }),
+      },
+    },
+    extractBlobErrorMessage,
     isCanceledError: (e) => e?.code === 'ERR_CANCELED',
-    resolveErrorMessage,
     ElMessage,
     t: (k) => k,
     localDateStr: () => '2026-09-17',

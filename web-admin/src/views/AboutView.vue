@@ -322,6 +322,7 @@ import { usePermission } from '@/composables/usePermission'
 import { api, isCanceledError } from '@/utils/api'
 import { formatTime } from '@/utils/datetime'
 import { LOCAL_BUILD_ID, isComparableBuildId, isPageHidden } from '@/utils/versionWatcher'
+import { useLatestRequest } from '@/composables/useLatestRequest'
 import UpgradeDialog from '@/components/UpgradeDialog.vue'
 
 const { t } = useI18n()
@@ -380,6 +381,9 @@ const metricsSnap = ref(null)
 // 空态要能区分「真的没有数据」与「没拿到数据」。整页不报错、不弹红框的原口径保留
 // （本卡是附属信息），改的只有文案与重试入口。
 const metricsFailed = ref(false)
+
+// 轮询/手动刷新共用的竞态门票（P3-17）
+const metricsGuard = useLatestRequest()
 
 /** 请求数 Top 路由条数：条形图太多会占满整卡且失去对比意义 */
 const TOP_ROUTES_COUNT = 8
@@ -446,8 +450,11 @@ const formatUptime = (seconds) => {
  */
 const loadMetrics = async () => {
   if (!canViewMetrics.value) return
+  // 竞态门票：30s 轮询与手动刷新（模板按钮）交叠时，慢的旧快照不得覆盖新快照
+  const isCurrent = metricsGuard()
   try {
     const { data: resp } = await api.reports.getMetrics()
+    if (!isCurrent()) return
     if (!resp?.success) {
       metricsFailed.value = true
       return
@@ -469,6 +476,7 @@ const loadMetrics = async () => {
       process: { uptimeSeconds: 0, rssMB: 0, heapUsedMB: 0, ...(d.process || {}) },
     }
   } catch (_) {
+    if (!isCurrent()) return
     // 静默：有快照时保留上一次数据；一次都没拿到时空态要说「加载失败」而非「暂无数据」
     metricsFailed.value = true
   }

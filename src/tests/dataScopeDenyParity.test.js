@@ -27,6 +27,22 @@
 
 const mongoose = require('mongoose');
 
+/**
+ * P2-17：本套件的 beforeEach 会对 devices 集合 deleteMany({}) 整表清空。
+ * 若落在与他人共享的库上，就是"摧毁并行设备套件夹具"的竞态源
+ * （与 rollbackDrillRestoreVerification.test.js 记载的同族）。
+ * 这里照该先例开后缀专用库：清空/断言只发生在本套件自己的库内；
+ * afterAll 再回收库内自建设备并断开连接。
+ */
+const PARITY_DB_SUFFIX = '_data_scope_parity';
+const parityUri = () => {
+  const uri = process.env.MONGODB_URI;
+  const qIndex = uri.indexOf('?');
+  const base = qIndex === -1 ? uri : uri.slice(0, qIndex);
+  const query = qIndex === -1 ? '' : uri.slice(qIndex);
+  return base + PARITY_DB_SUFFIX + query;
+};
+
 describe('数据范围：空部门/空属主必须 deny，且列表与详情口径必须一致', () => {
   let FireDevice;
   let rbac;
@@ -36,9 +52,12 @@ describe('数据范围：空部门/空属主必须 deny，且列表与详情口�
   const otherOperator = () => new mongoose.Types.ObjectId();
 
   beforeAll(async () => {
-    if (mongoose.connection.readyState === 0) {
-      await mongoose.connect(process.env.MONGODB_URI);
+    // worker 复用时，上个套件留下的连接可能指向共享库；先关掉再连专用库，
+    // 否则后面的 deleteMany({}) 会清到别人的夹具上
+    if (mongoose.connection.readyState !== 0) {
+      await mongoose.connection.close();
     }
+    await mongoose.connect(parityUri());
     FireDevice = require('../models/FireDevice');
     rbac = require('../middleware/rbac');
     scopeFilterFor = require('../services/reportExportService').scopeFilterFor;
@@ -47,6 +66,7 @@ describe('数据范围：空部门/空属主必须 deny，且列表与详情口�
 
   afterAll(async () => {
     if (mongoose.connection.readyState !== 0) {
+      await FireDevice.deleteMany({}).catch(() => {});
       await mongoose.connection.close();
     }
   });

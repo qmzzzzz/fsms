@@ -187,10 +187,13 @@ describe('AuditLog 模型静态方法', () => {
     });
 
     test('失败的批量删除累积为 high', async () => {
+      // P3：delete/batch 改为对照枚举精确匹配——用枚举内的批量删除动作
+      // 'batch_delete_users'（原用例的 'user_batch_delete' 不在枚举内，恰好是
+      // 子串匹配会误标、精确匹配不再标的那类）
       const doc = await AuditLog.recordSensitiveAction(
         null,
         'risk_user',
-        'user_batch_delete',
+        'batch_delete_users',
         'user',
         makeReq(),
         { statusCode: 500 },

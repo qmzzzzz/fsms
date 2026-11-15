@@ -30,19 +30,34 @@ MONGODB_URI_FILE=./secrets/mongodb_uri ./scripts/backup-mongo.sh ./backups
 
 ## 2. 蓝绿部署流程（单机 compose 版）
 
-单机没有真正的双环境流量切换，蓝绿退化为「双实例 + 反代摘流」：
+> **勘误（2026-11-15 审计 P2-32）**：本节旧版写的「绿=现网 3000、起蓝=3100、
+> 手工换端口起新服务」与实际实现**相反且机制不同**，曾在事故口径上误导回滚操作。
+> 实际实现以 `deployment/hot-upgrade.md` 为准：**blue = `app`（宿主 127.0.0.1:3000，
+> 当前色）、green = `app-green`（宿主 127.0.0.1:3001，备色，`profiles: ['green']`）**，
+> 切流 = 改 nginx `upstream fsms_app` 内被注释的那一行 + `nginx -s reload`。
+> 本节以下内容已按该机制改写；两份文档的端口、颜色与机制口径不再分叉。
 
-1. **绿（现网）** 正常运行：`app` 服务绑定 `127.0.0.1:3000`，宿主 nginx 反代。
-2. **起蓝**：用新镜像/新 compose 起第二实例（换端口，如 `127.0.0.1:3100:3000`），
-   独立服务名（如 `app-blue`），共用同一 `mongo` 与 `secrets`。
-3. **验证蓝**：
+单机没有真正的双环境流量切换，蓝绿退化为「双实例 + 反代摘流」，机制、判据与
+七步顺序**直接沿用 `deployment/hot-upgrade.md` §2/§3**（前置条件：nginx upstream
+块内有且只有一行未注释 server、镜像 digest 钉扎、白名单、宿主 3001 空闲）：
+
+1. **blue（现网）** 正常运行：`app` 服务绑定 `127.0.0.1:3000`，宿主 nginx 的
+   `upstream fsms_app` 指向它。
+2. **起 green**：`docker compose --profile green up -d --no-deps app-green`
+   （新镜像经 `APP_IMAGE_NEXT` 指定；`--no-deps` 防止顺带重建 mongo/redis），
+   备色绑定 `127.0.0.1:3001`，与 `app` 共用同一 `mongo` 与 `secrets`。
+3. **验证 green**：
    ```bash
-   curl -fsS http://127.0.0.1:3100/health          # 存活
+   curl -fsS http://127.0.0.1:3001/readyz          # 就绪（不是只看 /health）
    # 用低权限账号走一遍核心旅程：登录 → MFA → 列表查询 → 审计日志可见
    ```
-4. **切流**：把宿主 nginx 的 `proxy_pass` 指向 3100，`nginx -s reload`（平滑，不断连）。
-5. **观察期**（≥30 分钟）：盯 `logs/error-*.log`、审计 WAL 是否正常、/metrics 错误率。
-6. **下线绿**：确认稳定后停旧实例。**镜像与旧 compose 保留至少一个版本周期。**
+4. **切流**：把 `upstream fsms_app` 里被注释的 server 行换到 green（3001），
+   `nginx -t && nginx -s reload`（平滑，不断连；`-t` 不通过会原样恢复文件）。
+5. **观察期**（默认 300s，人工演练建议 ≥30 分钟）：盯 `/readyz`、
+   `logs/error-*.log`、审计 WAL 是否正常、/metrics 错误率；任何一次不 ok
+   立即按 §3.1 切回 blue。
+6. **下线 blue**：确认稳定后 `docker compose stop app`（`stop` 而非 `rm`，
+   保留回滚能力）。**镜像与旧 compose 保留至少一个版本周期。**
 
 ## 3. 回滚流程（按严重度分层）
 
@@ -51,7 +66,7 @@ MONGODB_URI_FILE=./secrets/mongodb_uri ./scripts/backup-mongo.sh ./backups
 现象：新版本逻辑错误、崩溃循环、性能退化。
 
 ```bash
-# 切回 nginx 指向（蓝→绿端口互换），或直接回退 compose 里的镜像/构建
+# 切回 nginx 指向（upstream 换回 blue=app:3000 那行），或直接回退 compose 里的镜像/构建
 nginx -s reload
 # 或：
 docker compose down app && docker compose up -d app   # compose 已改回旧版本定义时
@@ -143,11 +158,11 @@ curl -fsS http://127.0.0.1:3000/health
 
 ### 5.1 技术事实：备份频率（已定，非目标值）
 
-| 项       | 值                                                                                            | 来源                                                      |
-| -------- | --------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
-| 定时全量 | 每日 02:00（`0 2 * * *`），cron 跑在**宿主机**上                                              | `deployment/backup-encryption.md:39-43`                   |
-| 发布前   | 每次发布前额外一次（`scripts/deploy.js` 自动触发）                                            | `deployment/rollback-drill.md:17`（「发布前必须先备份」） |
-| 异地副本 | `BACKUP_OFFSITE_CMD` 或 `BACKUP_OFFSITE_DIR`，生产置 `BACKUP_REQUIRE_OFFSITE=true` 缺失即失败 | `deployment/backup-encryption.md:15`                      |
+| 项       | 值                                                                                            | 来源                                                        |
+| -------- | --------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| 定时全量 | 每日 02:00（`0 2 * * *`），cron 跑在**宿主机**上                                              | `deployment/backup-encryption.md`「cron / deploy 配置示例」 |
+| 发布前   | 每次发布前额外一次（`scripts/deploy.js` 自动触发）                                            | `deployment/rollback-drill.md:17`（「发布前必须先备份」）   |
+| 异地副本 | `BACKUP_OFFSITE_CMD` 或 `BACKUP_OFFSITE_DIR`，生产置 `BACKUP_REQUIRE_OFFSITE=true` 缺失即失败 | `deployment/backup-encryption.md:15`                        |
 
 ⇒ **最坏情况必丢 24 小时内的写入**（02:00 备份完成、02:01 故障）。
 这是备份频率**决定**的上限，不是任何人拍的目标。
@@ -228,7 +243,7 @@ node scripts/backup-integrity-patrol.js --drill-only
 
 ```bash
 # /etc/cron.d/fsms-drill（执行用户需能读 ./secrets 与写 ./backups）
-30 2 * * 0 ops cd /srv/fsms && \
+30 2 * * 0 ops cd /opt/fsms && \
   ALLOWED_SOURCE_DB=fsms_staging MONGODB_URI_FILE=./secrets/mongodb_uri \
   AES_SECRET_KEY_FILE=./secrets/aes_secret_key \
   node scripts/run-rollback-drill.js --apply-source --yes >> /var/log/fsms-drill.log 2>&1 && \

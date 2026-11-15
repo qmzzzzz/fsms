@@ -14,6 +14,9 @@ web-admin/node_modules/
 logs/
 *.log
 npm-debug.log*
+# 仓库根的一次性运行日志（2026-11-15 审计 P2-36）：全量 jest/vitest/lint 的落盘输出，
+# 单批可达百 MB 级且含内部路径/测试信息；此前无任何规则命中，一次 `git add .` 即整批入库。
+/logs-*.txt
 
 # 升级本地队列（生产在 /var/lib/fsms/upgrade，仅本地开发可能指向仓库内）
 .upgrade-queue/

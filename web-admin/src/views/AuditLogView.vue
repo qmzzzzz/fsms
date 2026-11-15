@@ -817,7 +817,12 @@ import { useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index.mjs'
-import { api, apiClient, isCanceledError, resolveErrorMessage } from '@/utils/api'
+import { api, isCanceledError } from '@/utils/api'
+import {
+  REAUTH_TICKET_ERROR_CODES,
+  readReauthErrorCode,
+  extractBlobErrorMessage,
+} from '@/utils/reauthError'
 import { useListLoadState } from '@/composables/useListLoadState'
 import { markReauthVerified } from '@/utils/reauthTicket'
 import ReauthDialog from '@/components/ReauthDialog.vue'
@@ -1056,7 +1061,6 @@ const listState = useListLoadState()
 // ===== 审计读取二次验证票据（P3-2）=====
 // 后端对 audit-logs / alerts / audit-logs/export 要求短期票据（5 分钟）。
 // 页面统一在此收口：无票据 → 先弹框，验过后重放被拦下的动作。
-const REAUTH_TICKET_ERROR_CODES = ['REAUTH_TICKET_REQUIRED', 'REAUTH_TICKET_INVALID']
 const reauthVisible = ref(false)
 const reauthSubmitting = ref(false)
 // 按 tag 去重：首屏 logs+alerts 同时被拦只弹一次框；连续筛选也不会堆叠重放
@@ -1065,20 +1069,6 @@ const pendingReauthTags = new Set()
 const requireReauth = (tag) => {
   pendingReauthTags.add(tag)
   reauthVisible.value = true
-}
-
-const readReauthErrorCode = async (e) => {
-  const data = e?.response?.data
-  if (data?.errors?.errorCode) return data.errors.errorCode
-  // 导出请求 responseType 为 blob，错误 JSON 也被包成 Blob
-  if (typeof Blob !== 'undefined' && data instanceof Blob) {
-    try {
-      return JSON.parse(await data.text())?.errors?.errorCode || ''
-    } catch (_) {
-      return ''
-    }
-  }
-  return ''
 }
 
 const handleReauthSubmit = async (credential) => {
@@ -1317,20 +1307,8 @@ const exporting = ref(false)
  * /reports/export 的响应类型是 xlsx，但失败路径（403/400/500 等）返回的是
  * JSON 包络。responseType:'blob' 下 axios 把 JSON 体也包成 Blob，若不识别
  * 就会把这段错误 JSON 当成 xlsx 下载下来（文件损坏且界面报「导出成功」）。
- * 与 ReportView.vue 的 extractErrorMessage 同口径：读文本 → 取 message 字段，
- * 并优先走码化翻译（api.js 的 resolveErrorMessage）。
+ * 实现收口到 utils/reauthError.extractBlobErrorMessage（P3-15，与 ReportView 同源）。
  */
-const extractBlobErrorMessage = async (data, fallback) => {
-  if (data instanceof Blob) {
-    try {
-      const parsed = JSON.parse(await data.text())
-      return resolveErrorMessage(parsed) || parsed?.message || fallback
-    } catch (_) {
-      /* 非 JSON 内容（正常 xlsx 等）或解析失败 → 走兜底文案 */
-    }
-  }
-  return data?.message || fallback
-}
 
 const exportLogs = async () => {
   // 同步重入锁：导出是重操作（后端全量导出+文件下载），同 tick 双触发会并发两轮下载
@@ -1342,10 +1320,8 @@ const exportLogs = async () => {
       ...buildFilterParams(),
     }
 
-    const response = await apiClient.get('/reports/export', {
-      params,
-      responseType: 'blob',
-    })
+    // 走 api.reports.export 封装而非 apiClient 直连（P3-19：与 ReportView 同一入口）
+    const response = await api.reports.export(params)
 
     // P2-56：后端以 JSON 返回错误时不得继续下载（否则得到损坏的 xlsx + 假成功）
     const payload = response?.data

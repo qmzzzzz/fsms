@@ -233,3 +233,12 @@ describe('A2：头像前缀的未匹配请求必须计数且留痕', () => {
     expect(isAvatarReadRequest(req)).toBe(true);
   });
 });
+
+// P2-18：模块加载期改写的 4 个 env（TRUST_PROXY_HOPS / RATE_LIMIT_*）只存不还，
+// 会跨文件泄漏到同 worker 的后续套件（限流阈值/代理跳数被本文件值污染），按快照归还
+afterAll(() => {
+  for (const [key, value] of Object.entries(SAVED_ENV)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+});

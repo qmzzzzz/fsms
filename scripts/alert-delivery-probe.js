@@ -146,6 +146,16 @@ function writeRecord(file, record) {
   fs.writeFileSync(file, `${JSON.stringify(record, null, 2)}\n`, 'utf8');
 }
 
+function maskTarget(url) {
+  // 落盘前掩掉查询串/片段：webhook 常把 access_token 放 query，记录是明文 JSON，原样存等于多存一份凭据
+  try {
+    const u = new URL(url);
+    return `${u.protocol}//${u.host}${u.pathname}${u.search ? '?<masked>' : ''}${u.hash ? '#<masked>' : ''}`;
+  } catch {
+    return '<url-unparseable>';
+  }
+}
+
 async function main() {
   const { args, errors } = parseArgs(process.argv.slice(2));
   if (errors.length > 0) {
@@ -178,7 +188,7 @@ async function main() {
   const result = await postAlerts(args.url, body, args.timeoutMs);
   const record = {
     probedAt: new Date().toISOString(),
-    target: args.url,
+    target: maskTarget(args.url),
     correlationId,
     ok: result.ok,
     statusCode: result.statusCode,
@@ -218,5 +228,6 @@ module.exports = {
   postAlerts,
   readRecord,
   writeRecord,
+  maskTarget,
   DEFAULT_TARGET,
 };

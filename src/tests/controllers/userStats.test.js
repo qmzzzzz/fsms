@@ -61,6 +61,9 @@ describe('/api/users/stats 统计缓存', () => {
   afterAll(async () => {
     statsCache.stopCleanup();
     if (mongoose.connection.readyState !== 0) {
+      // P3-24：回收自建用户（stats_*）与角色（SUPER_ADMIN_STATS）
+      await User.deleteMany({ username: new RegExp('^stats_') }).catch(() => {});
+      await Role.deleteMany({ code: 'SUPER_ADMIN_STATS' }).catch(() => {});
       await mongoose.connection.close();
     }
   });

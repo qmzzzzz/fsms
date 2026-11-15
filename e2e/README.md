@@ -7,7 +7,7 @@
 
 | 文件                               | 旅程                                                              |
 | ---------------------------------- | ----------------------------------------------------------------- |
-| `journey-login.spec.js`            | 正确凭据登录 / 错误口令被拒                                       |
+| `journey-login.spec.js`            | 正确凭据登录 / 错误口令被拒 / 登出后访问受保护路由重定向回 /login |
 | `journey-mfa.spec.js`              | 口令+动态码两步登录 / 错误动态码被拒                              |
 | `journey-inspection-alarm.spec.js` | 巡检/告警/设备列表只读巡场（不白屏）                              |
 | `journey-permission-audit.spec.js` | 角色权限树可达 / 审计日志可追溯本次登录                           |
@@ -20,7 +20,7 @@
 > 原文档把「未配置环境也能全绿」当特性写，正是这种假绿被制度化的来源。
 > CI 侧有 fail-closed 门禁兜底（`.github/workflows/ci.yml` 的
 > `Assert no skipped journeys`）：日志里必须存在 `N passed` 汇总行，且
-> `passed >= 32`（16 条旅程 × 2 个 project）、`skipped == 0`、`failed == 0`，
+> `passed >= 34`（17 条旅程 × 2 个 project）、`skipped == 0`、`failed == 0`，
 > 任一不满足即 `exit 1`。
 >
 > ⇒ **本地绿 ≠ CI 绿。** 能证明「旅程真的跑了」的只有 `N passed` 那一行 ——

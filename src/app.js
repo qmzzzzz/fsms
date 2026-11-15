@@ -54,7 +54,11 @@ const {
 const requestId = require('./middleware/requestId');
 const { noteUnmatchedRequest } = require('./services/scanProbeDetector');
 const { redactUrlQuery } = require('./utils/helpers');
-const { DEV_CORS_ORIGINS } = require('./utils/constants');
+const {
+  parseCorsOriginList,
+  devCorsFallback,
+  normalizeCorsOrigin,
+} = require('./config/corsOrigins');
 const {
   metricsMiddleware,
   metricsEndpoint,
@@ -98,15 +102,13 @@ const sentryInitialized = initSentry();
  * @returns {string[]} 允许的来源列表；空数组表示不回应任何 Origin
  */
 function resolveCorsOrigins(cfg = config) {
+  // 解析/兜底/归一化单源自 config/corsOrigins（与 WS 侧同源；归一化依据见该模块注释）
   const parsed = cfg.corsOrigin
-    ? cfg.corsOrigin
-        .split(',')
-        .map((origin) => origin.trim())
-        .filter(Boolean)
+    ? parseCorsOriginList(cfg.corsOrigin).map(normalizeCorsOrigin).filter(Boolean)
     : [];
   // parsed 为空（未配或配了 `", "` 这类全是空项的值）时的回落方向：仅 development 允许本地兜底，staging/production 必须显式配置，防止误部署后把本地开发源放进线上白名单。
   if (parsed.length > 0) return parsed;
-  return isDevelopmentLikeEnv(cfg.nodeEnv) ? [...DEV_CORS_ORIGINS] : [];
+  return isDevelopmentLikeEnv(cfg.nodeEnv) ? devCorsFallback() : [];
 }
 
 /**

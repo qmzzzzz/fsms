@@ -5,17 +5,9 @@ const logger = require('../utils/logger');
 const { businessDayBounds } = require('../constants/timezone');
 const { resolveBusinessRetention } = require('../constants/businessRetention');
 
-const BATCH = 5000; // 分批发 IN：单日 4 万条量级时不能一次全塞进 $in，也不能退化成逐条查询
-
 const DEFAULT_INTERVAL_MS = 60 * 60 * 1000;
 const MIN_INTERVAL_MS = 5 * 60 * 1000;
 const MAX_INTERVAL_MS = 24 * 60 * 60 * 1000;
-
-const chunk = (arr, size) => {
-  const out = [];
-  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
-  return out;
-};
 
 const manifestKeepDays = () => {
   const v = Number.parseInt(process.env.FORENSIC_MANIFEST_KEEP_DAYS || '', 10);
@@ -186,8 +178,6 @@ const resetForTest = () => {
 };
 
 module.exports = {
-  BATCH,
-  chunk,
   reconcileWithDb,
   resolveReconcileWindowDays,
   reconcileOnce,

@@ -402,5 +402,10 @@ describe('管理员重置口令的分闸', () => {
 // 套件级收尾：本文件连了 mongoose，必须在最后一条 root 级 afterAll 里关掉
 // （判据见 src/tests/ci/mongooseTeardownLedger.test.js；关在非最后一段里会被判违规）。
 afterAll(async () => {
-  if (mongoose.connection.readyState !== 0) await mongoose.connection.close();
+  if (mongoose.connection.readyState !== 0) {
+    // P3-24：回收自建用户/角色（用户名与角色码都以 stamp 结尾；内置 SUPER_ADMIN 不受影响）
+    await User.deleteMany({ username: new RegExp(`${stamp}$`) }).catch(() => {});
+    await Role.deleteMany({ code: new RegExp(`${stamp}$`) }).catch(() => {});
+    await mongoose.connection.close();
+  }
 });

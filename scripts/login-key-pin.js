@@ -105,9 +105,13 @@ function main() {
   process.stdout.write(`${fingerprint(pem)}\n`);
 }
 
-try {
-  main();
-} catch (err) {
-  console.error(`[login-key-pin] 无法解析 LOGIN_ECDH_PRIVATE_KEY：${err.message}`);
-  process.exit(1);
+if (require.main === module) {
+  try {
+    main();
+  } catch (err) {
+    console.error(`[login-key-pin] 无法解析 LOGIN_ECDH_PRIVATE_KEY：${err.message}`);
+    process.exit(1);
+  }
 }
+
+module.exports = { parseArgs, fingerprint };

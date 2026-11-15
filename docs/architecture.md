@@ -279,3 +279,14 @@ MONGODB_URI_FILE=./secrets/mongodb_uri HMAC_SECRET_FILE=./secrets/hmac_secret \
 - 检出面：检查点文件被改（`signature_invalid`）、头部被替换（`head_hash_mismatch`/`head_hmac_mismatch`）、链被截断到锚点之前或删空（`tail_rolled_back`）。`recordCount` 只是创建时的估算、不参与判红（TTL 裁剪与迟到批写都会让它对不上，计数判据已在诚实库上误报退役）——插入/分叉由链内 `chain_fork` 与外锚比对收口（`services/auditChainCheckpoint.js` 头注的能力边界段）。
 - 未配置 `HMAC_SECRET` 时 `create` 拒绝执行、`verify` 判失败——无密钥的锚点可被随意重写，不能作为证据。
 - **残余边界**：检查点文件默认与数据库同机。只改 Mongo 不改文件会被检出；能同时改两者的人可以一起伪造。要获得外部可验证性，必须把文件（或每行签名）周期性复制到独立介质（对象存储 WORM、时间戳服务）——本模块只产出与验证锚点，不负责传输。检查点之后新增又删除的记录，本条锚点也看不见；需要更晚的检查点或外部日志留存比对。
+
+## 8. 工程纪律（规范，2026-11-15 审计收口）
+
+**（a）校验消费单一约定**：路由级 `consumeValidation`（`src/middleware/validateQuery.js`）是参数校验结果的**唯一**消费口径——路由定义处挂 `validate` 链产出错误、`consumeValidation()` 统一拦截并以 `ApiResponse.codeError` 返回。控制器**不得**再重复调用 `validationResult(req)` 做二次检查：进入控制器即视为「已通过路由级校验」，重复消费会形成两套并行判据，一旦漂移（路由层补了字段约束而控制器没跟），控制器分支就变成死代码或绕过路由判据的暗门。新增/修改校验一律落在路由定义处；存量控制器里的 `validationResult` 重复调用属待清理技术债，改动到哪个文件就顺路摘除哪个，不做一次性大扫除。
+
+**（b）文本类门禁纪律**：新增「源码文本断言」型门禁（对 `.js`/`.yml`/`.md` 等做正则/包含性扫描的测试）必须**同时**交付两份自证，缺一不可：
+
+- **正对照**：一份真实缺陷形状的样本（或对现状文件的定向改写）必须能让闸变红——证明判据真的命中目标形状，而不是恒真/恒空的摆设；
+- **洗白自证**：把断言删除、放松或改为恒真后，上述对照必须让套件失败——即通过**变异实测**证明这道闸「有牙」，删掉它会有可观测的绿转红。
+
+只写断言不交对照的文本门禁等于不存在：文本判据极易因转义、锚点、CRLF/空白归一化等细节**静默零命中**，而绿是从空集来的假绿。本仓已多次实测此类失效（`hotUpgradeQueueContract` 的 `(?: &&)?` 判别力为零、`posixShell` 探针 `includes` 假阳、nginx 三副本仅最后一份入账），新门禁一律参照既有形态写足自证：`composeEvalScripts.test.js` 的中毒样本、`composeProductionContract.test.js` 的删行/改值复跑、`secretCarriersIgnored.test.js` 的反向 rc=1 对照。

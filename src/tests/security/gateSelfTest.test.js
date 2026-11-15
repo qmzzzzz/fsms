@@ -639,6 +639,29 @@ describe('门禁负向自检：该红时必须红', () => {
       const src = fs.readFileSync(path.join(ROOT, 'scripts/compliance-check.js'), 'utf8');
       expect(src).toMatch(/process\.exit\(allPassed \? 0 : 1\)/);
     });
+
+    it('注入式负检：掏空钩子清单后进程内跑 runRegisteredChecks 必须转红（缺钩子不得静默放行）', () => {
+      // 掏空 APPEND_ONLY_HOOKS：模拟「清单与注册同步缩水」的自我认证形态。
+      // 独立低限 REQUIRED_APPEND_ONLY_GUARDS（5 个高危批量写钩子）仍要求在清单里 ⇒ 本条必须红。
+      // 这是真跑判定体（runRegisteredChecks），不再只是"源码里存在该映射"的正则自证。
+      // 其余导出（applyHooks 等）保留真实实现：要的是"清单被掏空"这一种劣化，
+      // 不是把模型钩子注册链整个砸掉——那只会得到另一个错误形状的红。
+      jest.doMock('../../../src/models/auditLogHooks', () => {
+        const actual = jest.requireActual('../../../src/models/auditLogHooks');
+        return { ...actual, APPEND_ONLY_HOOKS: [] };
+      });
+      try {
+        const compliance = require('../../../scripts/compliance-check');
+        const results = compliance.runRegisteredChecks();
+        const hooks = results.find((c) => c.name === 'append-only 钩子挂载');
+        expect(hooks).toBeDefined();
+        expect(hooks.passed).toBe(false);
+        // 红灯必须指向真问题：低限清单缺失/未注册钩子的可诊断文案
+        expect(hooks.detail).toMatch(/低限|未注册|缺失/);
+      } finally {
+        jest.dontMock('../../../src/models/auditLogHooks');
+      }
+    });
   });
 
   describe('覆盖率阈值', () => {
@@ -812,8 +835,8 @@ describe('门禁负向自检：该红时必须红', () => {
       expect(ci).toMatch(/hasSummary/);
       const m = ci.match(/MIN_PASSED\s*=\s*(\d+)/);
       expect(m).not.toBeNull();
-      // 下界 = 16 条旅程 × 2 个 project。删旅程时这个数字必须在 diff 里可见。
-      expect(Number(m[1])).toBe(32);
+      // 下界 = 17 条旅程 × 2 个 project。删旅程时这个数字必须在 diff 里可见。
+      expect(Number(m[1])).toBe(34);
       expect(ci).toMatch(/passed < MIN_PASSED/);
     });
 
@@ -823,16 +846,16 @@ describe('门禁负向自检：该红时必须红', () => {
       // 所以「干净运行没有这两行」是正常态——下面第一个样例正是钉这一点的。
       const cases = [
         [
-          '32 passed（干净运行，日志里没有 skipped 行）',
-          'Running 32 tests using 1 worker\n  32 passed (12.3s)\n',
+          '34 passed（干净运行，日志里没有 skipped 行）',
+          'Running 34 tests using 1 worker\n  34 passed (12.3s)\n',
           0,
         ],
-        ['16 passed（旅程被静默裁掉一半）', '  16 passed (6.1s)\n', 1],
-        ['只有 Running 行（跑崩 / reporter 形态已变）', 'Running 32 tests using 1 worker\n', 1],
-        ['32 passed + 2 skipped', '  32 passed (12.3s)\n  2 skipped (12.3s)\n', 1],
-        ['32 passed + 1 failed', '  32 passed (12.3s)\n  1 failed (12.3s)\n', 1],
+        ['17 passed（旅程被静默裁掉一半）', '  17 passed (6.1s)\n', 1],
+        ['只有 Running 行（跑崩 / reporter 形态已变）', 'Running 34 tests using 1 worker\n', 1],
+        ['34 passed + 2 skipped', '  34 passed (12.3s)\n  2 skipped (12.3s)\n', 1],
+        ['34 passed + 1 failed', '  34 passed (12.3s)\n  1 failed (12.3s)\n', 1],
         ['空日志（什么都没跑）', '', 1],
-        ['33 passed（新增旅程，下界不封顶）', '  33 passed (13.0s)\n', 0],
+        ['35 passed（新增旅程，下界不封顶）', '  35 passed (13.0s)\n', 0],
       ];
       for (const [name, log, expected] of cases) {
         const { code } = runGate(log);
@@ -847,10 +870,10 @@ describe('门禁负向自检：该红时必须红', () => {
         const m = log.match(/(\d+)\s+skipped/);
         return (m ? Number(m[1]) : 0) > 0 ? 1 : 0;
       };
-      expect(legacyVerdict('  16 passed (6.1s)\n')).toBe(0);
+      expect(legacyVerdict('  17 passed (6.1s)\n')).toBe(0);
       expect(legacyVerdict('')).toBe(0);
       // 而新判据在同样两种输入上判红
-      expect(runGate('  16 passed (6.1s)\n').code).toBe(1);
+      expect(runGate('  17 passed (6.1s)\n').code).toBe(1);
       expect(runGate('').code).toBe(1);
     });
   });

@@ -201,6 +201,7 @@ const LAZY_SCC = [
     'services/sharedCache/index.js',
     'services/sharedCacheLocks.js',
     'utils/auditChain.js',
+    'utils/auditChainFence.js',
     'utils/auditWriteFailure.js',
     'utils/cookie.js',
     'utils/metrics.js',
@@ -212,6 +213,10 @@ const LAZY_SCC = [
   // respond429/限流出口——反向边只能惰性（提回顶层即加载期互引成环，两侧拿到半初始化对象）。
   ['middleware/rateLimit.js', 'middleware/staticFrontend.js'],
   ['services/honeypotWatch.js', 'services/websocketService/handshake.js'],
+  // 2026-11-16 审计修复批：privilegeGrantService 的审批人预热调用
+  // userPermissionService.primeBasePermissions，而 userPermissionService 的写路径回调
+  // 要回到 privilegeGrant 域——反向边只能惰性（顶层互引会拿到半初始化对象）。
+  ['services/privilegeGrantService.js', 'services/userPermissionService.js'],
 ];
 
 /**
@@ -398,6 +403,7 @@ describe('依赖图无环断言', () => {
     'services/auditWalCap.js -> utils/metricsAuditDrops.js',
     'services/auditWalPermissions.js -> utils/metrics.js',
     'services/honeypotWatch.js -> services/websocketService/handshake.js',
+    'services/privilegeGrantService.js -> services/userPermissionService.js',
     'services/sharedCache/index.js -> constants/runtime.js',
     'utils/auditChain.js -> config/index.js',
     'utils/auditWriteFailure.js -> utils/metrics.js',

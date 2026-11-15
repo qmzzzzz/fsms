@@ -1988,3 +1988,48 @@ describe('UserView 编辑自身时状态下拉禁用（第 34 轮 L14）', () =>
     await waitForDom(() => visiblePopper() && dropdownItems().length === 3, '状态下拉三个选项')
   })
 })
+
+describe('UserView 同 tick 双击防重（P2-29 withSyncLock）', () => {
+  test('同一 tick 双击「新增」提交：只发一次创建请求', async () => {
+    let resolveCreate
+    usersCreate.mockImplementation(
+      () =>
+        new Promise((r) => {
+          resolveCreate = r
+        })
+    )
+    const c = await mountUser(['user:read', 'user:create'])
+    click(toolbarBtn(c, '新增用户'))
+    await flush(8)
+    const dlg = c.find('.el-dialog')
+    await setField(dlg, '用户名', 'dblclick01')
+    await setField(dlg, '邮箱', 'dbl@x.com')
+    await setField(dlg, '密码', 'Str0ng-Pass_2026')
+    await setField(dlg, '真实姓名', '双击')
+    const submit = footerBtn(dlg, '新增')
+    expect(submit).toBeTruthy()
+    // 两次 click 在同一同步块内派发：此时 dialog.submitting 尚未置位，
+    // 按钮 :disabled 还没生效——第二次进入必须由同步锁拦下
+    click(submit)
+    click(submit)
+    await waitFor(() => usersCreate.mock.calls.length === 1, { message: '创建请求发出' })
+    await flush(12)
+    expect(usersCreate.mock.calls.length).toBe(1)
+    resolveCreate({ data: { success: true } })
+    await flush(8)
+    expect(c.errors).toEqual([])
+  })
+
+  test('同一 tick 双击「删除」：只弹一次确认框、不发第二次请求', async () => {
+    const c = await mountUser(['user:read', 'user:delete'])
+    confirmBox.mockImplementation(() => new Promise(() => {}))
+    const del = rowBtn(c, '删除')
+    expect(del).toBeTruthy()
+    click(del)
+    click(del)
+    await flush(12)
+    expect(confirmBox).toHaveBeenCalledTimes(1)
+    expect(usersDelete).not.toHaveBeenCalled()
+    expect(c.errors).toEqual([])
+  })
+})

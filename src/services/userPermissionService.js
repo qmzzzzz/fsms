@@ -84,6 +84,16 @@ function setCacheEntry(key, perms, now, baseTtlMs) {
   permCache.set(key, { perms, cachedAt: now, ttlMs, expireAt: now + ttlMs });
 }
 
+function evictOldestHalf() {
+  const target = Math.floor(permCache.size / 2); // 部分回收：整体 clear 在 ≥2000 人角色热同步（A-5 批量路径）时会拍空全量缓存引发集中查库；Map 保持插入序，先入即最旧
+  let evicted = 0;
+  for (const key of permCache.keys()) {
+    permCache.delete(key);
+    evicted += 1;
+    if (evicted >= target) break;
+  }
+}
+
 // 失效广播键命名空间（L-4）：sharedCache 的失效通道是多业务共享的，
 // 用统一前缀隔离权限缓存的键，接收端只处理本前缀，互不干扰。
 // `*` 表示全局失效（角色权限定义变更），其余为用户级失效。
@@ -170,7 +180,7 @@ async function getPermissions(userId) {
 
   if (!user) {
     // 缓存空结果短 TTL：防止不存在的 userId 反复穿透打库
-    if (permCache.size >= PERM_CACHE_MAX_SIZE) permCache.clear();
+    if (permCache.size >= PERM_CACHE_MAX_SIZE) evictOldestHalf();
     setCacheEntry(key, [], now, PERM_CACHE_MISS_TTL_MS);
     return [];
   }
@@ -180,8 +190,8 @@ async function getPermissions(userId) {
   const grantedCodes = granted ? granted.codes : [];
   const merged = grantedCodes.length > 0 ? [...new Set([...perms, ...grantedCodes])] : perms;
 
-  // 容量保护：超过上限直接清空（重建成本远低于逐条淘汰的复杂度）
-  if (permCache.size >= PERM_CACHE_MAX_SIZE) permCache.clear();
+  // 容量保护：超过上限淘汰最旧的一半（部分回收，未淘汰条目继续命中；正确性仍由 DB 兜底）
+  if (permCache.size >= PERM_CACHE_MAX_SIZE) evictOldestHalf();
   // 写回闸门：查库期间发生过本地失效 ⇒ 本次结果可能是失效前的旧权限集，
   // 缓存它等于把刚 delete 掉的条目重新种回去（收回的权限继续放行到 TTL 到期）。
   // 宁可这次不缓存、让下一个请求再查一趟库。
@@ -214,8 +224,8 @@ function splitCachedAndMissing(userIds, now, result) {
 
 /** 批量写回缓存与结果；查库期间发生过失效则整批不写回。 */
 function writeBackBatch(missing, byId, now, genAtRead, result, grantedByUser) {
-  // 容量保护只需判一次：整批写回是原子的，不会出现批内反复清空
-  if (permCache.size + missing.length >= PERM_CACHE_MAX_SIZE) permCache.clear();
+  // 容量保护只需判一次：整批写回是原子的，不会出现批内反复淘汰
+  if (permCache.size + missing.length >= PERM_CACHE_MAX_SIZE) evictOldestHalf();
 
   for (const key of missing) {
     const user = byId.get(key);
@@ -318,6 +328,21 @@ function handleRemoteInvalidation(raw) {
 // 未配置 Redis 时该注册为无副作用（不会有订阅连接产生）。
 sharedCache.onInvalidate(handleRemoteInvalidation);
 
+let basePermPrime = new Map(); // 一次性预取：审批资格判定先 prime 再逐码判定，把最多 MAX_GRANT_CODES 次串行查库收敛为 1 次
+
+/** 一次取回多个用户的角色链持权码（P3）。条目只被消费一次（读即删），且每次 prime 整表替换 ⇒ 不留跨请求陈旧态 */
+async function primeBasePermissions(userIds) {
+  const ids = (Array.isArray(userIds) ? userIds : [userIds])
+    .map((id) => String(id || ''))
+    .filter(Boolean);
+  basePermPrime = new Map();
+  if (ids.length === 0) return;
+  const User = getUserModel();
+  const users = await User.find({ _id: { $in: ids } }).populate(PERMISSION_POPULATE);
+  const found = new Map(users.map((user) => [String(user._id), collectPermissionCodes(user)]));
+  for (const id of ids) basePermPrime.set(id, found.get(id) || []); // 查不到的用户也占位，避免穿透
+}
+
 /**
  * 只取角色链上的持权码（不合并临时授权、不读缓存）
  *
@@ -328,8 +353,14 @@ sharedCache.onInvalidate(handleRemoteInvalidation);
  * @returns {Promise<string[]>}
  */
 async function getBasePermissions(userId) {
+  const key = String(userId);
+  if (basePermPrime.has(key)) {
+    const codes = basePermPrime.get(key);
+    basePermPrime.delete(key);
+    return codes;
+  }
   const User = getUserModel();
-  const user = await User.findById(String(userId)).populate(PERMISSION_POPULATE);
+  const user = await User.findById(key).populate(PERMISSION_POPULATE);
   return user ? collectPermissionCodes(user) : [];
 }
 
@@ -357,9 +388,12 @@ module.exports = {
   invalidatePermissionCacheLocal,
   handleRemoteInvalidation,
   hasPermission,
+  primeBasePermissions, // 审批人资格判定（privilegeGrantService）先 prime 一次，逐码判定不再串行查库
   startCleanup,
   stopCleanup,
   // P-3 策略参数：测试据此断言降级/正常两档 TTL，避免复制魔数
   PERM_CACHE_TTL_MS,
   PERM_CACHE_DEGRADED_TTL_MS,
+  // 测试钩子：容量淘汰（evictOldestHalf）需要预填/检视模块级缓存，不经公开入口拼 2000 条
+  __test: { permCache, PERM_CACHE_MAX_SIZE, evictOldestHalf },
 };

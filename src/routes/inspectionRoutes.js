@@ -222,7 +222,14 @@ const completeValidation = [
     .optional()
     .trim()
     .isLength({ max: 500 })
-    .withMessage('照片地址不能超过 500 个字符'),
+    .withMessage('照片地址不能超过 500 个字符')
+    .custom((value) => {
+      const v = String(value ?? '').trim();
+      if (!v) return true;
+      const ok = /^https?:\/\/\S+$/i.test(v) || /^\/(?!\/)\S*$/.test(v);
+      if (!ok) throw new Error('照片地址必须是 http(s) 绝对地址或以 / 开头的站内路径');
+      return true;
+    }),
   mustBeString('findings.*.suggestion', '整改建议'),
   body('findings.*.suggestion')
     .optional()

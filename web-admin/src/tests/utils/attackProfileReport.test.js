@@ -162,6 +162,40 @@ describe('buildAttackReport', () => {
     expect(text).not.toContain('line1\nline2')
   })
 
+  test('Markdown 语法字符被中和成字面文本，无法伪装成链接/代码/强调结构（P3-25）', () => {
+    const text = buildAttackReport(
+      profile({
+        categories: [
+          {
+            code: 'path_scanning',
+            count: 1,
+            blockedCount: 1,
+            successCount: 0,
+            severity: 'low',
+            evidence: [
+              {
+                timestamp: '2026-10-03T00:00:00.000Z',
+                action: 'malformed_request_blocked',
+                path: '/x[1](y)',
+                statusCode: 400,
+                username: '`bad` *user* _name_ #tag',
+                refusalReason: 'see [docs](https://evil.example)',
+              },
+            ],
+          },
+        ],
+      }),
+      { t, te, formatTime }
+    )
+    // 方括号被转义后，[x](y) 与 [docs](url) 的链接语法不再成立（括号保持字面）
+    expect(text).toContain('/x\\[1\\](y)')
+    expect(text).toContain('see \\[docs\\](https://evil.example)')
+    expect(text).not.toContain('[docs](https://evil.example)')
+    expect(text).toContain('\\`bad\\` \\*user\\* \\_name\\_ \\#tag')
+    // 反斜杠本身先被转义：上述转义符是成对出现的字面反斜杠
+    expect(text).not.toContain('`bad`')
+  })
+
   test('未归类的记录单列成节：带数量、动作、记录ID，供逐条回查（取证完整性）', () => {
     const text = buildAttackReport(
       profile({

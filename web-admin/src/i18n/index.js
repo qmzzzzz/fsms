@@ -9,17 +9,30 @@ import enUS from './locales/en-US'
  */
 export const SUPPORTED_LOCALES = ['zh-CN', 'en-US']
 
-const savedLocale = (() => {
+/**
+ * 读取持久化的语言偏好（P3-08）：localStorage 优先；旧版本把偏好存在
+ * sessionStorage（新开标签页即回退浏览器语言），读到旧值时回填 localStorage
+ * 完成一次性迁移。非白名单值一律视为未设置。
+ */
+export const readStoredLocale = () => {
   try {
-    const saved = sessionStorage.getItem('locale')
-    return SUPPORTED_LOCALES.includes(saved) ? saved : null
-  } catch (_) {
-    return null
-  }
-})()
+    const local = localStorage.getItem('locale')
+    if (SUPPORTED_LOCALES.includes(local)) return local
+  } catch (_) {}
+  try {
+    const legacy = sessionStorage.getItem('locale')
+    if (SUPPORTED_LOCALES.includes(legacy)) {
+      try {
+        localStorage.setItem('locale', legacy)
+      } catch (_) {}
+      return legacy
+    }
+  } catch (_) {}
+  return null
+}
 
 const browserLang = navigator.language || 'zh-CN'
-const defaultLocale = savedLocale || (browserLang.startsWith('zh') ? 'zh-CN' : 'en-US')
+const defaultLocale = readStoredLocale() || (browserLang.startsWith('zh') ? 'zh-CN' : 'en-US')
 
 /**
  * 自定义消息编译器
@@ -87,7 +100,8 @@ export function setLocale(locale) {
   }
   i18n.global.locale.value = locale
   try {
-    sessionStorage.setItem('locale', locale)
+    // 与主题偏好同一介质（localStorage）：新开标签页/登出后语言不再回退（P3-08）
+    localStorage.setItem('locale', locale)
   } catch (_) {}
   document.documentElement.setAttribute('lang', locale)
 }

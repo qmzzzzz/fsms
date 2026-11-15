@@ -67,9 +67,8 @@ async function requestGrant({ targetUserId, permissionCodes, reason, durationHou
 
   const target = await User.findById(targetUserId).select('username status').lean();
   if (!target) throw ApiError.notFound('被授权用户不存在');
-  if (target.status !== 'active') {
+  if (target.status !== 'active')
     throw ApiError.badRequest('被授权用户当前不可用，无法授予临时权限');
-  }
 
   await assertCodesGrantable(codes);
   const policy = approvalPolicyOf(codes);
@@ -111,6 +110,8 @@ async function assertApproverEligible(grant, operator) {
   if (grant.approvals.some((item) => String(item.by) === operatorId)) {
     throw grantError('同一审批人不得重复签批', 409, 'PRIVILEGE_GRANT_NOT_PENDING');
   }
+  const { primeBasePermissions } = require('./userPermissionService'); // 惰性 require：避开顶层加载环
+  await primeBasePermissions([operator.userId]); // P3：一次取回审批人角色链持权码，逐码判定共享本次查询（原为逐码串行查库）
   for (const code of grant.permissionCodes) {
     // 只认角色链上的持权（includeGrants:false）：若允许拿自己的临时授权来满足「自持该码」资格，高敏权限就能沿「授予→再授予」链自我扩散——两个各持 168h临时权限的人可以互相凑齐全域双审批。审批资格是职责分离的一部分，不能由被审对象自证。
     const owned = await hasPermission(operator.userId, code, { includeGrants: false });

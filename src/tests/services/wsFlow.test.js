@@ -198,21 +198,10 @@ describe('WebSocket 全流程（批次 D2）', () => {
 
   test('受限房间：认证后可入，未认证/非法房间名被拒', async () => {
     const { state, socketRegistry } = makeService();
-    const socket = makeSocket(superToken);
-    socketRegistry.set(socket.id, socket);
-    state.connectionCb(socket);
-    await waitFor(() => socket.authenticated);
-    expect(socket.authenticated).toBe(true);
-
     // 捕获 join-room 监听器：setupEventHandlers 用 socket.on 注册，
-    // 但假 socket 的 on 是空操作——直接重注册监听器捕获回调
+    // 但假 socket 的 on 是空操作——必须让带捕获的 socket 从头走一遍连接，
+    // 事件监听器才会注册到可调用的 roomListeners 上
     const roomListeners = {};
-    socket.on = (ev, cb) => {
-      roomListeners[ev] = cb;
-    };
-    // 重新走一遍注册（连接回调已注册过一次，假 socket.on 现在才捕获）
-    // 为简化：直接调用 authenticate 后手动驱动 join-room 逻辑不现实——
-    // 改为用带捕获的 socket 从头连接
     const socket2 = makeSocket(superToken);
     socket2.on = (ev, cb) => {
       roomListeners[ev] = cb;
@@ -223,18 +212,6 @@ describe('WebSocket 全流程（批次 D2）', () => {
     expect(socket2.authenticated).toBe(true);
 
     await roomListeners['join-room']('role-management');
-    if (!socket2.rooms.has('role-management')) {
-      console.error(
-        'JOIN_DEBUG',
-        JSON.stringify({
-          auth: socket2.authenticated,
-          userId: socket2.userId,
-          emitted: socket2.emitted,
-          roleCodes: socket2.roleCodes,
-          inMap: !!roomListeners['join-room'],
-        })
-      );
-    }
     expect(socket2.rooms.has('role-management')).toBe(true);
 
     await roomListeners['join-room']('bogus-room');
@@ -345,5 +322,88 @@ describe('WebSocket 全流程（批次 D2）', () => {
     expect(sent[0].data.permissionCodes).toBeUndefined();
 
     jest.dontMock('../../services/userPermissionService');
+  });
+
+  test('认证超时闸：到期未认证被断开并告知；认证成功清除计时器', async () => {
+    const { AUTH_TIMEOUT } = require('../../services/websocketService/shared');
+    const { state, socketRegistry } = makeService();
+    const setTimeoutSpy = jest.spyOn(global, 'setTimeout');
+    const clearTimeoutSpy = jest.spyOn(global, 'clearTimeout');
+    const capturedTimers = [];
+    try {
+      // 未认证连接：connection 回调登记 AUTH_TIMEOUT 计时器；手动触发回调（不真睡）
+      const unauth = makeSocket(null);
+      socketRegistry.set(unauth.id, unauth);
+      state.connectionCb(unauth);
+      await flushEventLoop();
+      const timerIdx = setTimeoutSpy.mock.calls.findIndex(([, ms]) => ms === AUTH_TIMEOUT);
+      expect(timerIdx).toBeGreaterThanOrEqual(0); // 前提自证：连接确实登记了认证超时计时器
+      capturedTimers.push(setTimeoutSpy.mock.results[timerIdx].value);
+      expect(unauth.connected).toBe(true);
+      setTimeoutSpy.mock.calls[timerIdx][0](); // 拨到超时：执行生产代码里的到期回调
+      expect(
+        unauth.emitted.some((e) => e.ev === 'auth-error' && /认证超时/.test(e.data?.message || ''))
+      ).toBe(true);
+      expect(unauth.connected).toBe(false);
+
+      // 认证成功的连接：authenticateSocket 必须 clearTimeout(authTimer)，
+      // 真实计时器到点也不会再断开（句柄被清）
+      const ok = makeSocket(superToken);
+      socketRegistry.set(ok.id, ok);
+      state.connectionCb(ok);
+      await waitFor(() => ok.authenticated);
+      const okTimerIdx = setTimeoutSpy.mock.calls.findIndex(
+        ([, ms], i) => i > timerIdx && ms === AUTH_TIMEOUT
+      );
+      expect(okTimerIdx).toBeGreaterThan(timerIdx);
+      capturedTimers.push(setTimeoutSpy.mock.results[okTimerIdx].value);
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(setTimeoutSpy.mock.results[okTimerIdx].value);
+      expect(ok.connected).toBe(true);
+    } finally {
+      for (const handle of capturedTimers) clearTimeout(handle); // 真实句柄不跨用例遗留
+      setTimeoutSpy.mockRestore();
+      clearTimeoutSpy.mockRestore();
+    }
+  });
+
+  test('单进程连接上限：底层连接数超过 MAX_CONNECTIONS_PER_PROCESS 即拒绝且不计入统计', () => {
+    const { MAX_CONNECTIONS_PER_PROCESS } = require('../../services/websocketService/shared');
+    const { svc, state, socketRegistry } = makeService();
+    // 上限是常量（不经 env 注入）：把 io.sockets.sockets 直接填到上限+1（纯内存操作）
+    for (let i = 0; i <= MAX_CONNECTIONS_PER_PROCESS; i++) {
+      socketRegistry.set(`ghost-${i}`, { id: `ghost-${i}`, connected: true });
+    }
+    const rejected = makeSocket(null, 'over-limit');
+    socketRegistry.set(rejected.id, rejected);
+    state.connectionCb(rejected);
+
+    // 拒绝路径：error 文案 + 强制断开，且不得登记进 clients（不占统计）
+    expect(
+      rejected.emitted.some((e) => e.ev === 'error' && /连接数已满/.test(e.data?.message || ''))
+    ).toBe(true);
+    expect(rejected.connected).toBe(false);
+    expect(svc.clients.has('over-limit')).toBe(false);
+
+    // 统计口径：上限值与 capacityScope 照常回报，clients 计数不含被拒连接
+    const stats = svc.getStats();
+    expect(stats.maxConnections).toBe(MAX_CONNECTIONS_PER_PROCESS);
+    expect(stats.capacityScope).toBe('per-process');
+    expect(stats.totalClients).toBe(0);
+  });
+
+  test('单进程连接上限边界：计数含自身、恰好等于上限时放行', async () => {
+    const { MAX_CONNECTIONS_PER_PROCESS } = require('../../services/websocketService/shared');
+    const { svc, state, socketRegistry } = makeService();
+    // 再填上限-1 个：connection 回调触发时 io.sockets.sockets.size 已含本连接，
+    // 恰好等于上限 ⇒ 放行（判据是 > 而非 >=，语义见 push.js _admitConnection 注释）
+    for (let i = 0; i < MAX_CONNECTIONS_PER_PROCESS - 1; i++) {
+      socketRegistry.set(`ghost-${i}`, { id: `ghost-${i}`, connected: true });
+    }
+    const last = makeSocket(superToken, 'last-slot');
+    socketRegistry.set(last.id, last);
+    state.connectionCb(last);
+    await waitFor(() => last.authenticated);
+    expect(last.connected).toBe(true);
+    expect(svc.clients.has('last-slot')).toBe(true);
   });
 });

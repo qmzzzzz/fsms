@@ -78,7 +78,7 @@
     "nginx:ssl_prefer_server_ciphers": "97bd9383bdc03e23",
     "nginx:ssl_session_tickets": "ad089f481fde56a5",
     "nginx:server_tokens": "4cb6a276151a3426",
-    "nginx:add_header Strict-Transport-Security": "244d6ca4be5adfc8",
+    "nginx:add_header Strict-Transport-Security": "4125c0bd72868ca2",
     "nginx:add_header X-Content-Type-Options": "6ecb26274ef0f616",
     "nginx:add_header X-Frame-Options": "ed450f16bdaa8502",
     "env-example:JWT_SECRET": "94332144d941eb12",

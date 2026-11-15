@@ -120,9 +120,11 @@ import i18n from '@/i18n'
 import attackProfileZhCN from '@/i18n/locales/attackProfile.zh-CN'
 import attackProfileEnUS from '@/i18n/locales/attackProfile.en-US'
 import { api, isCanceledError } from '@/utils/api'
+import { REAUTH_TICKET_ERROR_CODES, readReauthErrorCode } from '@/utils/reauthError'
 import { formatTime, localDateStr } from '@/utils/datetime'
 import { useLatestRequest } from '@/composables/useLatestRequest'
 import { attackReportFileName, buildAttackReport } from '@/utils/attackProfileReport'
+import { copyText } from '@/utils/copyText'
 import { markReauthVerified } from '@/utils/reauthTicket'
 import ReauthDialog from '@/components/ReauthDialog.vue'
 import AttackProfileResult from '@/components/AttackProfileResult.vue'
@@ -166,7 +168,6 @@ const resultSummary = computed(() => {
 })
 
 // ===== 二次验证（与审计读取同一套服务端会话窗口）=====
-const REAUTH_TICKET_ERROR_CODES = ['REAUTH_TICKET_REQUIRED', 'REAUTH_TICKET_INVALID']
 const reauthVisible = ref(false)
 const reauthSubmitting = ref(false)
 let pendingReauth = false
@@ -174,19 +175,6 @@ let pendingReauth = false
 const requireReauth = () => {
   pendingReauth = true
   reauthVisible.value = true
-}
-
-const readReauthErrorCode = async (e) => {
-  const data = e?.response?.data
-  if (data?.errors?.errorCode) return data.errors.errorCode
-  if (typeof Blob !== 'undefined' && data instanceof Blob) {
-    try {
-      return JSON.parse(await data.text())?.errors?.errorCode || ''
-    } catch (_) {
-      return ''
-    }
-  }
-  return ''
 }
 
 const loadProfile = async (targetIp, windowHours) => {
@@ -292,12 +280,10 @@ const openReport = () => {
 }
 
 const copyReport = async () => {
-  try {
-    await navigator.clipboard.writeText(reportText.value)
-    ElMessage.success(t('attackProfile.reportCopied'))
-  } catch (_) {
-    ElMessage.error(t('attackProfile.reportCopyFailed'))
-  }
+  // copyText 内含非安全上下文的 textarea 兜底（与 ForensicTraceView 同一实现）
+  const ok = await copyText(reportText.value)
+  if (ok) ElMessage.success(t('attackProfile.reportCopied'))
+  else ElMessage.error(t('attackProfile.reportCopyFailed'))
 }
 
 const downloadReport = () => {

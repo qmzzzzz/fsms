@@ -106,6 +106,8 @@ const SENSITIVE_SUFFIXES = [
   'authorization',
 ];
 
+const TOKEN_SUFFIX_ALLOWLIST = new Set(['tokenversion', 'csrftoken']); // P3 白名单（文件头声明过的刻意排除项）；其余 token 结尾组合词一律 redact
+
 function normalizeKey(key) {
   return String(key)
     .toLowerCase()
@@ -116,7 +118,8 @@ function normalizeKey(key) {
 function isSensitiveKey(key) {
   const normalized = normalizeKey(key);
   if (SENSITIVE_KEYS.has(normalized)) return true;
-  return SENSITIVE_SUFFIXES.some((suffix) => normalized.endsWith(suffix));
+  if (SENSITIVE_SUFFIXES.some((suffix) => normalized.endsWith(suffix))) return true;
+  return normalized.endsWith('token') && !TOKEN_SUFFIX_ALLOWLIST.has(normalized); // P3 兜底：token 结尾即凭据
 }
 
 /**
@@ -211,6 +214,7 @@ module.exports = {
   REDACTED,
   SENSITIVE_KEYS,
   STRUCTURAL_KEYS,
+  TOKEN_SUFFIX_ALLOWLIST,
   isSensitiveKey,
   isMaskEnabled,
   maskPiiText,

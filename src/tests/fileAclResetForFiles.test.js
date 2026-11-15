@@ -47,7 +47,10 @@ const withTempFile = (fn) => {
 (isWindows ? describe : describe.skip)('F-87 文件级 ACL 收紧必须清除显式 ACE', () => {
   test('前置：能真跑 icacls（否则后面的断言全是在测空气）', () => {
     const r = execIcacls(['/?']);
-    expect(r.status === null || r.status === 0 || typeof r.stdout === 'string').toBe(true);
+    // P3-16：原判据 `status===null || status===0 || typeof stdout==='string'` 恒真
+    //（execIcacls 的 stdout 恒为 string，null 分支反而把"icacls 不存在"也放行）。
+    // 前提自证必须钉死：帮助命令退出 0 = icacls 真实可执行。
+    expect(r.status).toBe(0);
     expect(r.stdout.length + r.stderr.length).toBeGreaterThan(0);
   });
 

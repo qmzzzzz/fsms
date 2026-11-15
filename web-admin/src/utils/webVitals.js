@@ -67,10 +67,15 @@ export function initWebVitals(onMetric) {
   }
 
   const durations = []
+  // INP 样本封顶：长会话下无上限累积是内存泄漏，只保留最近 50 次交互（P3-20）
+  const MAX_INP_SAMPLES = 50
   try {
     new PerformanceObserver((list) => {
       for (const entry of list.getEntries()) {
-        if (entry.duration > 0) durations.push(entry.duration)
+        if (entry.duration > 0) {
+          durations.push(entry.duration)
+          if (durations.length > MAX_INP_SAMPLES) durations.shift()
+        }
       }
     }).observe({ type: 'event', buffered: true, durationThreshold: 40 })
   } catch (_) {

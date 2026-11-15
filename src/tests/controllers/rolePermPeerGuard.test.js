@@ -91,7 +91,12 @@ describe('rolePermissionController 同级/上级角色改写闸', () => {
   });
 
   afterAll(async () => {
-    if (mongoose.connection.readyState !== 0) await mongoose.connection.close();
+    if (mongoose.connection.readyState !== 0) {
+      // P3-24：回收自建用户（用户名以 stamp 结尾）与角色（角色码以大写 stamp 结尾）
+      await User.deleteMany({ username: new RegExp(`${stamp}$`) }).catch(() => {});
+      await Role.deleteMany({ code: new RegExp(`${stamp.toUpperCase()}$`) }).catch(() => {});
+      await mongoose.connection.close();
+    }
   });
 
   const authed = (token) => ({

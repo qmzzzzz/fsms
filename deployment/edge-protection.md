@@ -88,17 +88,32 @@ awk '$1 == "203.0.113.77" {split($4, d, "["); print d[2], $5}' /var/log/nginx/ac
 `5="方法`、`6=$request_uri`、`7=协议"`、`8=$status`、`9=tls=协议/套件`、
 `10=ua="UA"`、`11=ch="sec-ch-ua"`、`12=rt=耗时`、`13=urt=上游耗时`。
 
+**适用条件（2026-11-15 审计修正）**：上面的序号只在 XFF 为**单跳**（不含空格）时
+与 awk 的空白分位一致；多跳 XFF 是 `ip1, ip2` 形态——**链内含 `", "` 空格**，
+按 `$2`、`$9` 这类固定序号取字段会整体错位。下面的配方因此改按结构取位：
+XFF 原链取「`$1` 之后、`[$time_local]` 之前」的整段，`tls=` 等带前缀的字段按
+名字定位，不依赖序号。
+
 ```bash
-# Top 20 来源 IP（含被拒绝的请求）
+# Top 20 来源 IP（含被拒绝的请求）。$1 恒为 nginx 直连对端，不受 XFF 跳数影响
 awk '{print $1}' /var/log/nginx/forensic.log | sort | uniq -c | sort -rn | head -20
 
-# Top 20 的 XFF 原链（长度异常 = 有人在伪造链路）
-awk '{print length($2), $2}' /var/log/nginx/forensic.log | sort -rn | head -20
+# Top 20 的 XFF 原链（长度异常 = 有人在伪造链路）。
+# 不能写 $2：多跳链含 ", " 空格，$2 只会取到第一跳。取 $1 之后、[时间] 之前的整段
+awk '{s=$0; sub(/^[^ ]+ /, "", s); sub(/\[[^]]*\].*/, "", s); print length(s), s}' \
+  /var/log/nginx/forensic.log | sort -rn | head -20
 
-# 某个 IP 的 TLS 参数分布（UA 与 TLS 指纹不一致时往往是脚本/自动化）
-awk '$1 == "203.0.113.77" {print $9}' /var/log/nginx/forensic.log | sort | uniq -c | sort -rn
+# 原链的最后一跳 = 本层 nginx 直连看到的对端（本拓扑信任跳数=1，应用侧
+# clientIpForSecurityDecision 采信的就是它；跳数不同时按 TRUST_PROXY_HOPS 取位）
+awk '{s=$0; sub(/^[^ ]+ /, "", s); sub(/\[[^]]*\].*/, "", s); n=split(s, a, ", "); print a[n]}' \
+  /var/log/nginx/forensic.log | sort | uniq -c | sort -rn | head -20
 
-# 慢请求（rt 字段大于阈值的行）
+# 某个 IP 的 TLS 参数分布（UA 与 TLS 指纹不一致时往往是脚本/自动化）。
+# tls= 按名字定位而非 $9：多跳 XFF 含空格时固定序号会错位
+awk '$1 == "203.0.113.77" {for (i=1; i<=NF; i++) if ($i ~ /^tls=/) print $i}' \
+  /var/log/nginx/forensic.log | sort | uniq -c | sort -rn
+
+# 慢请求（rt 字段大于阈值的行；-F'rt=' 按 .= 分割，同样不依赖空白序号）
 awk -F'rt=' '{split($2, a, " "); if (a[1] + 0 > 5) print}' /var/log/nginx/forensic.log | head -20
 ```
 

@@ -53,20 +53,22 @@ const isChallengeRequired = async (username) => {
     const successTs = lastSuccess ? lastSuccess.timestamp : null;
     // 只数"最近一次成功登录之后"的失败行；窗口内没有成功记录就从窗口起点数
     const since = successTs && successTs > windowStart ? successTs : windowStart;
-    const failures = await AuditLog.countDocuments({
-      username: usernameKey,
-      action: { $in: FAILURE_ACTIONS },
-      timestamp: { $gt: since },
-    }).collation(collation);
-    if (failures >= CHALLENGE_AFTER_FAILURES) return true;
     // 粘滞判据：失败计数窗滑走后，闸门拦下的痕迹（login_captcha_rejected）仍在粘滞窗内
     // 就持续要求挑战。阈值取 1：能出现一条被拦行，就证明挑战曾对同一用户名生效且被无验证码的一方规避。行数只增不减（闸门自己不写失败行，无自锁回路）。
     const stickySince = successTs && successTs > stickyStart ? successTs : stickyStart;
-    const gateBlocked = await AuditLog.countDocuments({
-      username: usernameKey,
-      action: CAPTCHA_REJECTED_ACTION,
-      timestamp: { $gt: stickySince },
-    }).collation(collation);
+    const [failures, gateBlocked] = await Promise.all([
+      AuditLog.countDocuments({
+        username: usernameKey,
+        action: { $in: FAILURE_ACTIONS },
+        timestamp: { $gt: since },
+      }).collation(collation),
+      AuditLog.countDocuments({
+        username: usernameKey,
+        action: CAPTCHA_REJECTED_ACTION,
+        timestamp: { $gt: stickySince },
+      }).collation(collation),
+    ]);
+    if (failures >= CHALLENGE_AFTER_FAILURES) return true;
     return gateBlocked >= 1;
   } catch (err) {
     logger.warn(`人机挑战判据不可读，按需要挑战处理：${err.message}`);

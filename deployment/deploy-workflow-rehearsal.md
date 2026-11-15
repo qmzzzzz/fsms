@@ -22,6 +22,10 @@
 
 ## 二、首次真实演练步骤（预发环境，dry_run=true）
 
+> 本节按 `.github/workflows/deploy.yml` 现有 `workflow_dispatch` 输入
+> （`image_tag` / `environment` / `strategy` / `dry_run` / `skip_backup`）编写；
+> 工作流入参以后续实际定义为准，字段增删时先改工作流、再回填本节。
+
 前置条件（缺一即演练无意义）：
 
 - GitHub Environment `staging` 已配置；两种通道二选一：

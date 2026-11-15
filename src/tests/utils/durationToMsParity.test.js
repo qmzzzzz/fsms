@@ -119,12 +119,20 @@ describe('durationToMs 必须与 jsonwebtoken 的时长语法同口径（F-176�
     }
   });
 
-  test('非字符串入参：数值按毫秒（既有语义，仓内无数值调用方）、其它类型走 fallback', () => {
-    expect(durationToMs(60000, FALLBACK)).toBe(60000);
+  test('数值入参直接抛 TypeError（审计 2026-11-15：数值在 jsonwebtoken 按秒、此处曾按毫秒，同值两解必须根除）', () => {
+    // 修复前：本函数把 60000 当 60 秒（毫秒），而 jwt.sign({expiresIn: 60}) 是 60 秒——
+    // 恰好同值的巧合掩盖了语义分叉；换个值（如 cookie 侧 7d=604800000）就会分叉。
+    // 现在数值入参在开发期即抛错，调用点全部传 env 字符串（已逐一核实）。
+    expect(() => durationToMs(60000, FALLBACK)).toThrow(TypeError);
+    expect(() => durationToMs(604800000, FALLBACK)).toThrow(TypeError);
+    expect(() => durationToMs(NaN, FALLBACK)).toThrow(TypeError);
+    expect(() => durationToMs(Infinity, FALLBACK)).toThrow(TypeError);
+  });
+
+  test('非字符串非数值入参：仍走 fallback（不抛错）', () => {
     expect(durationToMs(null, FALLBACK)).toBe(FALLBACK);
     expect(durationToMs(undefined, FALLBACK)).toBe(FALLBACK);
     expect(durationToMs({}, FALLBACK)).toBe(FALLBACK);
-    expect(durationToMs(NaN, FALLBACK)).toBe(FALLBACK);
   });
 
   // ---------- 消费面 1：cookie maxAge 必须等于实际令牌寿命 ----------

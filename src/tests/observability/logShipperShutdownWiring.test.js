@@ -63,13 +63,22 @@ const path = require('path');
 const { HttpShipperTransport } = require('../../utils/logShipper');
 
 // http 端点仅用于让请求失败/成功，与出站加密判据无关（见 resolveShippingTarget）
+// P3-20：快照原值，套件结束归还——放宽开关不能泄漏给同 worker 后续套件
+const SAVED_LOG_SHIPPING_ALLOW_INSECURE = process.env.LOG_SHIPPING_ALLOW_INSECURE;
 process.env.LOG_SHIPPING_ALLOW_INSECURE = 'true';
 const { drainShippingBuffer, bestEffortDrain } = require('../../utils/loggerFlush');
 const { waitFor } = require('../helpers/waitFor');
 
 const REPO_ROOT = path.join(__dirname, '..', '..', '..');
 
-afterAll(() => intervalSpy.mockRestore());
+afterAll(() => {
+  intervalSpy.mockRestore();
+  if (SAVED_LOG_SHIPPING_ALLOW_INSECURE === undefined) {
+    delete process.env.LOG_SHIPPING_ALLOW_INSECURE;
+  } else {
+    process.env.LOG_SHIPPING_ALLOW_INSECURE = SAVED_LOG_SHIPPING_ALLOW_INSECURE;
+  }
+});
 
 function makeTransport(overrides = {}) {
   return new HttpShipperTransport({

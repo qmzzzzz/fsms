@@ -36,6 +36,8 @@ const BUFFER_HARD_LIMIT = 500;
 const FLUSH_INTERVAL_MS = 2000;
 const WARN_INTERVAL_MS = 60000;
 const LAST_ERROR_MAX = 200;
+const IP_WINDOW_TTL_MS = 60000; // P2-02：key 攻击者可控、过期无人删 ⇒ 窗口表必须有界（对齐 alertDispatch/captchaService）
+const IP_WINDOW_MAX_ENTRIES = num('FORENSIC_IP_WINDOW_MAX', 10000, true);
 
 const state = {
   buffer: [],
@@ -110,12 +112,33 @@ const budgetHasRoom = (size) => {
   return false;
 };
 
+const trimIpWindows = (now) => {
+  if (state.ipWindows.size < IP_WINDOW_MAX_ENTRIES) return; // 容量保护：先清过期；仍超限按插入序淘汰+限频告警
+  for (const [key, win] of state.ipWindows) {
+    if (now - win.start >= IP_WINDOW_TTL_MS) state.ipWindows.delete(key);
+  }
+  let evicted = 0;
+  while (state.ipWindows.size >= IP_WINDOW_MAX_ENTRIES) {
+    const oldest = state.ipWindows.keys().next();
+    if (oldest.done) break;
+    state.ipWindows.delete(oldest.value);
+    evicted += 1;
+  }
+  if (evicted > 0) {
+    warnRateLimited(
+      `取证单 IP 配额窗口表超过上限 ${IP_WINDOW_MAX_ENTRIES}，已按插入序淘汰最旧 ${evicted} 项` +
+        '（去重 IP 数异常，通常意味着正在被大范围扫描/伪造来源）'
+    );
+  }
+};
+
 /** 单 IP 分钟窗：配额内放行；超配额按 1/N 采样（采样本身也计数，不静默） */
 const takeIpQuota = (ip, size) => {
   const now = Date.now();
   let win = state.ipWindows.get(ip);
-  if (!win || now - win.start >= 60000) {
+  if (!win || now - win.start >= IP_WINDOW_TTL_MS) {
     win = { start: now, count: 0, bytes: 0, sampled: 0 };
+    trimIpWindows(now);
     state.ipWindows.set(ip, win);
   }
   const over = win.count >= PER_IP_PER_MIN || win.bytes + size > PER_IP_BYTES_PER_MIN;

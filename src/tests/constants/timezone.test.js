@@ -77,9 +77,15 @@ describe('业务时区收敛', () => {
     ];
     for (const t of INSTANTS) {
       expect(businessDateParts(new Date(t.now)).dateStr).toBe(t.dateStr);
+      // try/finally 保证 useRealTimers 必被执行：若 businessDayBounds 抛错而
+      // 停在假定时器上，同 worker 后续套件的定时器会被整体冻结（P2-14）
       jest.useFakeTimers().setSystemTime(new Date(t.now));
-      const day = businessDayBounds();
-      jest.useRealTimers();
+      let day;
+      try {
+        day = businessDayBounds();
+      } finally {
+        jest.useRealTimers();
+      }
       expect(day.dateStr).toBe(t.dateStr);
       expect(day.start.toISOString()).toBe(t.start);
     }

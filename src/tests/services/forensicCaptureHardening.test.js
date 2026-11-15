@@ -122,22 +122,25 @@ describe('P0-3：攻击者可控超长头不得让整条记录被静默丢弃', 
     // 让"校验"这一步真的失败（模型不可构造 ⇒ validateOne 折算成被拒），
     // 这正是 P0-3b 的现场：此前这种记录会被 insertMany 静默跳过、计数为 0 地消失。
     Model.schema = { paths: {} };
-    const before = svc.getForensicCaptureStats().dropped;
+    try {
+      const before = svc.getForensicCaptureStats().dropped;
 
-    svc.record({
-      req: reqOf({}, { path: '/ok' }),
-      ip: '203.0.113.11',
-      trigger: null,
-      response: { status: 200, headers: {}, contentType: 'application/json', body: '{}' },
-    });
-    await svc.flush();
+      svc.record({
+        req: reqOf({}, { path: '/ok' }),
+        ip: '203.0.113.11',
+        trigger: null,
+        response: { status: 200, headers: {}, contentType: 'application/json', body: '{}' },
+      });
+      await svc.flush();
 
-    const stats = svc.getForensicCaptureStats();
-    expect(stats.dropped - before).toBeGreaterThanOrEqual(1);
-    expect(stats.lastError || '').toMatch(/constructor|validation|maxlength/i);
-    // 全批被拒 ⇒ 一条都不许塞进 insertMany（否则 mongoose 会静默跳过并让证据凭空消失）
-    expect(Model.insertMany).not.toHaveBeenCalled();
-    delete Model.schema;
+      const stats = svc.getForensicCaptureStats();
+      expect(stats.dropped - before).toBeGreaterThanOrEqual(1);
+      expect(stats.lastError || '').toMatch(/constructor|validation|maxlength/i);
+      // 全批被拒 ⇒ 一条都不许塞进 insertMany（否则 mongoose 会静默跳过并让证据凭空消失）
+      expect(Model.insertMany).not.toHaveBeenCalled();
+    } finally {
+      delete Model.schema; // 对替身模型的变异必须还原：断言失败也不得污染同文件后续用例
+    }
   });
 
   test('落库失败时回填与计数都在告警之前完成（告警抛错也不丢批）', async () => {
@@ -271,20 +274,23 @@ describe('P1-4：生产接线的启动/关停语义（fail-soft）', () => {
 
   test('flushAndStop 如实上报 residual：预算为 0 时不得谎报已排空', async () => {
     Model.schema = { paths: {} };
-    Model.insertMany.mockImplementation(async () => {
-      throw new Error('db down');
-    });
-    Model.find = jest.fn(async () => []);
-    svc.record({
-      req: reqOf(),
-      ip: '203.0.113.7',
-      trigger: null,
-      response: { status: 200, headers: {}, contentType: 'application/json', body: '{}' },
-    });
-    const out = await svc.flushAndStop(0);
-    expect(out.drained).toBe(false);
-    expect(out.residual).toBeGreaterThan(0);
-    delete Model.schema;
+    try {
+      Model.insertMany.mockImplementation(async () => {
+        throw new Error('db down');
+      });
+      Model.find = jest.fn(async () => []);
+      svc.record({
+        req: reqOf(),
+        ip: '203.0.113.7',
+        trigger: null,
+        response: { status: 200, headers: {}, contentType: 'application/json', body: '{}' },
+      });
+      const out = await svc.flushAndStop(0);
+      expect(out.drained).toBe(false);
+      expect(out.residual).toBeGreaterThan(0);
+    } finally {
+      delete Model.schema; // 对替身模型的变异必须还原：断言失败也不得污染同文件后续用例
+    }
   });
 });
 

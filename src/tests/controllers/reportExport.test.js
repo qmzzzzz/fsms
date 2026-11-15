@@ -108,14 +108,29 @@ describe('报表与导出（批次 D1）', () => {
 
   const get = (path) => request(app).get(path).set('Authorization', `Bearer ${adminToken}`);
 
-  test('dashboard：首次计算 + 二次命中缓存', async () => {
+  test('dashboard：首次计算 + 二次确实命中缓存', async () => {
     const first = await get('/api/reports/dashboard');
     expect(first.status).toBe(200);
     expect(first.body.data.devices).toBeTruthy();
+    // 首算路径的消息不带「缓存命中」——给第二次的比较留出可证伪的基线
+    expect(first.body.message).toBe('获取仪表盘统计成功');
 
-    const second = await get('/api/reports/dashboard');
-    expect(second.status).toBe(200);
-    expect(second.body.data).toEqual(first.body.data); // 缓存命中返回同对象
+    // P2-15：仅断言两次结果一致无法证伪缓存回归（删掉缓存读写该用例照样绿）。
+    // 这里直接接线 reportDashboardService.__test.dashboardCache（控制器经
+    // dashboardService.getDashboardData 读写的同一张 Map），断言第二次请求
+    // 真实走了缓存读取，且响应消息带「缓存命中」标记。
+    const dashboardService = require('../../services/reportDashboardService');
+    const cache = dashboardService.__test.dashboardCache;
+    const getSpy = jest.spyOn(cache, 'get');
+    try {
+      const second = await get('/api/reports/dashboard');
+      expect(second.status).toBe(200);
+      expect(getSpy).toHaveBeenCalled();
+      expect(second.body.message).toBe('获取仪表盘统计成功（缓存命中）');
+      expect(second.body.data).toEqual(first.body.data);
+    } finally {
+      getSpy.mockRestore();
+    }
   });
 
   test('devices 报表：汇总 + 趋势 + 即将过期', async () => {

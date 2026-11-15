@@ -10,19 +10,45 @@ const { hydrateSecretsFromFiles } = require('./config/secrets');
 
 hydrateSecretsFromFiles();
 
+const CLUSTER_WORKERS_MAX = 16;
+
 const resolveWorkerCount = () => {
   const configured = parseInt(process.env.CLUSTER_WORKERS, 10);
-  if (Number.isFinite(configured) && configured > 1) return Math.min(configured, 16);
+  if (Number.isFinite(configured) && configured > 1) {
+    return Math.min(configured, CLUSTER_WORKERS_MAX);
+  }
   return 1;
 };
 
 const workerCount = resolveWorkerCount();
 
+/** CLUSTER_WORKERS 非法值/超上限的告警文案（审计 2026-11-15：此前静默回落 1 / 夹取 16）；仅在 primary 打印一次 */
+const workerCountWarning = () => {
+  const raw = process.env.CLUSTER_WORKERS;
+  if (raw === undefined || String(raw).trim() === '') return null;
+  const configured = parseInt(raw, 10);
+  if (!Number.isFinite(configured)) {
+    return `CLUSTER_WORKERS="${raw}" 不是合法整数，已回落为单进程（1 个 worker）`;
+  }
+  if (configured <= 0) {
+    return `CLUSTER_WORKERS=${configured} 非法（须 ≥1），已回落为单进程（1 个 worker）`;
+  }
+  if (configured > CLUSTER_WORKERS_MAX) {
+    return `CLUSTER_WORKERS=${configured} 超过上限 ${CLUSTER_WORKERS_MAX}，已夹取到 ${CLUSTER_WORKERS_MAX}`;
+  }
+  return null;
+};
+
+const workersWarning = workerCountWarning();
+
 if (workerCount === 1) {
-  // 未开启多进程：直接走单进程入口，行为与 `node src/index.js` 完全一致
+  // 未开启多进程：直接走单进程入口，行为与 `node src/index.js` 完全一致。
+  // 单进程入口与 primary 同属一个进程形态，CLUSTER_WORKERS 配了非法值同样在这里出声。
+  if (workersWarning) console.error(`[cluster] 警告：${workersWarning}`);
   require('./index');
 } else if (cluster.isPrimary) {
   loggerBanner(workerCount);
+  if (workersWarning) console.error(`[cluster] 警告：${workersWarning}`);
 
   let shuttingDown = false;
 
@@ -55,12 +81,15 @@ if (workerCount === 1) {
       console.error(`[cluster] ${label} 以退出码 ${code} 退出，将补 fork`);
     }
     const uptime = Number.isFinite(forkTime) ? Date.now() - forkTime : CRASH_STABLE_MS;
-    crashStreak = uptime >= CRASH_STABLE_MS ? 0 : crashStreak + 1;
-    const delayMs = Math.min(BACKOFF_BASE_MS * 2 ** (crashStreak - 1), BACKOFF_MAX_MS);
-    if (delayMs <= 0) {
+    if (uptime >= CRASH_STABLE_MS) {
+      // 活过稳定窗＝偶发崩溃：立即补 fork（修前会套 500ms 伪退避打矛盾日志，审计 2026-11-15）
+      crashStreak = 0;
       cluster.fork();
       return;
     }
+    crashStreak += 1;
+    // crashStreak ≥ 1 ⇒ delayMs ≥ BACKOFF_BASE_MS，无需再判非正
+    const delayMs = Math.min(BACKOFF_BASE_MS * 2 ** (crashStreak - 1), BACKOFF_MAX_MS);
     console.error(
       `[cluster] 短命连发 ×${crashStreak}（存活 ${uptime}ms < 稳定窗 ${CRASH_STABLE_MS}ms），` +
         `${delayMs}ms 后补 fork`

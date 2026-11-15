@@ -77,6 +77,15 @@ describe('登录口令加密传输（密文轨）', () => {
     delete process.env.LOGIN_ECDH_PRIVATE_KEY;
     loginCipher._resetForTests();
     if (mongoose.connection.readyState !== 0) {
+      // P3-24：回收自建账号与 127.0.0.1 的 IP 封禁残留（失败登录会触发自动封禁，
+      // 不清则同 worker 后续以回环为对端的套件拿到 403 黑名单）
+      const IPBlacklist = require('../../models/IPBlacklist');
+      await User.deleteMany({
+        username: { $in: ['enclogin_user', 'encreg_user', 'enchg_user', 'aadx_user'] },
+      }).catch(() => {});
+      await IPBlacklist.deleteMany({
+        $or: [{ ip: '127.0.0.1' }, { ip: '::ffff:127.0.0.1' }],
+      }).catch(() => {});
       await mongoose.connection.close();
     }
   });

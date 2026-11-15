@@ -160,24 +160,21 @@ describe('G-6 落库清单锚定：已进库的记录必须进清单', () => {
     expect(state.writeFailures).toBe(1);
   });
 
-  test.failing(
-    '③ 批内一条撞 _id、另一条新记录 ⇒ 新记录必须进清单（H-3：当前一条都不记，修复后本用例转红）',
-    async () => {
-      // 现场：WAL 里「已落库但还没裁」的 A 与一条新记录 B 同批重放
-      const a = recordFor('203.0.113.24', 'G6-4');
-      const b = recordFor('203.0.113.25', 'G6-5');
-      await RealModel.insertMany([a], { ordered: false, throwOnValidationError: true });
+  test('③ 批内一条撞 _id、另一条新记录 ⇒ 新记录必须进清单（H-3 已修：部分成功也锚定清单）', async () => {
+    // 现场：WAL 里「已落库但还没裁」的 A 与一条新记录 B 同批重放
+    const a = recordFor('203.0.113.24', 'G6-4');
+    const b = recordFor('203.0.113.25', 'G6-5');
+    await RealModel.insertMany([a], { ordered: false, throwOnValidationError: true });
 
-      const { state, flush } = makeHarness();
-      state.buffer.push(a, b); // A 撞 _id，B 是新记录
-      await flush();
+    const { state, flush } = makeHarness();
+    state.buffer.push(a, b); // A 撞 _id，B 是新记录
+    await flush();
 
-      // 关键事实一：B 确实进库了（E11000 不阻止同批其它文档）
-      expect(await RealModel.countDocuments({ ip: '203.0.113.25' })).toBe(1);
-      // 关键事实二：它必须同时出现在清单里。缺陷在场时 appendBatch 一次都不会被调用，
-      // 因为 insertMany 整批 reject ⇒ 跳过 appendBatch；而回填集合又是空的（两条都已在库）。
-      const sent = manifest.appendBatch.mock.calls.flatMap((c) => c[0].recordHashes);
-      expect(sent).toContain(b.recordHash);
-    }
-  );
+    // 关键事实一：B 确实进库了（E11000 不阻止同批其它文档）
+    expect(await RealModel.countDocuments({ ip: '203.0.113.25' })).toBe(1);
+    // 关键事实二：它必须同时出现在清单里。缺陷在场时 appendBatch 一次都不会被调用，
+    // 因为 insertMany 整批 reject ⇒ 跳过 appendBatch；而回填集合又是空的（两条都已在库）。
+    const sent = manifest.appendBatch.mock.calls.flatMap((c) => c[0].recordHashes);
+    expect(sent).toContain(b.recordHash);
+  });
 });

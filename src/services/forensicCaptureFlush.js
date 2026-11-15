@@ -7,6 +7,15 @@ const forensicManifest = require('./forensicManifest');
 
 /** 依赖全部由编排层注入：本模块不持有状态，也不自己决定容量口径 */
 const createFlusher = ({ state, noteError, warnRateLimited, errText, bufferHardLimit }) => {
+  const anchorStored = async (docs) => {
+    if (!Array.isArray(docs) || docs.length === 0) return; // G-6/H-3：进库的必须进清单
+    await forensicManifest.appendBatch({
+      recordHashes: docs.map((d) => d.recordHash).filter(Boolean),
+      firstSeq: docs[0].__walSeq || null,
+      lastSeq: docs[docs.length - 1].__walSeq || null,
+    });
+  };
+
   const flush = async () => {
     if (state.flushing || state.buffer.length === 0) return;
     state.flushing = true;
@@ -32,11 +41,7 @@ const createFlusher = ({ state, noteError, warnRateLimited, errText, bufferHardL
         await ForensicCapture.insertMany(valid, { ordered: false, throwOnValidationError: true });
         wal.trimBySeqs(valid.map((d) => d.__walSeq).filter(Boolean));
         // 落库成功后才锚进清单（顺序不能反：先记清单后落库，落库失败就会留下"证明一条不存在的记录"的锚点）。写失败只计数告警、不外抛（appendBatch 自己兜），绝不让清单问题回滚已成功的落库。
-        await forensicManifest.appendBatch({
-          recordHashes: valid.map((d) => d.recordHash).filter(Boolean),
-          firstSeq: valid[0].__walSeq || null,
-          lastSeq: valid[valid.length - 1].__walSeq || null,
-        });
+        await anchorStored(valid);
       }
     } catch (err) {
       let retry = valid; // 顺序是硬要求（P0-2）：回填与计数必须先于任何"可能抛错"的调用（告警/日志），否则整批已 splice 走的记录既不入库也不回填也不计数。回填前做幂等筛选，已入库的行不得再回填（否则重试即写重）。
@@ -60,6 +65,12 @@ const createFlusher = ({ state, noteError, warnRateLimited, errText, bufferHardL
         `取证批量落库失败（累计 ${state.writeFailures} 次），回填 ${Math.min(retry.length, room)} 条待重试，` +
           `超硬上限丢弃 ${Math.max(0, retry.length - room)} 条：${errText(err)}`
       );
+      if (retry.length < valid.length) {
+        const retrySet = new Set(retry); // H-3：部分成功时已进库子集必须补锚（回填只管没入库的）
+        try {
+          await anchorStored(valid.filter((d) => !retrySet.has(d)));
+        } catch (_) {}
+      }
     } finally {
       state.flushing = false;
     }

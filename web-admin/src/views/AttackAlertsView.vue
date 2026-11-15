@@ -380,6 +380,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { api, isCanceledError } from '@/utils/api'
+import { REAUTH_TICKET_ERROR_CODES, readReauthErrorCode } from '@/utils/reauthError'
 import { useLatestRequest } from '@/composables/useLatestRequest'
 import { useListLoadState } from '@/composables/useListLoadState'
 import GlassSegmented from '@/components/GlassSegmented.vue'
@@ -454,7 +455,6 @@ const listGuard = useLatestRequest()
 const listState = useListLoadState()
 
 // ===== 二次验证票据（与 AuditLogView 同契约：按 tag 去重、验后重放）=====
-const REAUTH_TICKET_ERROR_CODES = ['REAUTH_TICKET_REQUIRED', 'REAUTH_TICKET_INVALID']
 const reauthVisible = ref(false)
 const reauthSubmitting = ref(false)
 const pendingReauthTags = new Set()
@@ -462,19 +462,6 @@ const pendingReauthTags = new Set()
 const requireReauth = (tag) => {
   pendingReauthTags.add(tag)
   reauthVisible.value = true
-}
-
-const readReauthErrorCode = async (e) => {
-  const data = e?.response?.data
-  if (data?.errors?.errorCode) return data.errors.errorCode
-  if (typeof Blob !== 'undefined' && data instanceof Blob) {
-    try {
-      return JSON.parse(await data.text())?.errors?.errorCode || ''
-    } catch (_) {
-      return ''
-    }
-  }
-  return ''
 }
 
 const handleReauthSubmit = async (credential) => {

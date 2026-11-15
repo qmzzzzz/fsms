@@ -26,7 +26,17 @@
 const { HttpShipperTransport, BUFFER_CAP } = require('../../utils/logShipper');
 
 // http 端点仅用于让请求失败/成功，与出站加密判据无关（见 resolveShippingTarget）
+// P3-20：快照原值，套件结束归还——放宽开关不能泄漏给同 worker 后续套件
+const SAVED_LOG_SHIPPING_ALLOW_INSECURE = process.env.LOG_SHIPPING_ALLOW_INSECURE;
 process.env.LOG_SHIPPING_ALLOW_INSECURE = 'true';
+
+afterAll(() => {
+  if (SAVED_LOG_SHIPPING_ALLOW_INSECURE === undefined) {
+    delete process.env.LOG_SHIPPING_ALLOW_INSECURE;
+  } else {
+    process.env.LOG_SHIPPING_ALLOW_INSECURE = SAVED_LOG_SHIPPING_ALLOW_INSECURE;
+  }
+});
 
 const gapOf = (line) => {
   try {

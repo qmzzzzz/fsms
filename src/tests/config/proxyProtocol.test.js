@@ -29,6 +29,10 @@ describe('PROXY_PROTOCOL 解析与取值域', () => {
     expect(parsed).toEqual({ configured: false, enabled: false, errors: [] });
   });
 
+  test('ENV_KEY 是完整字面量（审计 2026-11-15：拼接写法让 grep 检索不到环境变量名）', () => {
+    expect(proxyProtocol.ENV_KEY).toBe('PROXY_PROTOCOL');
+  });
+
   test('空串/纯空白 → 与未配置同判', () => {
     expect(proxyProtocol.parseProxyProtocolMode('')).toEqual({
       configured: false,

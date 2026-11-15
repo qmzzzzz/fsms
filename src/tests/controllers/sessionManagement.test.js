@@ -55,6 +55,17 @@ describe('设备级会话管理接口（/api/auth/sessions）', () => {
 
   afterAll(async () => {
     if (mongoose.connection.readyState !== 0) {
+      // P3-24：回收自建账号（sessuser/sessother）及其会话记录
+      const users = await User.find({
+        username: { $in: ['sessuser', 'sessother'] },
+      })
+        .select('_id')
+        .lean();
+      const ids = users.map((u) => u._id);
+      if (ids.length > 0) {
+        await UserSession.deleteMany({ userId: { $in: ids } }).catch(() => {});
+      }
+      await User.deleteMany({ _id: { $in: ids } }).catch(() => {});
       await mongoose.connection.close();
     }
   });

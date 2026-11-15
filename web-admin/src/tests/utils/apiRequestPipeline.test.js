@@ -1206,7 +1206,8 @@ describe('api 方法表契约（动词/路径/参数透传）', () => {
     // 它只发 { ip, type, reason, durationHours }，永远不带 typedConfirm。而后端对
     // 加黑网段要求逐字确认（≥256 主机）⇒ 直接启用必然 400 typed_confirmation_required。
     // 判据两段：① 生产视图里真没人调它（否则这就是个现网缺陷，不是死代码）；
-    // ② 它的调用签名里没有 typedConfirm 通道（所以"顺手启用"必然踩坑，而不是碰巧能用）。
+    // ② 行为观察：真实调用导出函数，请求按 /security/ip-list 原样透传且不带
+    //    typedConfirm 通道（"顺手启用"必然踩坑，而不是碰巧能用）。
     const glob = await import('node:fs')
     const pathMod = await import('node:path')
     const viewsDir = pathMod.resolve(__dirname, '../../views')
@@ -1216,8 +1217,24 @@ describe('api 方法表契约（动词/路径/参数透传）', () => {
       if (glob.readFileSync(pathMod.join(viewsDir, f), 'utf8').includes('addIPEntry')) hit.push(f)
     }
     expect(hit).toEqual([])
-    const src = glob.readFileSync(pathMod.resolve(__dirname, '../../utils/api.js'), 'utf8')
-    expect(src).toMatch(/addIPEntry: \(data\) => apiClient\.post\('\/security\/ip-list', data\)/)
+    // 行为断言替代源码正则：正则钉死 api.js 排版，纯格式化改动会假红（P3-11）
+    const { api, apiClient } = await loadAll()
+    const calls = []
+    apiClient.defaults.adapter = (config) => {
+      calls.push(config)
+      return Promise.resolve(jsonOk(config))
+    }
+    const payload = { ip: '1.2.3.4', type: 'black', reason: '审计用例', durationHours: 24 }
+    await api.security.addIPEntry(payload)
+    const cfg = calls.at(-1)
+    expect(cfg.method).toBe('post')
+    expect(cfg.url).toBe('/security/ip-list')
+    const body = JSON.parse(cfg.data)
+    // 原样透传：调用方给什么发什么，前端不注入/不改写
+    expect(body).toEqual(payload)
+    // 死通道的关键性质：没有打字确认通道（两阶段确认应由启用方按 IpListView
+    // 的既有模式显式补上，而不是这条 API 代劳）
+    expect(body).not.toHaveProperty('typedConfirm')
   })
 
   test('全部端点的动词与路径符合后端契约，参数/响应类型原样透传', async () => {

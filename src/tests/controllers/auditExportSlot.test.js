@@ -93,12 +93,21 @@ describe('E3：审计 CSV 导出占槽（audit-export 池）', () => {
     process.env.EXPORT_MAX_QUEUE = '0'; // 排队位归零：第 3 个并发立刻 queue_full，用例不等超时
     const held = [];
     try {
-      while (true) {
+      // 上限保护：出厂并发=2、排队=0，正常两轮内必满。若实现退化成"永远发得下"，
+      // 这里 bounded 退出并给出诊断（超限即 fail），不改变"占满直到被拒"的原意图
+      const MAX_DRAIN_ROUNDS = 1000;
+      while (held.length < MAX_DRAIN_ROUNDS) {
         try {
           held.push(await acquireExportSlot('audit-export'));
         } catch (err) {
           break; // 池满：正常出口
         }
+      }
+      if (held.length >= MAX_DRAIN_ROUNDS) {
+        throw new Error(
+          `占槽循环 ${MAX_DRAIN_ROUNDS} 轮仍未触顶：acquireExportSlot 的池上限/排队口径可能已改，` +
+            `请核对 services/exportConcurrency（当前已占 ${held.length} 个槽仍可继续获取）`
+        );
       }
       expect(held.length).toBeGreaterThanOrEqual(1); // 前提自证：确实占到了槽
       const res = makeRes();

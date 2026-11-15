@@ -20,6 +20,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { jsCodeOnlyKeepingLines } = require('../helpers/jsCodeOnly');
 
 const SRC_DIR = path.resolve(__dirname, '../..');
 
@@ -134,10 +135,11 @@ describe('F-04 静态闸：不得再按字面量比较生产环境', () => {
     const offenders = [];
     for (const file of listJs(SRC_DIR)) {
       const rel = path.relative(SRC_DIR, file).replace(/\\/g, '/');
-      const lines = fs.readFileSync(file, 'utf8').split('\n');
+      // P3-13：注释剔除改用全仓统一的 jsCodeOnlyKeepingLines 视图——原行首
+      // /^(?:\/\/|\*|\/\*)/ 判据漏掉「续行不以 * 开头的块注释」，写在那种注释里的
+      // 历史写法示例会造成假红；该视图逐位屏蔽注释且行号与源码一一对应
+      const lines = jsCodeOnlyKeepingLines(fs.readFileSync(file, 'utf8')).split('\n');
       lines.forEach((line, i) => {
-        // 注释行不算（本仓多处注释在解释历史写法，那些正是"为什么不能这么写"的证据）
-        if (/^\s*(?:\/\/|\*|\/\*)/.test(line)) return;
         if (
           /process\.env\.NODE_ENV\s*===\s*['"]production['"]/.test(line) ||
           /config\.nodeEnv\s*===\s*['"]production['"]/.test(line)

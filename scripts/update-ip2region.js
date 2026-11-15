@@ -150,6 +150,20 @@ const extractXdbFromNpmTarball = async () => {
   throw new Error(`tar 包内未找到 ${XDB_NAME}`);
 };
 
+const randomTmpName = (base) =>
+  `${base}.${process.pid}-${crypto.randomBytes(6).toString('hex')}.tmp`;
+
+const assertPathAbsent = (file) => {
+  // lstat 不跟随链接：悬空符号链接也算已占用；writeFileSync 会跟随链接，写入前必须拒绝
+  let st = null;
+  try {
+    st = fs.lstatSync(file);
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err;
+  }
+  if (st) throw new Error(`临时路径已存在（疑似被抢占，拒绝写入）：${file}`);
+};
+
 const main = async () => {
   const pin = loadPin();
   if (process.argv.includes('--check')) {
@@ -204,12 +218,14 @@ const main = async () => {
   }
 
   // 原子替换：先写同目录临时文件再 rename，中途断电/被杀不会留下半截数据
-  const tmp = `${TARGET}.tmp`;
+  const tmp = randomTmpName(TARGET); // 临时名带 pid+随机数：固定 .tmp 会被并发覆写或被预置成符号链接；写入前 lstat 拒链
+  assertPathAbsent(tmp);
   fs.writeFileSync(tmp, buffer);
   fs.renameSync(tmp, TARGET);
   if (!result.ok) {
     const next = { ...pin, bytes: result.actual.bytes, sha256: result.actual.sha256 };
-    const tmpPin = `${CHECKSUM_FILE}.tmp`;
+    const tmpPin = randomTmpName(CHECKSUM_FILE);
+    assertPathAbsent(tmpPin);
     fs.writeFileSync(tmpPin, `${JSON.stringify(next, null, 2)}\n`);
     fs.renameSync(tmpPin, CHECKSUM_FILE);
     console.log(`内容锚已更新：${result.actual.bytes} 字节 / ${result.actual.sha256}`);
@@ -225,4 +241,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { checkPin, digest, loadPin, CHECKSUM_FILE };
+module.exports = { checkPin, digest, loadPin, CHECKSUM_FILE, assertPathAbsent, randomTmpName };

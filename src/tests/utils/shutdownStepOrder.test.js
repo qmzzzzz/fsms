@@ -82,9 +82,11 @@ function extractDrainStep(raw) {
 describe('优雅关闭链的步骤序：SIEM 排空必须排在最后', () => {
   test('① 真实源码：链尾那一步就是 SIEM 排空，其后只有正常退出语句', () => {
     const p = positions(gracefulRegion(jsCodeOnly(readIndex())));
-    // 前提自证：判据不是空集恒真（步骤数、退出点唯一性都先站住）
+    // 前提自证：判据不是空集恒真（步骤数、退出点都先站住）。
+    // P2-11（2026-11-16）后 exitAfterFlush(0) 有两处：优雅关闭链尾（SIEM 排空之后）
+    // 与启动窗口的信号短路径退出——后者在 listen 之前，不经过关闭链。
     expect(p.stepCount).toBeGreaterThanOrEqual(6);
-    expect(jsCodeOnly(readIndex()).match(/exitAfterFlush\(0/g) || []).toHaveLength(1);
+    expect(jsCodeOnly(readIndex()).match(/exitAfterFlush\(0/g) || []).toHaveLength(2);
 
     expect(p.lastStepIsDrain).toBe(true);
     expect(p.exitFollowsLastStep).toBe(true);

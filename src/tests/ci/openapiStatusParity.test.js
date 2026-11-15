@@ -53,35 +53,11 @@ const ROUTE_OPS = buildRouteOps();
  * #3 立刻红 —— 在此之前"漏文档"没有任何信号（drift 闸只比生成器与产物，两边一起漏就都漏）。
  */
 const UNDOCUMENTED = [
-  // ---- 运维/发现端点：不是业务 API，OpenAPI 面只覆盖业务接口 ----
-  // 注意 GET /health 不在这张表里：它**在**文档中（openapi.json 的 /health.get 200），
-  // 台账只收"实现有、文档无"，把已文档化的端点写进来会让 #3 变成永远红的噪声。
-  {
-    key: 'GET /readyz',
-    why: '就绪探针（app.js:446），200/503 按 Mongo+Redis+拓扑判定（旧写 :448 指探针说明注释段；2026-11-15 dev 访问日志脱敏批后改指挂载本体 :459，同日密度裁剪批 app.js 注释压缩 −13 行后为 :446）',
-  },
-  {
-    key: 'GET /metrics',
-    why: 'Prometheus 拉取端点（app.js:496），METRICS_ENABLED=false 时不存在（原写 :509，2026-11-15 密度裁剪批 app.js 注释压缩后顺移）',
-  },
-  {
-    key: 'GET /api/metrics',
-    why: '面板 JSON 快照（app.js:502），认证 + security:audit（原写 :515，2026-11-15 密度裁剪批 app.js 注释压缩后顺移）',
-  },
-  {
-    key: 'GET /api-docs.json',
-    why: '文档自身的 JSON（app.js:546），仅 ENABLE_API_DOCS 时存在（2026-11-15 dev 访问日志脱敏批由 :553 顺移至 :559，同日密度裁剪批 app.js 注释压缩后为 :546）',
-  },
-  // ---- 匿名发现/上报端点：路径由 RFC 9116、CSP report-uri、浏览器行为固定 ----
-  { key: 'GET /.well-known/security.txt', why: 'RFC 9116 发现文件（wellKnownRoutes.js）' },
-  { key: 'GET /security.txt', why: '同上，根路径兼容位置' },
-  { key: 'POST /csp-report', why: '浏览器 CSP 违规上报（wellKnownRoutes.js:96），恒回 204' },
-  {
-    key: 'POST /client-errors',
-    why: '前端异常/Web Vitals 上报（wellKnownRoutes.js:151），恒回 204',
-  },
-  // 注：GET /api/version 曾在这里（"待补文档"）。lead 已把它补进 generate.js（产物 104 paths / 125 ops），
-  // 于是它从"实现有、文档无"里消失 —— 台账必须同步删，否则 #3 变成永远红的噪声。
+  // 2026-11-15（P2-12）：原台账登记的 8 条运维/发现端点（GET /readyz、/metrics、/api/metrics、
+  // /api-docs.json、/.well-known/security.txt、/security.txt、POST /csp-report、/client-errors）
+  // 已按 app.js / wellKnownRoutes 真实实现全部补进 openapi.json——「实际暴露面不得大于文档面」。
+  // 理由列与状态码证据迁移至 src/tests/ci/openapiUndocumentedFaceParity.test.js 的入册台账。
+  // 台账就此清空：此后任何「实现有、文档无」的新端点都会让 #3 立刻红，无豁免可藏。
 ];
 
 describe('文档成功码与实现返回的双向对账', () => {
@@ -152,17 +128,21 @@ describe('文档成功码与实现返回的双向对账', () => {
     expect(untouched).toEqual([]);
   });
 
-  test('#4b 变异自证：台账漏登记一个端点 ⇒ #3 红（且只多出那一条）', () => {
+  test('#4b 变异自证：实现多出一个未登记端点 ⇒ #3 红（且只多出那一条）', () => {
     const actual = undocumentedEndpoints(SPEC, ROUTE_OPS);
-    const dropped = UNDOCUMENTED.map((x) => x.key)
-      .sort()
-      .slice(1);
-    // 模拟"新人删掉一行台账"：实际集合与台账不再相等
-    expect(actual).not.toEqual(dropped);
-    expect(actual.length - dropped.length).toBe(1);
-    // 反向：源里删掉端点后台账残留也必须能被发现（用台账加一条不存在的端点模拟）
-    const phantom = [...new Set([...actual, 'POST /api/does-not-exist'])].sort();
-    expect(phantom).not.toEqual(actual);
+    // 前提：当前实现与台账（空）一致
+    expect(actual).toEqual(UNDOCUMENTED.map((x) => x.key).sort());
+    // 模拟"新端点上线却没进文档也没登记台账"：路由表多一条 ⇒ 判据立刻不相等
+    const extra = {
+      method: 'GET',
+      path: '/api/does-not-exist',
+      source: 'src/app.js',
+      handler: 'noSuchHandler',
+    };
+    const drifted = undocumentedEndpoints(SPEC, [...ROUTE_OPS, extra]);
+    expect(drifted).toContain('GET /api/does-not-exist');
+    expect(drifted).not.toEqual(UNDOCUMENTED.map((x) => x.key).sort());
+    expect(drifted.length - UNDOCUMENTED.length).toBe(1);
   });
 
   test('#5 判据有牙（合成样例）：200 / 201 / 204 / 304 / 动态三元 各走一遍', () => {

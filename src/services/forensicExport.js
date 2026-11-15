@@ -65,7 +65,8 @@ function verifyExport({ pkg, secret = secretOf() } = {}) {
     return { ok: false, reason: 'unsupported_alg_or_version' };
   const keyId = sha256(secret).slice(0, 16);
   if (pkg.keyId !== keyId) return { ok: false, reason: 'key_mismatch' };
-  const digest = digestOf(pkg.records);
+  if (!Array.isArray(pkg.records)) return { ok: false, reason: 'bad_records' };
+  const digest = digestOf(pkg.records); // P2-03 畸形包守卫：records 非数组已在上方拒绝（缺它 sha256(canonicalJson(undefined)) 会抛 TypeError）
   if (digest !== pkg.digest) return { ok: false, reason: 'records_modified' };
   const material = materialOf({
     version: pkg.v,

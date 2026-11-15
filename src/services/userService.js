@@ -439,7 +439,7 @@ class UserService {
       // 先取 id：删除之后就再也不知道曾指向谁（级联必须以 id 列表为准）
       const affected = await User.find(filter, '_id').lean();
       const ids = affected.map((doc) => doc._id);
-      result = await User.deleteMany(filter, opts);
+      result = await User.deleteMany({ _id: { $in: ids } }, opts); // P3：按预取 id 删（非原过滤器），删除面与级联同源，窗口内新命中者不属本批；空 ids 匹配 0 条
       // 空数组不发写请求（Mongo 不报错，但会产生无意义写）
       if (ids.length > 0) await UserAvatar.deleteMany({ _id: { $in: ids } }, opts);
       await this.releaseOpenAssignments(ids, session);
