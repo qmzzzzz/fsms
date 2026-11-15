@@ -14,10 +14,8 @@ const { buildAuditEntry } = require('./ipPoolBanAudit');
 const DEFAULT_BAN_MS = 24 * 60 * 60 * 1000;
 const MAX_BATCH = 20;
 const CONFIRM_TTL_MS = 10 * 60 * 1000;
-/** 网段规模超过这个值即视为高危：/24 = 256 个地址，再大就很容易罩住整栋楼或整个园区 */
 const HIGH_IMPACT_HOSTS = 256;
 
-/** 打字确认（GitHub 删仓库那套）：点两下挡不住手滑，逐字敲网段才挡得住 */
 function hostCountOf(cidr) {
   const base = String(cidr || '').split('/')[0];
   if (base.includes(':')) return Infinity;
@@ -150,7 +148,9 @@ async function applyBan({
     // 已消费不写回：过期票本就该作废（下次尝试按 unknown_token 拒）
     return refuse(CODES.token_expired, { cidr: ticket.cidr });
   }
-  const targets = ticket.cidr.split(',').slice(0, MAX_BATCH);
+  // 票据的 cidr 是**单条**网段：requestBan 只收 normalizeCIDR 通过的单一 CIDR（逗号串 parseCIDR 即 null → 出票前就被 unparsable_cidr 拒掉），
+  // 此处的 split(',').slice(0, MAX_BATCH) 是不可达的死分支——批量语义（MAX_BATCH）只在 banRecommended 的簇列表上真实存在。按单条展开，批量形状留给唯一真实的批量入口。
+  const targets = [ticket.cidr];
   const judged = await ticketJudgementRefusal({ ticket, typedConfirm, targets, operatorIp });
   if (judged) {
     await writeBackTicket(ticket); // 敲错不消耗（ADR-018 ③）：票据原样写回剩余 TTL
@@ -293,9 +293,9 @@ module.exports = {
   DEFAULT_BAN_MS,
   MAX_BATCH,
   CONFIRM_TTL_MS,
-  HIGH_IMPACT_HOSTS,
+  HIGH_IMPACT_HOSTS, // 网段规模超过这个值即视为高危：/24 = 256 个地址，再大就很容易罩住整栋楼或整个园区
   TICKET_KEY_PREFIX,
-  hostCountOf,
+  hostCountOf, // 打字确认（GitHub 删仓库那套）：点两下挡不住手滑，逐字敲网段才挡得住
   needsTypedConfirmation,
   typedConfirmMatches,
   segmentWriteRefusal,

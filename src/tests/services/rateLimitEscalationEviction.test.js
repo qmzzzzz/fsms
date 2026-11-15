@@ -19,6 +19,17 @@
  *     攻击者用新 IP 就能把"正要升级"的旧目标挤出表，而垃圾条目留在表里。
  */
 
+// 这五个 env 被被测模块在**加载期**读走（rateLimitEscalation.js 顶部常量），必须先于
+// require 写入；但写入前先快照原值（P2-14）——jest 的 require 缓存按文件隔离，process.env
+// 却在同 worker 的文件间共享，不还原的话后续套件（同桶的 rateLimitEscalation.test.js、
+// 走真实链路的 attackDetectionIntegration 等）的阈值/容量被钉在本文件的测试档上。
+const PREV_CC_ESCALATION_ENVS = {
+  CC_ESCALATION_MAX_TRACKED: process.env.CC_ESCALATION_MAX_TRACKED,
+  CC_ESCALATION_EVICT_RATIO: process.env.CC_ESCALATION_EVICT_RATIO,
+  CC_ESCALATION_THRESHOLD_ANON: process.env.CC_ESCALATION_THRESHOLD_ANON,
+  CC_ESCALATION_THRESHOLD_VOLUME: process.env.CC_ESCALATION_THRESHOLD_VOLUME,
+  CC_ESCALATION_THRESHOLD_AUTH: process.env.CC_ESCALATION_THRESHOLD_AUTH,
+};
 process.env.CC_ESCALATION_MAX_TRACKED = '20';
 process.env.CC_ESCALATION_EVICT_RATIO = '50';
 process.env.CC_ESCALATION_THRESHOLD_ANON = '4';
@@ -102,4 +113,13 @@ describe('计数表容量淘汰', () => {
     for (let i = 1; i <= CAP * 2; i += 1) hit(ipAt(i), 'captcha');
     expect(escalation.peekIp(hot)).not.toBeNull();
   });
+});
+
+// P2-14：五个测试档 env 随套件归还（快照见文件头）。被测模块的常量已在 require 时
+// 固化，这里还原 env 不影响本文件；同 worker 后续套件读到的是原值（通常为未设 ⇒ 生产默认档）。
+afterAll(() => {
+  for (const [key, prev] of Object.entries(PREV_CC_ESCALATION_ENVS)) {
+    if (prev === undefined) delete process.env[key];
+    else process.env[key] = prev;
+  }
 });

@@ -4,16 +4,18 @@
  *
  * 被测对象：logShipper（HttpShipperTransport）：构造、log、_trimToCap、_flush 串行闩、_post 各失败路径、close
  * 守护的不变式：发送失败不得丢日志；串行闩必须防重入；超时/无效 URL 不得让进程抛错
- * 可证伪性：变异实测（局部）——`_post` 的「Bearer token」标题已实测未断言（§6 方法）
+ * 可证伪性：变异实测（局部）——`_post` 的「Bearer token」标题 2026-09-20 曾实测未断言；
+ *   2026-11-15（P2-10）已修复：测试服务端记录出站 `req.headers.authorization`，
+ *   用例真断言 `Bearer <token>` 随请求发出，并补「未配置 token 不携带该头」反向对照。
  *
  * ⚠️ 既往审计指出的边界（2026-09-20 逐条**内容复核**；原报告行号已漂移，按代码特征取证）
  *   标记：[仍有效] 复核后问题依旧 / [已修复] 已被后续修复解决 / [部分有效] 仅部分成立 /
  *   [已自陈] 用例内已记录并给出保留理由。复核证据见 `deliverables/AGENT工作总账与待办-2026-09-21.md` §2.9 测试资产。
- *   - [仍有效·已实测] `:299-307`（现形 `:320`）标题写「携带 Bearer token」而测试服务端从不读该头；`:383-388` 标题写「HTTPS 协议选择」而 `_post` 分支根本没被调用（deliverables/七维代码健康度深度审计-2026-09-18.md）
- *     变异实测确认（2026-09-20，`deliverables/AGENT工作总账与待办-2026-09-21.md` §6 方法）：让 utils/logShipper.js:306
- *       **永不写 `Authorization` 头** → 本文件 **27/27 全绿**；同点位 throw 正对照杀 **5 例**
- *       （含「携带 Bearer token」用例本身）⇒ 该标题**确未**被断言。用例 `:325` 自陈
- *       「服务端不校验，只是确认不报错」。⚠️ HTTPS 选择那半条见下条（2026-09-20 已静态确认）。
+ *   - [已修复·2026-11-15（P2-10）] `:299-307`（原行号）标题写「携带 Bearer token」而测试服务端从不读该头
+ *       （deliverables/七维代码健康度深度审计-2026-09-18.md）。变异实测曾确认（2026-09-20）让
+ *       utils/logShipper.js 永不写 `Authorization` 头 → 全绿。修复：服务端记录出站头并真断言
+ *       `Bearer <token>`（见 `_post()` describe 的 seenRequests）。`:383-388`「HTTPS 协议选择」半条**仍有效**（见下条）。
+ *   - [仍有效·静态确认] `:383-388`（现形 `:408-411`）标题写「HTTPS 协议选择 https 库（URL 解析分支）」
  *   - [仍有效·静态确认] `:383-388`（现形 `:408-411`）标题写「HTTPS 协议选择 https 库（URL 解析分支）」
  *       而函数体只断 `t.url`，`:410` 自陈「仅验证构造不报错；实际 HTTPS 请求会在 _post 里选 https 库」
  *       ⇒ **从不调用 `_post`**；`grep -n "_post(\[" src/tests/` 全仓其余用例一律打 `http://127.0.0.1`，
@@ -280,10 +282,14 @@ describe('HttpShipperTransport', () => {
   describe('_post()', () => {
     let server;
     let port;
+    // P2-10：记录每个入站请求的出站 Authorization 头，供「携带 Bearer token」
+    // 用例真断言（原版测试服务端从不读该头，该用例是空断言）。
+    const seenRequests = [];
 
     beforeAll((done) => {
       // 启动一个真实的本地 HTTP 服务器用于集成测试
       server = http.createServer((req, res) => {
+        seenRequests.push({ url: req.url, authorization: req.headers.authorization || null });
         // data 监听器职责是消费请求流推进到 'end'（不消费则 end 永不触发、
         // 响应挂起）；请求体内容本测试并不关心，按 lint 约定以 _ 前缀标注有意不用
         let _body = '';
@@ -336,11 +342,25 @@ describe('HttpShipperTransport', () => {
 
     test('携带 Bearer token', async () => {
       const t = createTransport({
-        url: `http://127.0.0.1:${port}/ok`,
+        url: `http://127.0.0.1:${port}/auth-check`,
         token: 'my-secret-token',
       });
-      // 如果 token 正确传递，请求应成功（服务端不校验，只是确认不报错）
       await expect(t._post(['auth-test'])).resolves.toBeUndefined();
+      // P2-10（2026-11-15）修复：原版只断言"请求成功"，服务端从不读该头 ⇒
+      // 变异"永不写 Authorization 头"也不红（见文件头审计记录）。现由服务端
+      // 实际记录出站请求头，真断言 Authorization 随请求发出。
+      const hits = seenRequests.filter((r) => r.url === '/auth-check');
+      expect(hits.length).toBeGreaterThan(0); // 前提自证：请求确实到达服务端并被记录
+      expect(hits[hits.length - 1].authorization).toBe('Bearer my-secret-token');
+      t.close();
+    });
+
+    test('未配置 token 时不携带 Authorization 头（反向对照）', async () => {
+      const t = createTransport({ url: `http://127.0.0.1:${port}/auth-check` });
+      await expect(t._post(['no-token'])).resolves.toBeUndefined();
+      const hits = seenRequests.filter((r) => r.url === '/auth-check');
+      expect(hits.length).toBeGreaterThan(0);
+      expect(hits[hits.length - 1].authorization).toBeNull();
       t.close();
     });
 

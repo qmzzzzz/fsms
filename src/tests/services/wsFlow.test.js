@@ -202,12 +202,6 @@ describe('WebSocket 全流程（批次 D2）', () => {
     socketRegistry.set(socket.id, socket);
     state.connectionCb(socket);
     await waitFor(() => socket.authenticated);
-    if (!socket.authenticated) {
-      console.error(
-        'AUTH4_DEBUG',
-        JSON.stringify({ emitted: socket.emitted, connected: socket.connected, id: socket.id })
-      );
-    }
     expect(socket.authenticated).toBe(true);
 
     // 捕获 join-room 监听器：setupEventHandlers 用 socket.on 注册，

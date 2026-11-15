@@ -6,6 +6,7 @@
 const Role = require('../models/Role');
 const Permission = require('../models/Permission');
 const User = require('../models/User');
+const ApiError = require('../utils/ApiError');
 const { withHoneypotExcluded } = require('../constants/honeypotAccounts'); // 角色维度的用户计数/清单同样不得把蜜罐账户算进去
 
 const userPermissionService = require('./userPermissionService');
@@ -98,7 +99,15 @@ class RoleService {
   }
 
   createRole(fields) {
-    return Role.create(fields);
+    return Role.create(fields).catch((err) => {
+      if (err?.code !== 11000) throw err; // 查重与落库间存在竞态窗口：并发同码输家由本文件 unique 索引以 E11000 兜底
+      throw new ApiError(
+        '角色状态已被其他操作修改，请刷新后重试',
+        409,
+        null,
+        'ROLE_STATE_CONFLICT'
+      ); // 转 409 让客户端知道是并发冲突（重试后得精确的 ROLE_CODE_TAKEN）
+    });
   }
 
   saveRole(role) {

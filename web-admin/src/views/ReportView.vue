@@ -236,6 +236,7 @@ echarts.use([PieChart, BarChart, TooltipComponent, LegendComponent, GridComponen
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { api, isCanceledError, resolveErrorMessage } from '@/utils/api'
 import { encryptPassword } from '@/utils/loginCipher'
+import { encryptionErrorMessage } from '@/utils/encryptionError'
 import { enterSubmit } from '@/utils/enterSubmit'
 
 const reportCards = computed(() =>
@@ -636,13 +637,8 @@ const buildExportCredential = async () => {
     return { encCurrentPassword: enc }
   } catch (e) {
     console.warn('[loginCipher] 导出二次验证口令加密失败，已阻断提交：', e?.message)
-    ElMessage.error(
-      e?.code === 'PUBLIC_KEY_PIN_MISMATCH'
-        ? t('login.publicKeyPinMismatch')
-        : e?.code === 'INSECURE_CONTEXT'
-          ? t('login.insecureContext')
-          : t('login.encryptionFailed')
-    )
+    // 文案统一走共享 helper（P2 收敛）：指纹不符/非安全上下文/通用失败三分支
+    ElMessage.error(encryptionErrorMessage(t, e))
     return null
   }
 }

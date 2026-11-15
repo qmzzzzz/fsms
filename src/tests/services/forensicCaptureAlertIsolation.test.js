@@ -6,6 +6,12 @@
  * 但它把 fail-open 的正确性押在了"另一个模块今天恰好不抛"上。契约要求是绝对口径。
  */
 
+// 写入前快照原值（env 泄漏收口）：FORENSIC_WAL_PATH 由 lifecycle 的 startup() 运行期现读，
+// 不还原的话同 worker 后续套件拿到的是空串 ⇒ 取证 WAL 被静默关掉
+const PREV_FORENSIC_ENVS = {
+  FORENSIC_CAPTURE_ENABLED: process.env.FORENSIC_CAPTURE_ENABLED,
+  FORENSIC_WAL_PATH: process.env.FORENSIC_WAL_PATH,
+};
 process.env.FORENSIC_CAPTURE_ENABLED = 'true';
 process.env.FORENSIC_WAL_PATH = '';
 
@@ -118,4 +124,12 @@ describe('告警抛错时的取证行为', () => {
     await svc.flush();
     expect(Model.insertMany).toHaveBeenCalledTimes(2);
   });
+});
+
+// env 随套件归还（快照见文件头）：被测模块已加载完，还原 env 不影响本文件
+afterAll(() => {
+  for (const [key, prev] of Object.entries(PREV_FORENSIC_ENVS)) {
+    if (prev === undefined) delete process.env[key];
+    else process.env[key] = prev;
+  }
 });

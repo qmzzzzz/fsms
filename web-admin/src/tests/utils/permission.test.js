@@ -27,10 +27,15 @@ describe('matchPermission', () => {
     expect(matchPermission([], 'user:*')).toBe(false)
   })
 
-  test('待校验权限为空视为通过（可选权限语义）', () => {
-    expect(matchPermission([], '')).toBe(true)
-    expect(matchPermission([], null)).toBe(true)
-    expect(matchPermission([], undefined)).toBe(true)
+  test('待校验权限为空 fail-closed（P3：空码只可能是调用缺陷，不得静默放行）', () => {
+    // 语义变更记录：旧行为「空权限码=可选权限，判真」已废弃——「无需权限」
+    // 由调用方在调用前短路表达（布局菜单/路由守卫均已如此），函数内判真
+    // 会让传错参数的缺陷变成无差别放行
+    expect(matchPermission([], '')).toBe(false)
+    expect(matchPermission([], null)).toBe(false)
+    expect(matchPermission([], undefined)).toBe(false)
+    // 即使持有全量通配，空码也拒绝（码本身不可信）
+    expect(matchPermission(['*:*'], '')).toBe(false)
   })
 
   test('null/undefined 权限列表安全拒绝', () => {

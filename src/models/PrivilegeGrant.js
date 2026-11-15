@@ -8,7 +8,11 @@
  */
 
 const mongoose = require('mongoose');
-const { PRIVILEGE_GRANT_STATUSES, MAX_GRANT_CODES } = require('../constants/privilegeGrant');
+const {
+  PRIVILEGE_GRANT_STATUSES,
+  MAX_GRANT_CODES,
+  REQUIRED_APPROVALS_HIGH_RISK,
+} = require('../constants/privilegeGrant');
 
 const approvalSchema = new mongoose.Schema(
   {
@@ -41,7 +45,14 @@ const privilegeGrantSchema = new mongoose.Schema(
     requestedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     requestedByName: { type: String, trim: true, maxlength: 50, default: '' },
     requestedAt: { type: Date, required: true },
-    approvals: { type: [approvalSchema], default: [] },
+    approvals: {
+      type: [approvalSchema],
+      default: [], // 上限见下方 validate：签批条数 ≤ REQUIRED_APPROVALS_HIGH_RISK（双人复核的天花板）
+      validate: {
+        validator: (v) => Array.isArray(v) && v.length <= REQUIRED_APPROVALS_HIGH_RISK, // approve 的 $push 由 requiredApprovals 闸着（distinct 达标即转 active、active 拒再签）；本闸兜绕过服务的 create/save 直写（$push 走 findOneAndUpdate 默认不跑校验，服务侧不依赖本闸）
+        message: `审批条数最多 ${REQUIRED_APPROVALS_HIGH_RISK} 条`,
+      },
+    },
     requiredApprovals: { type: Number, enum: [1, 2], required: true },
     highRisk: { type: Boolean, default: false },
     durationHours: { type: Number, required: true, min: 1, max: 168 },

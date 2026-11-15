@@ -91,7 +91,7 @@ groups:
       # （黑名单 fail-closed = 库挂时全量请求无法验证 = 全站拒绝；验证码 fail-closed
       # = 没人能登录）。是否收紧是产品决策，不是告警规则能代做的。
       - alert: SecurityFailOpenSustained
-        expr: increase(security_alerts_total{type=~"ip_blacklist_failopen|ratelimit_store_degraded|captcha_active_bound_lost|captcha_switch_db_fallback|audit_wal_permission_not_tightened|reauth_grant_store_degraded|idempotency_degraded"}[5m]) > 0
+        expr: increase(security_alerts_total{type=~"ip_blacklist_failopen|ratelimit_store_degraded|captcha_active_bound_lost|captcha_issue_store_degraded|captcha_switch_db_fallback|audit_wal_permission_not_tightened|reauth_grant_store_degraded|idempotency_degraded|security_alert_webhook_unsigned_dropped"}[5m]) > 0
         for: 10m
         labels:
           severity: critical

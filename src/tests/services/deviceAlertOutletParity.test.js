@@ -124,7 +124,7 @@ const bucketsOf = (expectation) => Object.keys(expectation).filter((k) => expect
  * expiryUnknown 的成员表**单独一张**，不塞进上面的 `expect`。
  *
  * 因为这一档与四档不互斥：一台"没登记有效期且已过检查期"的设备同时在
- * expiryUnknown 与 needMaintenance 里，`constants/deviceAlerts.js:23-24` 的
+ * expiryUnknown 与 needMaintenance 里，`constants/deviceAlerts.js:25-26` 的
  * "档与档互斥 ⇒ 各档之和可与 total 对齐"只对到期/排期那几档成立。
  * 若把它并进 expect，"每台至多属一档"的前提自证会被我自己的数据打红，
  * 而正确的做法（承认重叠）反而看不见。

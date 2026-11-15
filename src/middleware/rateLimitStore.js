@@ -1,13 +1,40 @@
 /**
  * 限流共享存储适配层
- *
- * 从 rateLimit.js 搬出：那个文件在体积棘轮（max-lines 300）的红线上，
- * 而存储适配与限流器定义是两件事——前者只认 store 接口，后者只认键与阈值。
- * 行为逐字节未动（搬运时做过 sha 对账）。
+ * 从 rateLimit.js 搬出：那个文件在体积棘轮（max-lines 300）的红线上，而存储适配与限流器定义是两件事——前者只认 store 接口，后者只认键与阈值。行为逐字节未动（搬运时做过 sha 对账）。
  */
 
 const rateLimit = require('express-rate-limit');
 const logger = require('../utils/logger');
+
+/**
+ * 降级/恢复信号对（每份 store 一个，闭包标志自持；从 makeSharedStore 拆出是体积棘轮的要求，语义不变）。
+ * 存储运行期异常只告警一次：降级后每个请求都会走到兜底分支，逐次告警会把日志刷满，而这条告警要传达的只是「共享计数已退化为进程内计数」这一个事实。
+ */
+const makeDegradationSignal = (prefix) => {
+  let failureLogged = false;
+  return {
+    /** 指标必须**每次**都发（计数器的价值在于速率，不是"发生过"）：降级态只写日志等于没有可告警信号——`grep 日志` 不是运维动作，而这条降级意味着限流配额在多副本下被放大 N 倍（暴力破解防护同时失真）。走 incSecurityAlert 与 checkIPBlacklist 的 ip_blacklist_failopen 同一机制，从而被 alert-rules 的「安全告警突增」（sum(increase(security_alerts_total[10m])) >= 10）一并覆盖，不需要新增规则。采集失败不影响降级主流程。 */
+    degrade(op, err) {
+      try {
+        require('../utils/metrics').incSecurityAlert('ratelimit_store_degraded', 'high');
+      } catch (_) {} /* 指标端不可用不影响限流降级 */
+      if (failureLogged) return;
+      failureLogged = true;
+      logger.warn(
+        `限流共享存储运行期异常（${prefix}/${op}），已降级为进程内计数（多副本下等效放大）：${err.message}`
+      );
+    },
+    /**
+     * 恢复信号：降级标志必须**可复位**。
+     * 原实现只置位不复位 ⇒ 「打一次日志」在进程生命周期内只可能发生一次：Redis 恢复后再次降级（第二次抖动）时日志与告警**都不再出现**，现场看起来"从没降级过"。指标侧因为每次都发所以仍可观测，但日志这条最直接的人工排障线索会永久沉默——这正是本仓反复出现的「一次性信号被当成持续信号」形态。
+     */
+    recover() {
+      if (!failureLogged) return;
+      failureLogged = false;
+      logger.info(`限流共享存储已恢复（${prefix}）：共享计数重新生效`);
+    },
+  };
+};
 
 /**
  * 限流存储工厂
@@ -54,41 +81,7 @@ function makeSharedStore(prefix) {
   // 修复：init 动态分发到当前 active，并记录 options；RedisStore 就绪切换后
   // 显式补一次 init，保证共享存储完成与挂载期等价的初始化。
   let lastInitOptions = null;
-  // 存储运行期异常只告警一次：降级后每个请求都会走到兜底分支，逐次告警会把日志刷满，
-  // 而这条告警要传达的只是「共享计数已退化为进程内计数」这一个事实。
-  let failureLogged = false;
-  const noteStoreDegraded = (op, err) => {
-    // 指标必须**每次**都发（计数器的价值在于速率，不是"发生过"）：
-    // 降级态只写日志等于没有可告警信号——`grep 日志` 不是运维动作，
-    // 而这条降级意味着限流配额在多副本下被放大 N 倍（暴力破解防护同时失真）。
-    // 走 incSecurityAlert 与 checkIPBlacklist 的 ip_blacklist_failopen 同一机制，
-    // 从而被 alert-rules 的「安全告警突增」（sum(increase(security_alerts_total[10m])) >= 10）
-    // 一并覆盖，不需要新增规则。采集失败不影响降级主流程。
-    try {
-      require('../utils/metrics').incSecurityAlert('ratelimit_store_degraded', 'high');
-    } catch (_) {
-      /* 指标端不可用不影响限流降级 */
-    }
-    if (failureLogged) return;
-    failureLogged = true;
-    logger.warn(
-      `限流共享存储运行期异常（${prefix}/${op}），已降级为进程内计数（多副本下等效放大）：${err.message}`
-    );
-  };
-  /**
-   * 恢复信号：降级标志必须**可复位**。
-   *
-   * 原实现只置位不复位 ⇒ 「打一次日志」在进程生命周期内只可能发生一次：
-   * Redis 恢复后再次降级（第二次抖动）时日志与告警**都不再出现**，
-   * 现场看起来"从没降级过"。指标侧因为每次都发所以仍可观测，但日志这条
-   * 最直接的人工排障线索会永久沉默——这正是本仓反复出现的
-   * 「一次性信号被当成持续信号」形态。
-   */
-  const noteStoreRecovered = () => {
-    if (!failureLogged) return;
-    failureLogged = false;
-    logger.info(`限流共享存储已恢复（${prefix}）：共享计数重新生效`);
-  };
+  const signal = makeDegradationSignal(prefix);
 
   /**
    * 把 active 从进程内兜底换成 RedisStore（调用方已确认 Redis 可用）。
@@ -108,24 +101,20 @@ function makeSharedStore(prefix) {
       logger.info(`限流共享存储已切到 Redis（${prefix}），跨实例计数开始生效`);
     } catch (err) {
       // 建 store 失败：留在进程内计数，下一个请求再探（与"不做粘滞降级"同口径）
-      noteStoreDegraded('upgrade', err);
+      signal.degrade('upgrade', err);
     }
   };
 
   /** 请求路径上的补切换：仍是进程内 store 且 Redis 已可用才动手 */
   const upgradeIfNeeded = () => {
-    if (active !== fallback) return;
-    if (!require('../services/sharedCache').isRedisEnabled()) return;
+    if (active !== fallback || !require('../services/sharedCache').isRedisEnabled()) return;
     switchToRedis();
   };
 
   (async () => {
     const { initSharedCache, isRedisEnabled } = require('../services/sharedCache');
     await initSharedCache();
-    if (isRedisEnabled()) {
-      switchToRedis();
-      return;
-    }
+    if (isRedisEnabled()) return switchToRedis();
     // 原实现在这里 `return`：一声不响地把限流永久绑成每实例一份
     logger.warn(
       `限流共享存储暂用进程内计数（${prefix}：REDIS_URL 已配置但 Redis 尚未就绪），` +
@@ -134,6 +123,25 @@ function makeSharedStore(prefix) {
   })().catch((err) => {
     logger.warn(`限流共享存储初始化失败（${prefix}），回退进程内计数：${err.message}`);
   });
+  // Store 四方法的统一降级出口（2026-11-14 审计：resetKey/resetAll 原先没有包装）。
+  // 运行期故障必须降级而不是把请求打死：express-rate-limit 的 passOnStoreError
+  // 默认 false（index.cjs:671），store.increment 的 rejection 会在其内部被原样
+  // 重新抛出（:715-726），而 ipLimiter / generalLimiter 挂在 `/api/` 上——
+  // Redis 一次重启/抖动即全站 500。回落到进程内 MemoryStore 计数：
+  // 宁可退回「每实例一份」的弱口径（多副本等效放大 N 倍），也不拿可用性换一致性。
+  // 不做粘滞降级：active 仍是 RedisStore，Redis 恢复后下一个请求自动回到共享计数。
+  // 共享存储真的答上了 ⇒ 复位降级标志（见 makeDegradationSignal.recover）。
+  const degrade = async (op, run, fall) => {
+    try {
+      upgradeIfNeeded();
+      const r = await run();
+      if (active !== fallback) signal.recover();
+      return r;
+    } catch (err) {
+      signal.degrade(op, err);
+      return fall();
+    }
+  };
   return {
     // 让这个包装对象如实申报自己的键前缀。
     // express-rate-limit 的 singleCount 校验用 `store.localKeys ? store : store.constructor.name`
@@ -146,42 +154,48 @@ function makeSharedStore(prefix) {
     // 取值必须与内部 RedisStore 的前缀一致；该字段库内仅被 singleCount 读取，不参与计数。
     // 不要改 localKeys：它还参与 creationStack 判定（index.cjs:361）。
     prefix: `rl:${prefix}:`,
-    // 运行期故障必须降级而不是把请求打死：express-rate-limit 的 passOnStoreError
-    // 默认 false（index.cjs:671），store.increment 的 rejection 会在其内部被原样
-    // 重新抛出（:715-726），而 ipLimiter / generalLimiter 挂在 `/api/` 上——
-    // Redis 一次重启/抖动即全站 500。回落到进程内 MemoryStore 计数：
-    // 宁可退回「每实例一份」的弱口径（多副本等效放大 N 倍），也不拿可用性换一致性。
-    // 不做粘滞降级：active 仍是 RedisStore，Redis 恢复后下一个请求自动回到共享计数。
     async increment(...a) {
-      try {
-        upgradeIfNeeded();
-        const r = await active.increment(...a);
-        // 共享存储真的答上了 ⇒ 复位降级标志（见 noteStoreRecovered）
-        if (active !== fallback) noteStoreRecovered();
-        return r;
-      } catch (err) {
-        noteStoreDegraded('increment', err);
-        return fallback.increment(...a);
-      }
+      return degrade(
+        'increment',
+        () => active.increment(...a),
+        () => fallback.increment(...a)
+      );
     },
+    // decrement 是响应收尾路径：skipSuccessfulRequests 的登录类限流器会在那里调到它，
+    // 那一路没有 express-rate-limit 的错误兜底，抛出去就是未处理拒绝——降级必须就地完成。
     async decrement(...a) {
-      try {
-        upgradeIfNeeded();
-        const r = await active.decrement(...a);
-        if (active !== fallback) noteStoreRecovered();
-        return r;
-      } catch (err) {
-        // skipSuccessfulRequests 的登录类限流器会在响应收尾时调到这里，
-        // 那一路没有 express-rate-limit 的错误兜底，抛出去就是未处理拒绝
-        noteStoreDegraded('decrement', err);
-        return fallback.decrement(...a);
-      }
+      return degrade(
+        'decrement',
+        () => active.decrement(...a),
+        () => fallback.decrement(...a)
+      );
     },
+    // resetKey/resetAll 与 increment/decrement 同一降级口径（express-rate-limit 的 Store
+    // 接口方法都暴露在包装对象上，调用方不应替它兜错）：Redis 抛错时回落进程内计数并
+    // 走同一套降级信号，而不是让 rejection 冒泡成未处理拒绝——测试 afterEach 的 resetAll
+    // 与管理复位动作都在这一路。
     async resetKey(...a) {
-      return active.resetKey(...a);
+      return degrade(
+        'resetKey',
+        () => active.resetKey(...a),
+        () => fallback.resetKey(...a)
+      );
     },
     async resetAll() {
-      if (active.resetAll) return active.resetAll();
+      try {
+        upgradeIfNeeded();
+        // active 没有 resetAll：维持旧契约（静默，不抛错）——此刻没有任何共享命令发出，
+        // 也不算「恢复」，复位降级标志的判据只认真的成功应答
+        if (!active.resetAll) return undefined;
+        return await degrade(
+          'resetAll',
+          () => active.resetAll(),
+          () => fallback.resetAll()
+        );
+      } catch (err) {
+        signal.degrade('resetAll', err);
+        return fallback.resetAll();
+      }
     },
     init(options) {
       lastInitOptions = options;

@@ -227,30 +227,36 @@ describe('批次E 架构与性能加固回归', () => {
      */
     test('fn 悬挂持锁超时 → 后续写入被冻结拒绝，不得从旧尾续链', async () => {
       jest.resetModules();
-      process.env.AUDIT_CHAIN_LOCK_TIMEOUT_MS = '80';
-      const { withChainLock } = require('../../utils/auditChain');
+      // 快照 + try/finally：任何一步断言失败都会跳过文件尾的 delete，
+      // 80ms 预算就会漏给同 worker 后续套件（链锁预算是 withChainLock 每次现读的）
+      const prevLockTimeout = process.env.AUDIT_CHAIN_LOCK_TIMEOUT_MS;
+      try {
+        process.env.AUDIT_CHAIN_LOCK_TIMEOUT_MS = '80';
+        const { withChainLock } = require('../../utils/auditChain');
 
-      // 第一个持有者永不 settle（模拟 Mongo 无响应）
-      const hung = withChainLock(() => new Promise(() => {})).catch((e) => e);
+        // 第一个持有者永不 settle（模拟 Mongo 无响应）
+        const hung = withChainLock(() => new Promise(() => {})).catch((e) => e);
 
-      // 超时后的第二次调用必须立刻被冻结窗口拒绝，且 fn 一次都不能执行
-      const nextFn = jest.fn().mockResolvedValue('ok');
-      await expect(withChainLock(nextFn)).rejects.toThrow(/冻结窗口/);
-      expect(nextFn).not.toHaveBeenCalled();
+        // 超时后的第二次调用必须立刻被冻结窗口拒绝，且 fn 一次都不能执行
+        const nextFn = jest.fn().mockResolvedValue('ok');
+        await expect(withChainLock(nextFn)).rejects.toThrow(/冻结窗口/);
+        expect(nextFn).not.toHaveBeenCalled();
 
-      const hungErr = await hung;
-      expect(hungErr).toBeInstanceOf(Error);
-      expect(hungErr.message).toContain('超时');
+        const hungErr = await hung;
+        expect(hungErr).toBeInstanceOf(Error);
+        expect(hungErr.message).toContain('超时');
 
-      // 冻结是进程内状态：新进程（新模块实例）不应继承上一进程的悬挂窗口
-      jest.resetModules();
-      const fresh = require('../../utils/auditChain');
-      await expect(fresh.withChainLock(() => Promise.resolve('after-restart'))).resolves.toBe(
-        'after-restart'
-      );
-
-      delete process.env.AUDIT_CHAIN_LOCK_TIMEOUT_MS;
-      jest.resetModules();
+        // 冻结是进程内状态：新进程（新模块实例）不应继承上一进程的悬挂窗口
+        jest.resetModules();
+        const fresh = require('../../utils/auditChain');
+        await expect(fresh.withChainLock(() => Promise.resolve('after-restart'))).resolves.toBe(
+          'after-restart'
+        );
+      } finally {
+        if (prevLockTimeout === undefined) delete process.env.AUDIT_CHAIN_LOCK_TIMEOUT_MS;
+        else process.env.AUDIT_CHAIN_LOCK_TIMEOUT_MS = prevLockTimeout;
+        jest.resetModules();
+      }
     });
 
     test('正常 fn 不受超时影响且串行化语义保持', async () => {
@@ -384,23 +390,30 @@ describe('批次E 架构与性能加固回归', () => {
   describe('告警频控表容量上限', () => {
     test('超过硬上限时清空，Map 不随攻击者可控的 key 无界增长', () => {
       jest.resetModules();
-      process.env.ALERT_RATE_LIMIT_MAX = '50';
-      const logger = require('../../utils/logger');
-      const spy = jest.spyOn(logger, 'error').mockImplementation(() => {});
-      const { shouldSendAlert } = require('../../services/securityAlert');
+      // 快照 + try/finally：50 的上限若因断言失败跳过尾部 delete，会漏给同 worker 后续套件
+      //（告警频控容量是 shouldSendAlert 每次现读的）
+      const prevAlertMax = process.env.ALERT_RATE_LIMIT_MAX;
+      try {
+        process.env.ALERT_RATE_LIMIT_MAX = '50';
+        const logger = require('../../utils/logger');
+        const spy = jest.spyOn(logger, 'error').mockImplementation(() => {});
+        const { shouldSendAlert } = require('../../services/securityAlert');
 
-      // 模拟轮换用户名撞库：每次 alertKey 都不同且均未过期
-      for (let i = 0; i < 200; i += 1) {
-        shouldSendAlert(`brute_force_user_attacker_${i}`);
+        // 模拟轮换用户名撞库：每次 alertKey 都不同且均未过期
+        for (let i = 0; i < 200; i += 1) {
+          shouldSendAlert(`brute_force_user_attacker_${i}`);
+        }
+
+        // 触发过清空告警（说明上限确实生效）
+        expect(spy).toHaveBeenCalled();
+        expect(spy.mock.calls[0][0]).toContain('硬上限');
+
+        spy.mockRestore();
+      } finally {
+        if (prevAlertMax === undefined) delete process.env.ALERT_RATE_LIMIT_MAX;
+        else process.env.ALERT_RATE_LIMIT_MAX = prevAlertMax;
+        jest.resetModules();
       }
-
-      // 触发过清空告警（说明上限确实生效）
-      expect(spy).toHaveBeenCalled();
-      expect(spy.mock.calls[0][0]).toContain('硬上限');
-
-      spy.mockRestore();
-      delete process.env.ALERT_RATE_LIMIT_MAX;
-      jest.resetModules();
     });
 
     test('频控语义未被破坏：同一 key 窗口内只放行一次', () => {

@@ -27,6 +27,9 @@
 
 const CHANNEL_NAME = 'auth-session-sync'
 const STORAGE_MIRROR_KEY = 'authSessionSyncMirror'
+/** 兜底镜像键的写方延迟摘除窗口：storage 事件投递的是写入瞬间的值，
+ * 窗口内摘除不会吞掉已排队的投递（P3：用户名不滞留 localStorage） */
+const MIRROR_TTL_MS = 1000
 
 let channel = null
 let handler = null
@@ -75,7 +78,21 @@ const broadcastAuthChange = (type, user) => {
   // 兜底：写 localStorage 触发其他标签页的 storage 事件。
   // 值必须与上次不同（含时间戳保证单调递增），否则不会触发事件
   try {
-    localStorage.setItem(STORAGE_MIRROR_KEY, JSON.stringify(payload))
+    const raw = JSON.stringify(payload)
+    localStorage.setItem(STORAGE_MIRROR_KEY, raw)
+    // P3：镜像键只在投递瞬间有意义，里面的 username 属用户可读的持久化残留
+    // （存储巡检口径：用后即清）。写方延迟摘除：只摘自己写的那份
+    // （值仍相同才动，避免覆盖别的标签页刚写的新广播）；接收方也会摘（见下），
+    // 两边互补——写方标签页先关掉时由接收方兜底。
+    setTimeout(() => {
+      try {
+        if (localStorage.getItem(STORAGE_MIRROR_KEY) === raw) {
+          localStorage.removeItem(STORAGE_MIRROR_KEY)
+        }
+      } catch (_) {
+        /* 摘除失败只是残留，不影响主流程 */
+      }
+    }, MIRROR_TTL_MS)
   } catch (_) {
     /* 隐私模式等场景写入失败，仅失去跨标签页同步能力 */
   }
@@ -106,6 +123,13 @@ const initSessionSync = (onEvent) => {
       if (e.key !== STORAGE_MIRROR_KEY || !e.newValue) return
       try {
         handler(JSON.parse(e.newValue))
+        // P3：接收方用后即清——用户名不滞留 localStorage。删除触发的
+        // storage 事件 newValue=null，会被上方守卫忽略，不会造成回环
+        try {
+          localStorage.removeItem(STORAGE_MIRROR_KEY)
+        } catch (_) {
+          /* 摘除失败只是残留 */
+        }
       } catch (_) {
         /* 非法负载忽略 */
       }

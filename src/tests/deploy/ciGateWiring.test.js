@@ -72,6 +72,10 @@ const CI_ENFORCED_GATE_SCRIPTS = [
   // P1-5（2026-10-30）：部署前宿主时钟检查。工作流里删掉该调用不会惊动别的测试，
   // 而它挡的是「JWT nbf/exp、TOTP 30 秒窗口锚在未同步时钟上」的整类问题。
   'scripts/check-clock-sync.js',
+  // P1-1（2026-11-14）：CHANGELOG 结构门禁——「未发布+1.0.0」单元 4 次自我拼接、
+  // 标题残片嵌进句中的腐化不惊动任何构建/测试；判据由
+  // src/tests/docs/changelogStructureGate.test.js 钉住，这里只钉接线（删 ci.yml 步骤即红）。
+  'scripts/check-changelog-structure.js',
   'scripts/login-key-pin.js',
 ];
 

@@ -53,7 +53,6 @@
                     v-model="finding.deviceId"
                     :placeholder="$t('inspectionResult.issueDeviceLabel')"
                     style="width: 100%"
-                    @change="(val) => selectDevice(val, index)"
                   >
                     <el-option
                       v-for="item in deviceOptions"
@@ -210,6 +209,7 @@ import { ref, reactive, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { api, isHandledApiError } from '@/utils/api'
+import { useLatestRequest } from '@/composables/useLatestRequest'
 
 const { t } = useI18n()
 
@@ -339,17 +339,10 @@ function validateFindings(rule, value, callback) {
 }
 
 // 选择设备
-const selectDevice = async (deviceId, _index) => {
-  if (!deviceId) return
-
-  try {
-    const res = await api.devices.getById(deviceId)
-    // 设备信息仅用于显示，不在提交数据中使用
-    void res
-  } catch (error) {
-    // 静默处理
-  }
-}
+// P3：此处原为 api.devices.getById 的死请求——响应 void res 整个丢弃，
+// 「设备信息仅用于显示」从未实现（显示用的 deviceCode/deviceName 来自
+// deviceOptions 的 label）。该 GET 已随 @change 绑定一并删除：选中动作
+// 不需要任何网络往返。
 
 // 添加问题
 const addFinding = () => {
@@ -364,12 +357,18 @@ const removeFinding = (index) => {
 }
 
 // 加载设备列表
+// P3：竞态守卫。watch(visible) 每次打开都会触发 loadDevices，快开快关/慢网时
+// 上一轮的 GET 可能比本轮更晚返回——无守卫时后到的旧响应会把新一轮的选项与
+// partial/failed 状态整块覆盖回旧值。门票式守卫与 InspectionReviewForm 同款。
+const loadDevicesGuard = useLatestRequest()
 const loadDevices = async () => {
+  const isCurrent = loadDevicesGuard()
   deviceState.kind = 'ok'
   deviceState.loaded = 0
   deviceState.total = 0
   try {
     const res = await api.devices.getList({ limit: 100 })
+    if (!isCurrent()) return
     deviceOptions.value = res.data.data.map((item) => ({
       value: item._id,
       label: `${item.deviceCode} - ${item.deviceName} (${item.deviceType})`,
@@ -385,6 +384,7 @@ const loadDevices = async () => {
       deviceState.total = total
     }
   } catch (error) {
+    if (!isCurrent()) return
     // 这张表是巡检闭环的最后一步：漏记的隐患不会留下任何痕迹，
     // 所以失败既不能静默，也不能留着上一次的半截选项让人以为已经加载完。
     deviceOptions.value = []

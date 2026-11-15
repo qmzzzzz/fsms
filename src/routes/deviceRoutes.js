@@ -39,17 +39,16 @@ const listQueryValidation = [
 
 // 验证规则
 const createDeviceValidation = [
+  // deviceCode 必填与上限都与 models/FireDevice 对齐（required:true + maxlength:50）：缺省时
+  // 原先落到模型层才拒绝，而 errorHandler 在非 development 下刻意不回传字段级明细
+  // （避免泄露 schema），提交者只拿到一句笼统的"数据验证失败"。与同文件 installDate
+  // 的收紧同型（前端 DeviceView 虽标"留空自动生成"，但服务端从未实现自动生成）——
+  // 只有路由校验层能给出"哪个字段、为什么"，所以边界必须写在这一层。
   mustBeString('deviceCode', '设备编号'),
   body('deviceCode')
-    .optional()
     .trim()
     .notEmpty()
     .withMessage('设备编号不能为空')
-    // 上限与 models/FireDevice 的 maxlength:50 对齐。不一致时的后果不是 500，
-    // 而是**用户在生产拿不到任何可读原因**：51~64 字符能通过路由校验，
-    // 落在模型上变成 ValidationError，而 errorHandler 在生产环境刻意不回传
-    // 字段级明细（避免泄露 schema），最终只剩一句笼统的"数据验证失败"。
-    // 只有路由校验层能给出"哪个字段、为什么"，所以边界必须写在这一层。
     .isLength({ max: 50 })
     .withMessage('设备编号不能超过 50 个字符'),
   mustBeString('deviceName', '设备名称'),
@@ -80,7 +79,7 @@ const createDeviceValidation = [
     .withMessage('请提供有效的投用日期'),
   body('expiryDate').optional({ values: 'falsy' }).isISO8601().withMessage('请提供有效的到期日期'),
   body('images').optional().isArray({ max: 10 }).withMessage('图片最多上传 10 张'),
-  // 逐元素长度：模型侧 `images: [String]` 无任何约束（FireDevice.js:149），条数已限 10，
+  // 逐元素长度：模型侧 `images: [String]` 无任何约束（FireDevice.js:151），条数已限 10，
   // 元素长度此前只剩 1MB 的 body 总闸兜着。仓内既无上传接口、前端也不提交该字段
   // ⇒ 它是纯 API 字段，语义只能是"图片 URL"，故按通用 URL 长度上界定界。
   // 注：闸门必须**贴着**它保护的链（`bodyStringGateCoverage` 按前一行判定），

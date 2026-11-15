@@ -1,26 +1,13 @@
 /**
  * ip2region xdb 离线检索器（零依赖实现）
- *
- * 数据文件 src/data/ip2region.xdb 来自 ip2region 官方仓库
- * （github.com/lionsoul2014/ip2region，Apache-2.0），入库版本与刷新方式见
- * 同目录 README.md 与 scripts/update-ip2region.js。
- *
- * 为什么不用 npm 包（ip2region / ip2region-ts 等）：项目纪律是尽量不引入
- * 新依赖，而 xdb v2 格式是公开且稳定的定长索引结构，核心检索只需一个
- * Buffer + 向量索引 + 二分，约百行即可全覆盖——把「依赖」换成「数据文件」，
- * 检索代码自己持有，升级数据不升级代码。
- *
+ * 数据文件 src/data/ip2region.xdb 来自 ip2region 官方仓库（github.com/lionsoul2014/ip2region，Apache-2.0），入库版本与刷新方式见同目录 README.md 与 scripts/update-ip2region.js。
+ * 为什么不用 npm 包（ip2region / ip2region-ts 等）：项目纪律是尽量不引入新依赖，而 xdb v2 格式是公开且稳定的定长索引结构，核心检索只需一个 Buffer + 向量索引 + 二分，约百行即可全覆盖——把「依赖」换成「数据文件」，检索代码自己持有，升级数据不升级代码。
  * xdb v2 文件布局（全部小端）：
  *   [0, 256)     头部：version(2) + indexPolicy(2) + createTime(4) + startIndexPtr(4) + endIndexPtr(4)
  *   [256, 256+256*256*8)  向量索引：按 IP 前两字节 (il0<<8|il1) 定位该桶的段索引区间指针对
- *   之后          数据区：先是去重后的地区字符串，末尾是定长 14 字节/条的段索引数组
- *                （startIp(4) + endIp(4) + dataLen(2) + dataPtr(4)）
- * 检索：向量索引定位桶 → 桶内按 14 字节步长二分 → dataPtr 处取地区串
- * 「国家|区域|省份|城市|ISP」，未命中段返回 ''，'0' 为占位符。
- *
- * 仅支持 IPv4：v2 的 v6 库是另一个文件（ip2region_v6.xdb），本服务当前未随库
- * 分发，公网 IPv6 查询在上层返回 null（内网族 v6 由服务层标稳定码 private，
- * 见 ipLocationService 与 constants/ipLocationCodes.js）。
+ *   之后          数据区：先是去重后的地区字符串，末尾是定长 14 字节/条的段索引数组（startIp(4) + endIp(4) + dataLen(2) + dataPtr(4)）
+ * 检索：向量索引定位桶 → 桶内按 14 字节步长二分 → dataPtr 处取地区串「国家|区域|省份|城市|ISP」，未命中段返回 ''，'0' 为占位符。
+ * 仅支持 IPv4：v2 的 v6 库是另一个文件（ip2region_v6.xdb），本服务当前未随库分发，公网 IPv6 查询在上层返回 null（内网族 v6 由服务层标稳定码 private，见 ipLocationService 与 constants/ipLocationCodes.js）。
  */
 const fs = require('fs');
 const path = require('path');
@@ -32,6 +19,8 @@ const VECTOR_INDEX_BASE = 256;
 const SEGMENT_INDEX_SIZE = 14;
 /** 头部固定长度 */
 const HEADER_SIZE = 256;
+/** 数据区基线（向量索引区结束处）：合法 dataPtr 只能落在它之后的地区串区。 */
+const DATA_REGION_BASE = VECTOR_INDEX_BASE + 256 * 256 * 8;
 
 /** 数据文件位置固定在仓库内（Docker 镜像 COPY src/ 后相对路径不变），不接受运行时传参 */
 const DATA_FILE = path.join(__dirname, '..', 'data', 'ip2region.xdb');
@@ -41,8 +30,7 @@ const parseIPv4 = (text) => {
   if (typeof text !== 'string') return null;
   const m = text.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
   if (!m) return null;
-  // 逐段拒绝前导零（`010` 会被宽松解析器当八进制重解释成 8，与 ipUtils 的
-  // CANONICAL_OCTET 同一判据）：归属地不做"帮你猜写法"
+  // 逐段拒绝前导零（`010` 会被宽松解析器当八进制重解释成 8，与 ipUtils 的 CANONICAL_OCTET 同一判据）：归属地不做"帮你猜写法"
   const octet = /^(?:0|[1-9]\d?|1\d\d|2[0-4]\d|25[0-5])$/;
   const parts = [m[1], m[2], m[3], m[4]];
   if (parts.some((s) => !octet.test(s))) return null;
@@ -51,16 +39,8 @@ const parseIPv4 = (text) => {
 };
 
 /**
- * 结构校验 + 构建检索句柄。坏数据在加载期即刻暴露（服务层 fail-soft 降级为
- * 不显示归属地并打日志），而不是每条查询都走一遍防御分支。
- *
- * 头部两个指针只是下限：检索的随机读发生在**向量索引区**的 65536 对桶指针上，
- * 任一桶指针损坏（越文件尾、不对齐 14 字节、sPtr>ePtr）会让二分读到桶外垃圾
- * 字节——最坏形态不是抛错而是"命中伪段返回随机归属地"（静默给错答案）。
- * 因此对向量区做一次全量扫描（加载期一次性 O(65536) 定长读），把完整性防线
- * 从"只看头部"补到全文件；scripts/update-ip2region.js 的校验经 loadFromBuffer
- * 自动继承这层加固。
- *
+ * 结构校验 + 构建检索句柄。坏数据在加载期即刻暴露（服务层 fail-soft 降级为不显示归属地并打日志），而不是每条查询都走一遍防御分支。
+ * 头部两个指针只是下限：检索的随机读发生在**向量索引区**的 65536 对桶指针上，任一桶指针损坏（越文件尾、不对齐 14 字节、sPtr>ePtr）会让二分读到桶外垃圾字节——最坏形态不是抛错而是"命中伪段返回随机归属地"（静默给错答案）。因此对向量区做一次全量扫描（加载期一次性 O(65536) 定长读），把完整性防线从"只看头部"补到全文件；scripts/update-ip2region.js 的校验经 loadFromBuffer 自动继承这层加固。
  * @param {Buffer} buffer 完整的 xdb 文件内容
  * @returns {{ buffer: Buffer, version: number, startIndexPtr: number, endIndexPtr: number }}
  */
@@ -84,8 +64,7 @@ const loadFromBuffer = (buffer) => {
       `xdb 段索引指针越界（start=${startIndexPtr}, end=${endIndexPtr}, size=${buffer.length}）`
     );
   }
-  // 向量区全量校验：每桶指针必须落在段索引数组界内且按 14 字节对齐。空桶（sPtr=0）与
-  // 零长桶合法；末桶 ePtr 允许等于 buffer.length——闭区间 [0, N-1] 二分最大读位 ePtr-14。
+  // 向量区全量校验：每桶指针必须落在段索引数组界内且按 14 字节对齐。空桶（sPtr=0）与零长桶合法；末桶 ePtr 允许等于 buffer.length——闭区间 [0, N-1] 二分最大读位 ePtr-14。
   for (let i = 0; i < 256 * 256; i += 1) {
     const sPtr = buffer.readUInt32LE(VECTOR_INDEX_BASE + i * 8);
     const ePtr = buffer.readUInt32LE(VECTOR_INDEX_BASE + i * 8 + 4);
@@ -110,8 +89,7 @@ const loadDataFile = () => loadFromBuffer(fs.readFileSync(DATA_FILE));
  *
  * @param {{ buffer: Buffer }} handle loadFromBuffer/loadDataFile 的返回值
  * @param {string} ipText 点分十进制 IPv4
- * @returns {string|null} 「国家|区域|省份|城市|ISP」原始串；非 IPv4 返回 null；
- *                          向量桶为空（保留地址等）返回 ''
+ * @returns {string|null} 「国家|区域|省份|城市|ISP」原始串；非 IPv4 返回 null；向量桶为空（保留地址等）返回 ''
  */
 const searchRaw = (handle, ipText) => {
   const ip = parseIPv4(ipText);
@@ -141,9 +119,8 @@ const searchRaw = (handle, ipText) => {
     }
     const dataLen = buffer.readUInt16LE(p + 8);
     const dataPtr = buffer.readUInt32LE(p + 10);
-    // 数据串越界 = 段条目被改写（加载期校验覆盖不到段内字段）：按未命中降级，
-    // 绝不让 toString 抛 ERR_OUT_OF_RANGE 打破 fail-soft 契约
-    if (dataPtr + dataLen > buffer.length) return '';
+    // 段内字段校验（加载期校验覆盖不到段内条目）：上界=串尾越文件尾；下界=dataPtr 指进头部/向量索引区——旧实现只查上界，指进向量区的伪段会让 toString 读出垃圾字节当地区串返回（静默给错答案，正是本文件文档里最忌讳的失败形态）。下界取数据区基线：实测真实 xdb 的 min dataPtr 恰为 DATA_REGION_BASE、max dataPtr+dataLen 恰为 startIndexPtr，基线即数据区语义起点。两种越界都按未命中降级，绝不让 toString 抛 ERR_OUT_OF_RANGE 打破 fail-soft 契约
+    if (dataPtr < DATA_REGION_BASE || dataPtr + dataLen > buffer.length) return '';
     return buffer.toString('utf-8', dataPtr, dataPtr + dataLen);
   }
   // 落在段间隙（理论不该发生：段连续覆盖全网）；按未命中处理

@@ -120,7 +120,7 @@ describe('rolePermissionController 同级/上级角色改写闸', () => {
     expect(res.body.errors.errorCode).toBe('ROLE_PERM_PEER_OR_HIGHER_FORBIDDEN');
   });
 
-  test('低于自身层级的非内置角色 + 诱饵 targetUserId：合法全局改写不受该闸影响', async () => {
+  test('低于自身层级的非内置角色：合法全局改写不受同级闸影响（不带 targetUserId）', async () => {
     const lowRole = await Role.create({
       name: `同级闸低级_${stamp}`,
       code: `PGLOW_${stamp.toUpperCase()}`,
@@ -131,11 +131,53 @@ describe('rolePermissionController 同级/上级角色改写闸', () => {
 
     const res = await authed(midToken)
       .put(`/api/roles/${String(lowRole._id)}/permissions`)
-      .send({ permissions: [childPermId], targetUserId: decoyUserId });
+      .send({ permissions: [childPermId] });
 
-    // 低层级角色：level >= operatorMax 为假 → 同级闸不介入；非内置 → 走全局改写并成功
+    // 低层级角色：level >= operatorMax 为假 → 同级闸不介入；非内置且不带克隆参数 → 全局改写成功
     expect(res.status).toBe(200);
     const after = await Role.findById(lowRole._id).select('permissions').lean();
     expect(after.permissions.map(String)).toContain(String(childPermId));
+  });
+
+  test('非内置角色 + targetUserId：显式 400（静默丢弃改为注册码拒绝），角色不得被改写', async () => {
+    // 克隆分支只对内置角色成立：旧实现把 targetUserId 静默丢掉后照常全局改写，
+    // 客户端「以为只影响一个用户」实际改了整个角色权限表。现改为显式 400。
+    const lowRole = await Role.create({
+      name: `同级闸低级乙_${stamp}`,
+      code: `PGLOW2_${stamp.toUpperCase()}`,
+      level: 2,
+      isBuiltIn: false,
+      permissions: [],
+    });
+
+    const res = await authed(midToken)
+      .put(`/api/roles/${String(lowRole._id)}/permissions`)
+      .send({ permissions: [childPermId], targetUserId: decoyUserId });
+
+    expect(res.status).toBe(400);
+    expect(res.body.errors.errorCode).toBe('TARGET_USER_NOT_CLONABLE');
+    const after = await Role.findById(lowRole._id).select('permissions').lean();
+    expect(after.permissions.map(String)).not.toContain(String(childPermId));
+  });
+
+  test('非法权限 ID 片段：HTTP 面 400（路由校验链在控制器入口被消费），角色不得被改写', async () => {
+    // 路由的 permissions.*.isMongoId 由 validateAssignmentInput 消费 ⇒ HTTP 面得到
+    // 字段级的 VALIDATION_FAILED；控制器内的 24-hex 片段闸（PERMISSION_ID_INVALID）
+    // 防的是「直接调用控制器/校验链将来被放松」的路径，由 requestedIdListDeduped 钉住。
+    const fragRole = await Role.create({
+      name: `同级闸片段_${stamp}`,
+      code: `PGFRAG_${stamp.toUpperCase()}`,
+      level: 2,
+      isBuiltIn: false,
+      permissions: [],
+    });
+    const res = await authed(midToken)
+      .put(`/api/roles/${String(fragRole._id)}/permissions`)
+      .send({ permissions: [childPermId, 'not-hex-fragment'] });
+
+    expect(res.status).toBe(400);
+    expect(res.body.errors.errorCode).toBe('VALIDATION_FAILED');
+    const after = await Role.findById(fragRole._id).select('permissions').lean();
+    expect(after.permissions.map(String)).not.toContain(String(childPermId));
   });
 });

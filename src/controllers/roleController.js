@@ -46,8 +46,7 @@ const getRoles = asyncHandler(async (req, res) => {
   if (status) query.status = status;
   const searchTerm = searchPatterns.normalizeSearchTerm(search);
   if (searchTerm) {
-    // code 入库即大写（schema uppercase:true）⇒ 搜索词同步大写并锚定前缀；
-    // name 是自由文本，保持子串匹配。
+    // code 入库即大写（schema uppercase:true）⇒ 搜索词同步大写并锚定前缀；name 是自由文本，保持子串匹配
     query.$or = [
       { name: searchPatterns.substringPattern(searchTerm) },
       { code: searchPatterns.upperCodePrefixPattern(searchTerm) },
@@ -102,8 +101,7 @@ const createRole = asyncHandler(async (req, res) => {
   }
 
   const { name, code, description, level, permissions } = req.body;
-  // 保留编码先于查重：ADMIN / USER 未播种，查重放行会把它们铸成
-  // 不可删、名称/层级/状态冻结的内置角色（models/Role.js 的 isBuiltIn 判据）。
+  // 保留编码先于查重：ADMIN / USER 未播种，查重放行会把它们铸成不可删、名称/层级/状态冻结的内置角色（models/Role.js 的 isBuiltIn 判据）
   if (RESERVED_BUILTIN_ROLE_CODES.includes(String(code).trim().toUpperCase())) {
     return ApiResponse.codeError(res, 'ROLE_CODE_RESERVED');
   }
@@ -120,9 +118,7 @@ const createRole = asyncHandler(async (req, res) => {
     return ApiResponse.codeError(res, 'ROLE_CREATE_HIGHER_LEVEL_FORBIDDEN');
   }
 
-  // 去重后比对，与 PUT /api/roles/:id/permissions 同尺（那边用 uniquePermIds，
-  // 重复 ID 不算非法）；落库也用这份去重结果，避免"校验看 A、写入看 B"。
-  const uniquePermIds = uniqueIdStrings(permissions);
+  const uniquePermIds = uniqueIdStrings(permissions); // 去重后比对，与 PUT /api/roles/:id/permissions 同尺（重复 ID 不算非法）；落库也用这份去重结果，避免"校验看 A、写入看 B"
   if (uniquePermIds.length > 0) {
     // L-05：停用权限不得被挂到新角色上
     const validPerms = await roleService.findPermissionsByIds(uniquePermIds, 'code', {
@@ -176,9 +172,8 @@ const createRole = asyncHandler(async (req, res) => {
     permissions: uniquePermIds,
   });
 
-  // L-13：建角色落库后复验权限仍存在且生效。删除权限的请求采用「先删后查引用」，
-  // 本请求若在删除前通过校验、删除后才落库，这里会看到缺失并撤销刚建的角色，
-  // 而不是留下一条指向已删权限的悬空引用。
+  // L-13：建角色落库后复验权限仍存在且生效。删除走「先删后查引用」，本请求若在删除前通过校验、
+  // 删除后才落库，这里会看到缺失并撤销刚建的角色，而不是留下指向已删权限的悬空引用。
   if (uniquePermIds.length > 0) {
     const stillActive = await roleService.findPermissionsByIds(uniquePermIds, '_id', {
       activeOnly: true,
@@ -190,9 +185,8 @@ const createRole = asyncHandler(async (req, res) => {
   }
 
   const createdRole = await roleService.findPopulatedRole(role._id);
-  // 新建角色尚无持有者，逻辑上不影响任何已缓存用户；此处仍统一失效，
-  // 理由见文件头——「角色写操作必失效」是一条不需要逐次推理的规则，
-  // 而多失效一次的成本仅为下一次请求重新查库
+  // 新建角色尚无持有者，逻辑上不影响任何已缓存用户；仍统一失效——「角色写操作必失效」是
+  // 不需要逐次推理的规则（见文件头），多失效一次的成本仅为下一次请求重新查库
   invalidatePermissionCache();
 
   logger.info(`角色已创建：${role.name}`);

@@ -19,6 +19,9 @@ describe('尾差覆盖（批次 F）', () => {
   let IPBlacklist;
   let AuditLog;
   let adminUserId;
+  // R（2026-11-15）：原写法把 app 挂到 global.__fapp（共享 app 时代 helpers 的残留
+  // 形态）——本文件独占一个全新空库，用本地变量即可，不必污染 globalThis。
+  let app;
   const stamp = `f${Date.now()}`.replace(/\d/g, (d) => 'abcdefghij'[Number(d)]);
   const PASSWORD = randomPassword();
 
@@ -55,7 +58,7 @@ describe('尾差覆盖（批次 F）', () => {
     adminUserId = String(admin._id);
 
     const { createApp } = require('../../app');
-    global.__fapp = createApp();
+    app = createApp();
   });
 
   afterAll(async () => {
@@ -120,10 +123,8 @@ describe('尾差覆盖（批次 F）', () => {
 
   // ================= helpers 尾差 =================
 
-  test('helpers：escapeHtml / sanitizeSpreadsheetCell / normalizePagination / validateEnum', () => {
+  test('helpers：sanitizeSpreadsheetCell / normalizePagination / validateEnum', () => {
     const helpers = require('../../utils/helpers');
-
-    expect(helpers.escapeHtml('<img src=x>')).toContain('&lt;img');
 
     expect(helpers.sanitizeSpreadsheetCell('=cmd')).toBe("'=cmd");
     expect(helpers.sanitizeSpreadsheetCell('+1')).toBe("'+1");
@@ -285,7 +286,6 @@ describe('尾差覆盖（批次 F）', () => {
   // ================= wellKnown 路由尾差 =================
 
   test('well-known：security.txt 端点', async () => {
-    const app = global.__fapp;
     const txt = await request(app).get('/.well-known/security.txt');
     expect(txt.status).toBe(200);
     expect(txt.text).toContain('Contact');

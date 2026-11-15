@@ -39,7 +39,7 @@ fsms/
 │   ├── controllers/            # 业务控制器（认证 / MFA / 用户 / 角色 / 权限 / 设备 / 报警 / 巡检 / 报表 / 安全）
 │   ├── middleware/             # 中间件（认证、RBAC、限流、安全头、审计、令牌黑名单、错误处理、Sentry）
 │   ├── models/                 # Mongoose 模型（User/Role/Permission/FireDevice/FireAlarm/Inspection/AuditLog 等）
-│   ├── routes/                 # API 路由（9 个业务模块 + /.well-known）
+│   ├── routes/                 # API 路由（16 个路由模块，含 /.well-known）
 │   ├── services/               # 服务层（WebSocket、初始化数据、设备到期提醒、安全告警、审计链 / 缓冲 / WAL、MFA、会话、限流升级、缓存、报表）
 │   ├── utils/                  # 工具（日志、加密与 piiCrypto、auditChain、游标分页、响应封装、权限辅助）
 │   ├── docs/                   # OpenAPI 规范（openapi.json）与生成脚本

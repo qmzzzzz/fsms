@@ -204,9 +204,7 @@ inspectionSchema.index({ 'locations.building': 1 });
 inspectionSchema.index({ devices: 1 });
 inspectionSchema.index({ 'findings.deviceId': 1 });
 
-// 业务数据保留期（F-07，2026-10-17）：口径见 constants/businessRetention.js（180 天），
-// 开关是 BUSINESS_RETENTION_DAYS_INSPECTION；未配置时不建 TTL。
-// 字段取 planStartTime（计划时间）而不是 createdAt：补录的巡检同样按事件时间计龄。
+// 业务数据保留期（F-07，2026-10-17）：口径与开关见 constants/businessRetention.js（180 天，BUSINESS_RETENTION_DAYS_INSPECTION），未配置时不建 TTL；字段取 planStartTime（计划时间）而不是 createdAt：补录的巡检同样按事件时间计龄。
 const { resolveTtlIndexPlan } = require('../constants/businessRetention');
 const inspectionTtl = resolveTtlIndexPlan('Inspection');
 if (inspectionTtl.days !== null) {
@@ -215,6 +213,18 @@ if (inspectionTtl.days !== null) {
     { expireAfterSeconds: inspectionTtl.days * 24 * 60 * 60, name: 'ttl_planStartTime' }
   );
 }
+
+// 保留期计龄闸：TTL 挂 planStartTime（上方 ttl_planStartTime）而 MongoDB 的 TTL 不匹配缺键/null ⇒ 无键文档永不过期、保留期声明对它失效；开关在场时拒绝"制造无键行"的写入（新文档缺键/既有值改空），存量无键行不被 save 误伤（isModified false 照常放行）；开关未配置时不设闸——无 TTL 就没有"过期不了"的问题，缺键/null 由列表游标空值块契约兜底（tests/services/inspectionCursorNullableSortKey.test.js）
+inspectionSchema.pre('validate', function (next) {
+  if (resolveTtlIndexPlan('Inspection').days === null) return next();
+  if (this.planStartTime == null && (this.isNew || this.isModified('planStartTime'))) {
+    this.invalidate(
+      'planStartTime',
+      '保留期已启用（BUSINESS_RETENTION_DAYS_INSPECTION）：巡检必须带计划开始时间，缺键文档不会被 TTL 回收'
+    );
+  }
+  next();
+});
 
 const Inspection = mongoose.model('Inspection', inspectionSchema);
 const logger = require('../utils/logger');

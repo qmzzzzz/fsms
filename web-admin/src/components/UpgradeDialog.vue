@@ -254,6 +254,7 @@ import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index.mjs'
 import { api, isHandledApiError, isCanceledError } from '@/utils/api'
 import { encryptPassword } from '@/utils/loginCipher'
+import { encryptionErrorMessage } from '@/utils/encryptionError'
 import { formatTime } from '@/utils/datetime'
 import { isPageHidden } from '@/utils/versionWatcher'
 
@@ -643,13 +644,7 @@ const submit = async () => {
         credential = { encCurrentPassword: enc }
       } catch (e) {
         if (!stillCurrent()) return
-        ElMessage.error(
-          e?.code === 'PUBLIC_KEY_PIN_MISMATCH'
-            ? t('login.publicKeyPinMismatch')
-            : e?.code === 'INSECURE_CONTEXT'
-              ? t('login.insecureContext')
-              : t('login.encryptionFailed')
-        )
+        ElMessage.error(encryptionErrorMessage(t, e))
         return
       }
     }

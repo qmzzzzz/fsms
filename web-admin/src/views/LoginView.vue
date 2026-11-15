@@ -201,6 +201,7 @@ import { User, Lock, Key } from '@element-plus/icons-vue'
 import { api } from '@/utils/api'
 import { haptic } from '@/utils/haptic'
 import { encryptPassword } from '@/utils/loginCipher'
+import { encryptionErrorMessage } from '@/utils/encryptionError'
 import { useAuthStore } from '@/store'
 import LiquidGlassButtons from '@/components/LiquidGlassButtons.vue'
 import AuthPrefs from '@/components/AuthPrefs.vue'
@@ -341,10 +342,10 @@ watch(
 const rules = computed(() => {
   const base = {
     username: [{ required: true, message: t('validation.usernameRequired'), trigger: 'blur' }],
-    password: [
-      { required: true, message: t('validation.passwordRequired'), trigger: 'blur' },
-      { min: 6, message: t('validation.passwordMin'), trigger: 'blur' },
-    ],
+    // P3：登录口令只保留 required——后端 loginValidation 对明文轨仅 notEmpty + max128，
+    // 密文轨完全不查长度；min:6 属前端单方面加严，存量短口令账户会被拦在本地
+    // 连「输对密码登录」都做不到。强度要求属注册/改密表单，不属登录。
+    password: [{ required: true, message: t('validation.passwordRequired'), trigger: 'blur' }],
   }
   if (captchaEnabled.value) {
     base.captchaText = [
@@ -394,15 +395,8 @@ const onLogin = async () => {
       enc = await encryptPassword(loginForm.password, 'LOGIN')
     } catch (e) {
       console.warn('[loginCipher] 口令加密失败，已阻断提交：', e?.message)
-      // 公钥指纹不符（PUBLIC_KEY_PIN_MISMATCH）：主动 MITM 或服务端轮换密钥后
-      // 前端包未随之重建——与「网络抖动、重试即可」不是一回事，文案须可执行
-      ElMessage.error(
-        e?.code === 'PUBLIC_KEY_PIN_MISMATCH'
-          ? t('login.publicKeyPinMismatch')
-          : e?.code === 'INSECURE_CONTEXT'
-            ? t('login.insecureContext')
-            : t('login.encryptionFailed')
-      )
+      // 文案统一走共享 helper（P2 收敛）：指纹不符/非安全上下文/通用失败三分支
+      ElMessage.error(encryptionErrorMessage(t, e))
       return
     }
     if (enc) payload.encPassword = enc

@@ -85,7 +85,7 @@ async function operatorIsSuperAdmin(userId) {
   return (operator?.roles || []).some(isSuperAdminRole);
 }
 
-/** 拒绝侧的高危留痕（调用方不 await，保持既有 best-effort 语义） */
+/** 拒绝侧的高危留痕（AuditLog.record 契约永不 reject：await 它不会把 DB 故障上冒成 500） */
 function recordPrivilegeEscalation(doc) {
   return AuditLog.record(doc);
 }

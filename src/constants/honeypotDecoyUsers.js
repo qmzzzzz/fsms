@@ -118,7 +118,7 @@ const DECOY_USERS = frozenRows([
     updatedAtOffsetMin: 60 * 24 * 40,
   },
 ]);
-const { phoneMasked: selfPhone, ...selfBase } = DECOY_USERS[0]; // 列表面出 phoneMasked；本人面契约键是 phone（honeypotDecoySelf.js:120），在此派生
+const { phoneMasked: selfPhone, ...selfBase } = DECOY_USERS[0]; // 列表面出 phoneMasked；本人面契约键是 phone（honeypotDecoySelf.js:122），在此派生
 const DECOY_SELF = Object.freeze({ ...selfBase, phone: selfPhone });
 
 module.exports = { DECOY_ROLE_ENTRIES, DECOY_SELF, DECOY_USERS };

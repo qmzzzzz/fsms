@@ -1,7 +1,7 @@
 /**
  * 计数与比率的非退化判据（第 17 轮 P0-1/P0-2）。缺陷本体：
  * ① totalMaintenance 原先用 $unwind 展开 maintenanceRecord 再 $sum:1，而该数组只留最新
- *    RECORD_TAIL_CAP(200) 条（models/FireDevice.js:256-259 自己写着"不能拿数组长度假装全部历史"，
+ *    RECORD_TAIL_CAP(200) 条（models/FireDevice.js:258-261 自己写着"不能拿数组长度假装全部历史"，
  *    :142 也早已提供 maintenanceRecordCount）⇒ 第 201 条起总数不再增长，5000 次维护与 200 次同形。
  *    变异 MAINT_TOTAL_ABSURD 当时 6/6 套件 47/47 全绿。
  * ② 巡检 completionRate 在全仓 src/tests 零断言：变异 COMPLETION_RATE_ZERO 当时 5/5 套件 86/86 全绿。

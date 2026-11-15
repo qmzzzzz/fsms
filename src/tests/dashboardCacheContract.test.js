@@ -105,6 +105,13 @@ describe('仪表盘缓存的命中可区分 / 范围指纹 / none 不占缓存',
     const second = await getDashboardData(userId);
     expect(second.message).toContain(CACHE_HIT);
     expect(second.data).toEqual(first.data);
+    // 返回体必须是防御拷贝：改写首次返回的 data 不得污染缓存（首算与命中两条路径都交拷贝）
+    first.data.devices.total = 999;
+    first.data.devices.byType.push({ _id: 'polluted', count: 1 });
+    const third = await getDashboardData(userId);
+    expect(third.message).toContain(CACHE_HIT);
+    expect(third.data.devices.total).toBe(1);
+    expect(third.data.devices.byType).toEqual([{ _id: 'hydrant', count: 1 }]);
   });
 
   test('范围变了必须重算：被调走部门的人不得继续拿到原部门的数字', async () => {

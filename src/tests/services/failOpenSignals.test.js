@@ -5,7 +5,8 @@
  * 本仓有一条成文纪律，在三个地方被重复声明：
  *   · `middleware/security/ipBlacklist.js:205`：「fail-open 放行（缓存未命中）**必须有显式可观测信号**——
  *     否则『DB 挂了 + 全站裸奔』只有一条 error 日志可循」
- *   · `middleware/rateLimitStore.js:53-56`：「降级态只写日志等于没有可告警信号——
+ *   · `middleware/rateLimitStore.js:22-27`（2026-11-14 审计修复批 makeDegradationSignal
+ *     抽到模块级，纪律句由 :53-56 迁 :22-27）：「降级态只写日志等于没有可告警信号——
  *     `grep 日志` 不是运维动作」
  *   · `services/websocketService/handshake.js:481-483`：「fail-open 必须留 `ip_blacklist_failopen` 计数」
  *
@@ -120,6 +121,36 @@ describe('captchaService：活跃数上限判定被跳过时必须留信号', ()
     expect(ALERT_CALLS(alertSpy, 'captcha_ip_cap_reached')).toEqual([
       { type: 'captcha_ip_cap_reached', level: 'high' },
     ]);
+  });
+
+  test('Redis 已启用 + 条目写入返回 false → 发 captcha_issue_store_degraded/medium，且**仍发码**（本实例 fail-open 不变）', async () => {
+    jest.spyOn(sharedCache, 'isRedisEnabled').mockReturnValue(true);
+    jest.spyOn(sharedCache, 'incrWithTtl').mockResolvedValue(1);
+    // 门面契约：set 返回 false = 共享层没收到（条目只在本进程内存）
+    jest.spyOn(sharedCache, 'set').mockResolvedValue(false);
+    jest.spyOn(sharedCache, 'jitterTtl').mockImplementation((t) => t);
+
+    const result = await captcha.generate();
+
+    // ① 信号必须发（set 返回值无人查 = 降级不可见）
+    expect(ALERT_CALLS(alertSpy, 'captcha_issue_store_degraded')).toEqual([
+      { type: 'captcha_issue_store_degraded', level: 'medium' },
+    ]);
+    // ② 可用性方向必须保持：照常把验证码发给用户（不因共享层写失败拒发）
+    expect(result).toHaveProperty('captchaId');
+    expect(result.svg).toContain('<svg');
+  });
+
+  test('Redis 已启用 + 条目写入成功 → 不发 issue_store_degraded（防"恒发"把告警训练成噪声）', async () => {
+    jest.spyOn(sharedCache, 'isRedisEnabled').mockReturnValue(true);
+    jest.spyOn(sharedCache, 'incrWithTtl').mockResolvedValue(1);
+    jest.spyOn(sharedCache, 'set').mockResolvedValue(true);
+    jest.spyOn(sharedCache, 'jitterTtl').mockImplementation((t) => t);
+
+    const result = await captcha.generate();
+
+    expect(ALERT_CALLS(alertSpy, 'captcha_issue_store_degraded')).toEqual([]);
+    expect(result).toHaveProperty('captchaId');
   });
 });
 

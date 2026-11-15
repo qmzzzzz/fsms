@@ -3,23 +3,10 @@
 /**
  * 最小 xlsx 写入器（零第三方依赖）
  * ## 为什么自己写
- * 报表导出只需要「一张表 + 表头样式 + 列宽 + 工作簿属性」，用不到 exceljs 的读、
- * 公式、图表、合并、数据校验。而 exceljs 的生产依赖链（archiver → archiver-utils →
- * glob → minimatch）带一条**上游无解**的 moderate 公告：升 archiver 也没用，
- * 因为 archiver@8 用的 readdir-glob@3 仍依赖 minimatch@^10.2.2（< 11.0.1）。
- * 本仓已有同类先例：`utils/pngStructure.js` 就是手写二进制容器 + `node:zlib`。
- *
+ * 报表导出只需要「一张表 + 表头样式 + 列宽 + 工作簿属性」，用不到 exceljs 的读、公式、图表、合并、数据校验。而 exceljs 的生产依赖链（archiver → archiver-utils → glob → minimatch）带一条**上游无解**的 moderate 公告：升 archiver 也没用，因为 archiver@8 用的 readdir-glob@3 仍依赖 minimatch@^10.2.2（< 11.0.1）。本仓已有同类先例：`utils/pngStructure.js` 就是手写二进制容器 + `node:zlib`。
  * ## 本写入器覆盖的 OOXML 面（实测自 exceljs 4.4.0 的产物，逐部件对照）
- * `[Content_Types].xml`、`_rels/.rels`、`docProps/core.xml`、`docProps/app.xml`、
- * `xl/workbook.xml`、`xl/_rels/workbook.xml.rels`、`xl/styles.xml`、
- * `xl/sharedStrings.xml`、`xl/worksheets/sheet1.xml` —— 共 9 个部件。
- *
- * 有意**不**支持：多工作表、合并单元格、公式、图片、数据校验、条件格式、数字格式、
- * 日期类型。本仓导出的每个单元格都是**字符串**（`EXPORT_ROW_TRANSFORMS` 全部返回
- * 字符串），所以单元格一律以 `t="s"`（共享字符串）写出——这同时是公式注入防线的一半：
- * `'=1+1` 存成带类型的文本，Excel 打开时不求值（见 reportExportService 的
- * createSafeTransform 注释）。
- *
+ * `[Content_Types].xml`、`_rels/.rels`、`docProps/core.xml`、`docProps/app.xml`、`xl/workbook.xml`、`xl/_rels/workbook.xml.rels`、`xl/styles.xml`、`xl/sharedStrings.xml`、`xl/worksheets/sheet1.xml` —— 共 9 个部件。
+ * 有意**不**支持：多工作表、合并单元格、公式、图片、数据校验、条件格式、数字格式、日期类型。本仓导出的每个单元格都是**字符串**（`EXPORT_ROW_TRANSFORMS` 全部返回字符串），所以单元格一律以 `t="s"`（共享字符串）写出——这同时是公式注入防线的一半：`'=1+1` 存成带类型的文本，Excel 打开时不求值（见 reportExportService 的 createSafeTransform 注释）。
  * ## 依赖边界
  * 仅 `node:zlib`（经 `utils/zipContainer`）。没有解析器，故不存在「畸形归档」类缺陷。
  */
@@ -38,8 +25,9 @@ const STYLE_HEADER = 1;
 const STYLE_WATERMARK = 2;
 
 /** XML 1.0 不允许的控制字符必须剔除，否则 Excel 判「文件已损坏」 */
+// XML 1.0 的 Char 产生式只允许 0x09/0x0A/0x0D + 0x20–0xD7FF + 0xE000–0xFFFD + 补平面：除 C0 里三个合法空白外，U+007F（DEL）与 U+0080–U+009F（C1 控制区）同样非法——严格读端（Excel 本体）对它们照样报「文件已损坏」，而库端读不出差异，症状只在客户端。
 // eslint-disable-next-line no-control-regex
-const ILLEGAL_XML = /[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g;
+const ILLEGAL_XML = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u0080-\u009F]/g;
 
 const escapeXml = (value) =>
   String(value)
@@ -64,9 +52,7 @@ const columnName = (index) => {
 
 /**
  * 样式表：3 个字体（默认 / 表头粗白 / 水印斜灰）、3 个填充、2 个边框（空 / 细）。
- *
- * 颜色用 `rgb` 而不是 `theme`：theme 色引用需要 `xl/theme/theme1.xml`，本包不写该部件，
- * 指向不存在的主题会让严格的读端（Excel 本体）报「需要修复」。
+ * 颜色用 `rgb` 而不是 `theme`：theme 色引用需要 `xl/theme/theme1.xml`，本包不写该部件，指向不存在的主题会让严格的读端（Excel 本体）报「需要修复」。
  */
 const buildStyles = () =>
   XML_DECL +
@@ -139,9 +125,7 @@ const buildAppXml = () =>
   '</Properties>';
 
 /**
- * 工作簿属性（水印的第三、四处：表尾行能被删，属性不能）。
- * 无水印时仍写出该部件、值为空——真实 GET 导出与蜜罐合成件因此**结构相同**，
- * 蜜罐的「与真实链逐一相同」契约不靠「都缺一个部件」来成立。
+ * 工作簿属性（水印的第三、四处：表尾行能被删，属性不能）。无水印时仍写出该部件、值为空——真实 GET 导出与蜜罐合成件因此**结构相同**，蜜罐的「与真实链逐一相同」契约不靠「都缺一个部件」来成立。
  */
 const buildCoreXml = ({ creator = '', lastModifiedBy = '', description = '', keywords = '' }) => {
   const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
@@ -171,8 +155,7 @@ const buildCell = (rowNumber, columnIndex, value, style, indexOf) => {
 };
 
 /**
- * 生成 sheet1.xml 与 sharedStrings.xml。
- * 表头由 columns 决定（第 1 行），数据行从第 2 行起——调用方只 addRow 数据。
+ * 生成 sheet1.xml 与 sharedStrings.xml。表头由 columns 决定（第 1 行），数据行从第 2 行起——调用方只 addRow 数据。
  */
 const buildSheetParts = ({ columns, rows, defaultColWidth }) => {
   const strings = new Map();
@@ -219,8 +202,7 @@ const buildSheetParts = ({ columns, rows, defaultColWidth }) => {
     '<pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/>' +
     '</worksheet>';
 
-  // count = **实计**的 t="s" 引用数（E8 前按 行数×列数 估算，空值越多偏差越大）；
-  // uniqueCount 是去重数。严格的读端按 count 预分配，两个数现在都是事实值。
+  // count = **实计**的 t="s" 引用数（E8 前按 行数×列数 估算，空值越多偏差越大）；uniqueCount 是去重数。严格的读端按 count 预分配，两个数现在都是事实值。
   const sharedStringsXml =
     XML_DECL +
     `<sst xmlns="${NS_MAIN}" count="${refCount}" uniqueCount="${stringList.length}">` +
@@ -303,8 +285,7 @@ const createWorkbook = ({ sheetName, columns, defaultColWidth = 15, props = {} }
     sheet,
     toBuffer,
     /**
-     * 交给目的流。**不等目的端收工**——「只对真正送完的响应报成功」这条判据在
-     * reportWorkbookService.writeWorkbookToResponse 里，与 CSV 侧同一形状。
+     * 交给目的流。**不等目的端收工**——「只对真正送完的响应报成功」这条判据在 reportWorkbookService.writeWorkbookToResponse 里，与 CSV 侧同一形状。
      */
     write(destination) {
       destination.end(toBuffer());

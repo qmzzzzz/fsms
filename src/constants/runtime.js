@@ -1,3 +1,5 @@
+'use strict';
+
 /**
  * 运行时拓扑假设的集中声明
  *
@@ -174,6 +176,12 @@ const SINGLE_PROCESS_DEPENDENCIES = Object.freeze([
     module: 'services/loginRateLimitAudit.js',
     mechanism: '登录对端桶留痕的去重表（recent Map，d13f431 对端限流审计）',
     impact: '各进程各自去重；同一对端命中按实例数重复留痕',
+  },
+  {
+    module: 'services/loginChallenge.js',
+    mechanism:
+      '验证码被拦审计的去重窗（recentRejects Map：键=拦下层+用户名+出示形态，60s 一条，键上限 512 按插入序淘汰）',
+    impact: '各进程各自去重；同一主体短窗内的重复被拦按实例数各留一条审计',
   },
   {
     module: 'services/scanProbeDetector.js',

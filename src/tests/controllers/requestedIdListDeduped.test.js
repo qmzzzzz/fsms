@@ -958,6 +958,14 @@ describe('第 7 组 · 角色权限改写路径的 id 列表', () => {
     expect(errorCodeOf(res)).toBe('PERMISSION_ID_INVALID');
     expect(savedPermissions()).toBeNull();
   });
+
+  test('非法片段不得被静默滤掉：混合提交显式 400（此前 filter 静默丢片段后继续分配）', async () => {
+    // HTTP 面的片段拒绝由路由 isMongoId + validateAssignmentInput 承担（rolePermPeerGuard）；
+    // 本腿钉控制器自身的片段闸——直接调用控制器时没有校验链兜底，静默 filter 是唯一防线
+    const res = await assignPerms([mockIds.permRead, 'not-hex-fragment']);
+    expect(errorCodeOf(res)).toBe('PERMISSION_ID_INVALID');
+    expect(savedPermissions()).toBeNull();
+  });
 });
 
 /* ============================== 第 8 组 ==============================
@@ -1105,8 +1113,8 @@ describe('第 8 组 · 大写 :id 走单个入口', () => {
  *     AlarmService.js:181）的归一没有腿，且在当前接线下**造不出**能红的腿：调用方（守卫）
  *     已经先归一过一次，服务层这一句是幂等冗余 ⇒ 删掉它是等价变异。留着是纵深防御
  *     （新调用方不必重新想一遍口径），但要写清"这里没有腿，别把它当已覆盖"。
- *  4. permissionService.js:95（列表臂）与 permissionService.js:115（单值比对臂）由 src/tests/services/
- *     permissionParentIdCaseAndDedup.test.js（6 腿）钉。该闸台账里 parent-norm-dropped 是
+ *  4. permissionService.js:92（列表臂）与 permissionService.js:112（单值比对臂）由 src/tests/services/
+ *     permissionParentIdCaseAndDedup.test.js（6 腿）钉（2026-11-14 并发兜底批在其上方净 -3 行后随迁）。该闸台账里 parent-norm-dropped 是
  *     **已声明的等价变异**（本站点没有长度比较 ⇒ 预期存活），真正钉行为的是 parent-compare-raw
  *     （红:#2,#3,#5）。
  *  5. 路由层 isMongoId 放过大写十六进制这件事本身没改（改它会动 12 条路由的入参口径，

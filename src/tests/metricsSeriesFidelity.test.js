@@ -194,6 +194,30 @@ describe('metrics：截断可见性与缺省标签口径', () => {
       expect(metrics._droppedSeries.get('duration')).toBe(4);
     });
 
+    test('HTTP 计数与直方图成对登记：一侧满 ⇒ 整对不登记（不得出现「有量无延迟」半登记态）', () => {
+      // 不对称满载态只能从内部 map 造：middleware 写两侧永远成对，单侧打满无法经公开入口到达。
+      // 这正是旧缺陷的形状——requests 有位、duration 满 ⇒ 计数登记、延迟缺席，面板无从区分
+      // 「没人访问」与「延迟数据被砍」。
+      for (let i = 0; i < CAP; i++) {
+        metrics._histograms.set(`route="pre${i}"`, { buckets: [], sum: 0, count: 0 });
+      }
+      const req = { method: 'GET', route: { path: '/probe/new' }, baseUrl: '' };
+      const res = {
+        statusCode: 200,
+        on(_ev, cb) {
+          this._cb = cb;
+        },
+      };
+      metrics.metricsMiddleware(req, res, () => {});
+      res._cb();
+      // 整对拒绝：requests 明明有位，也不得只登记计数
+      expect(metrics._counters.size).toBe(0);
+      expect(metrics._histograms.size).toBe(CAP);
+      // 两侧丢弃计数仍按各自额度独立记：只有真正拒收新 series 的 duration +1
+      expect(metrics._droppedSeries.get('requests') || 0).toBe(0);
+      expect(metrics._droppedSeries.get('duration')).toBe(1);
+    });
+
     test('逐 store 各告警一次：第二个打满的 store 必须喊得出，且不刷屏', () => {
       const capMessages = () =>
         warnSpy.mock.calls

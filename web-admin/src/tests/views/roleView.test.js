@@ -1053,21 +1053,14 @@ describe('RoleView 未保存变更的离开防护', () => {
 })
 
 describe('RoleView 实时推送（WebSocket）接线', () => {
-  test('挂载：加入 role-management 房间、注册三个回调，并注册放弃重连提示', async () => {
+  test('挂载：加入 role-management 房间、注册两个业务回调；不再局部注册 give-up 提示', async () => {
     const c = await mountRole(P_READ)
     expect(acquireWs).toHaveBeenCalledTimes(1)
     expect(joinRoom).toHaveBeenCalledWith('role-management')
-    expect(onGiveUp).toHaveBeenCalledTimes(1)
     expect(wsOn.mock.calls.map((x) => x[0])).toEqual(['role-updated', 'permissions-updated'])
-    // 放弃重连必须给出不自动消失的警示（duration=0），否则用户会误信过期数据
-    const giveUp = onGiveUp.mock.calls[0][0]
-    giveUp()
-    await flush(2)
-    expect(notify).toHaveBeenCalledTimes(1)
-    expect(notify.mock.calls[0][0]).toMatchObject({ type: 'warning', duration: 0 })
-    expect(notify.mock.calls[0][0].message).toBe(
-      '实时推送连接已中断，当前页面数据可能不是最新。请刷新页面恢复。'
-    )
+    // P2-6：give-up 提示上收布局层（usePermissionSync 统一注册）。推送失效影响
+    // 所有页面，不该由角色页注册却全局弹出——本页不再调用 onGiveUp
+    expect(onGiveUp).not.toHaveBeenCalled()
     expect(c.errors).toEqual([])
   })
 
@@ -1197,7 +1190,7 @@ describe('RoleView 权限面板渲染细节', () => {
     expect(active.findAll('.perm-summary__item')).toEqual([])
   })
 
-  test('权限树接口失败：模块区为空但不抛 Vue 错误，页面其余部分可用', async () => {
+  test('权限树接口失败：显式错误态+重试入口，不抛 Vue 错误，页面其余部分可用（P3）', async () => {
     rolesGetList.mockResolvedValue({ data: { data: [ROLE_PLAIN] } })
     rolesGetTree.mockRejectedValue(new Error('tree down'))
     rolesGetById.mockResolvedValue({
@@ -1210,7 +1203,16 @@ describe('RoleView 权限面板渲染细节', () => {
     await flush(12)
     expect(active.findAll('.glass-module-card')).toEqual([])
     expect(roleTags(active)).toEqual(['巡检员'])
-    expect(active.find('.perm-empty-search')).toBeTruthy()
+    // P3：非 403 的目录加载失败不再静默画空（旧断言 perm-empty-search 已随
+    // 错误态出现而消失）——显式错误块 + 重试入口，避免「目录没拿到」被读成
+    // 「系统就这么几个权限」
+    expect(active.find('.perm-load-failed')).toBeTruthy()
+    expect(active.text()).toContain('权限目录加载失败')
+    // 重试入口可用（仍失败也只保持错误态，不抛错）
+    const retryBtn = active.findAll('button').find((b) => b.textContent.trim() === '重试')
+    expect(retryBtn).toBeTruthy()
+    click(retryBtn)
+    await flush(12)
     expect(active.errors).toEqual([])
   })
 })

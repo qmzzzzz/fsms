@@ -1,11 +1,8 @@
 /**
- * 报表导出服务（自 reportController 抽取的导出组件区）
- *
- * 本模块只有：导出配置（sheet 名/模型/列定义/行转换/展示名映射）、查询构建
- * （buildExportQuery）、枚举校验（validateAuditExportEnums）。控制器只留参数校验、权限闸与响应编排。
+ * 报表导出服务（自 reportController 抽取的导出组件区）。本模块只有：导出配置（sheet 名/模型/列定义/行转换/展示名映射）、
+ * 查询构建（buildExportQuery）、枚举校验（validateAuditExportEnums）。控制器只留参数校验、权限闸与响应编排。
  * 行级取数（fetchExportRows，E9① 前名 streamExportRows）与 workbook 编排（writeExportWorkbook）在 reportWorkbookService.js，
- * **不在**本文件——按旧文件头来这里找会扑空。
- * 行级日期格式化统一走 utils/dateFormat（显式 hour12:false；与迁移前输出逐项一致）。
+ * **不在**本文件——按旧文件头来这里找会扑空。行级日期格式化统一走 utils/dateFormat（显式 hour12:false；与迁移前输出逐项一致）。
  */
 
 const mongoose = require('mongoose');
@@ -17,9 +14,8 @@ const { onAuditWriteFailure } = require('../utils/auditWriteFailure');
 const { sanitizeSpreadsheetCell, validateEnum } = require('../utils/helpers');
 const { buildDataScopeFilter, isDataScopeDenied, deniedDataScope } = require('../middleware/rbac');
 const { DATA_SCOPE_FIELDS } = require('../constants/dataScopeFields');
-// 审计枚举单一事实来源：constants/audit.js（D-1 起 AUDIT_LOG_ACTIONS 亦收敛于此）。
-// level 三级展示口径原先本文件写两份字面量（下面的 includes 闸门 + 枚举校验）、
-// utils/auditQuery.js 再写一份 ⇒ 单侧增删即"查询放行、导出 400"，现统一取常量版。
+// 审计枚举单一事实来源：constants/audit.js（D-1 起 AUDIT_LOG_ACTIONS 亦收敛于此）。level 三级展示口径
+// 原先本文件写两份字面量（下面的 includes 闸门 + 枚举校验）、utils/auditQuery.js 再写一份 ⇒ 单侧增删即"查询放行、导出 400"，现统一取常量版。
 const {
   AUDIT_CATEGORIES,
   AUDIT_RISK_LEVELS,
@@ -28,8 +24,7 @@ const {
   AUDIT_ERROR_RISK_LEVELS,
 } = require('../constants/audit');
 const { normalizeIP, ipQueryCondition } = require('../utils/ipUtils');
-// success 解析与三级展示口径（level → Mongo 条件）都与审计查询侧共用同一实现
-// （两份曾各写一遍、靠注释约定同口径）
+// success 解析与三级展示口径（level → Mongo 条件）都与审计查询侧共用同一实现（两份曾各写一遍、靠注释约定同口径）
 const {
   parseSuccessFilter,
   buildLevelCondition,
@@ -41,6 +36,17 @@ const { castScopeObjectIds } = require('../utils/scopeCast');
 // A4（2026-10-16）：导出侧真实姓名脱敏。掩码实现复用 utils/encryption 的 DataMasking
 // （userService / securityController 已在用它的 maskPhone/maskEmail），不另造一份。
 const { DataMasking } = require('../utils/encryption');
+// 状态 / 类型 / 风险等级 / action 的展示名映射已搬到 constants/reportExportLabels.js
+// （纯声明与逻辑分离 + 本文件的 max-lines 体积棘轮预算，理由见该文件头）。
+// 依赖常量必须先于引用它们的函数声明（下方 getExportSheetName / getExportColumnDefs /
+// EXPORT_ROW_TRANSFORMS 都引用这里解构出的名字）：放后面靠"调用期才解析"才没有当场炸，
+// 是声明顺序隐患（N）——谁在模块求值期调用一次就是 ReferenceError（TDZ）。
+const {
+  EXPORT_SHEET_NAMES_EN,
+  EXPORT_COLUMN_HEADERS_EN,
+  getExportLabelMaps,
+} = require('../constants/reportExportLabels');
+const { EXPORT_COLUMN_DEFS } = require('../constants/reportExportColumns');
 
 const EXPORT_LIMIT = 5000;
 
@@ -138,6 +144,15 @@ const EXPORT_MODEL_CONFIG = {
 };
 
 /**
+ * 空值占位符。`utils/dateFormat` 的 formatDateTime/formatDate 用同一个字面量（无值时
+ * 返回 '-'），所以这一格的口径横跨两个文件；createSafeTransform 的放行判据与这里
+ * 必须是同一个常量，否则占位符会被公式注入加固写成 `'-`。
+ * 声明先于全部引用方（exportPersonLabel/formatExportLocation/行变换/createSafeTransform）：
+ * 与上方 require 的同理，不靠"调用期才解析"活命（N）。
+ */
+const EXPORT_NO_VALUE = '-';
+
+/**
  * 导出侧**携带真实姓名**的报表类型（A4，2026-10-16）。
  *
  * alarms 的 handler.realName、inspections 的 assignedTo[].realName 是 populate
@@ -171,15 +186,6 @@ const exportPersonLabel = (user, maskPii) => {
   return maskPii ? DataMasking.maskName(realName) : realName;
 };
 
-// 状态 / 类型 / 风险等级 / action 的展示名映射已搬到 constants/reportExportLabels.js
-// （纯声明与逻辑分离 + 本文件的 max-lines 体积棘轮预算，理由见该文件头）。
-const {
-  EXPORT_SHEET_NAMES_EN,
-  EXPORT_COLUMN_HEADERS_EN,
-  getExportLabelMaps,
-} = require('../constants/reportExportLabels');
-const { EXPORT_COLUMN_DEFS } = require('../constants/reportExportColumns');
-
 /** 列定义按语言取；默认中文，未知语言回中文。 */
 const getExportColumnDefs = (type, lang) => {
   const defs = EXPORT_COLUMN_DEFS[type] || [];
@@ -192,13 +198,6 @@ const getExportColumnDefs = (type, lang) => {
   const headers = EXPORT_COLUMN_HEADERS_EN[type] || [];
   return defs.map((def, index) => ({ ...def, header: headers[index] || def.header }));
 };
-
-/**
- * 空值占位符。`utils/dateFormat` 的 formatDateTime/formatDate 用同一个字面量（无值时
- * 返回 '-'），所以这一格的口径横跨两个文件；createSafeTransform 的放行判据与这里
- * 必须是同一个常量，否则占位符会被公式注入加固写成 `'-`。
- */
-const EXPORT_NO_VALUE = '-';
 
 const formatExportLocation = (loc) => {
   if (!loc) return EXPORT_NO_VALUE;

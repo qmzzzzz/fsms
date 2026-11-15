@@ -133,6 +133,17 @@ describe('ip2regionSearcher（xdb 离线检索器）', () => {
       const handle = searcher.loadFromBuffer(buf);
       expect(searcher.searchRaw(handle, '10.1.2.3')).toBe('');
     });
+
+    test('段内 dataPtr 下界：指进头部/向量索引区（低于数据区基线）按未命中返回空串，不得读出伪串', () => {
+      const buf = syntheticTailGapXdb();
+      // 第一条段的 dataPtr 改写到 0（指向头部）：加载期校验只覆盖向量桶指针，
+      // 段内条目的 dataPtr 此前只有上界检查——旧实现会把头部垃圾字节当地区串返回
+      buf.writeUInt32LE(0, segBaseOf(buf) + 10);
+      const handle = searcher.loadFromBuffer(buf);
+      expect(searcher.searchRaw(handle, '203.0.113.9')).toBe('');
+      // 对照：第二条段 dataPtr == 数据区基线（首个合法位置，边界含端点）仍正常命中
+      expect(searcher.searchRaw(handle, '203.0.114.9')).toBe('A|B|C|D|E');
+    });
   });
 
   describe('search / searchRaw（真实数据文件探针）', () => {

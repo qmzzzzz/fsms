@@ -1,9 +1,8 @@
-/**
- * 幂等键落库记录（ADR-014）：一条记录 = 一次已受理的提交。
- * 判据落库而非进程内存——"只有一个进程"是部署形态的偶然事实，不是安全判据。
- */
+/** 幂等键落库记录（ADR-014）：一条记录 = 一次已受理的提交。判据落库而非进程内存——"只有一个进程"是部署形态的偶然事实，不是安全判据。 */
 
 const mongoose = require('mongoose');
+
+const MAX_REPLAY_BYTES = 64 * 1024; // 回放响应体上限（字节）：常量住本文件（模型级校验器要用），middleware/idempotency.js 引用同一份——两份 64KB 各自漂的口子不留给将来
 
 const idempotencyRecordSchema = new mongoose.Schema({
   // 哈希已含 scope + userId，故这里单列唯一即可
@@ -18,7 +17,16 @@ const idempotencyRecordSchema = new mongoose.Schema({
     default: 'in_progress',
   },
   statusCode: { type: Number, default: null },
-  responseBody: { type: mongoose.Schema.Types.Mixed, default: null },
+  responseBody: {
+    type: mongoose.Schema.Types.Mixed,
+    default: null,
+    validate: {
+      validator: (v) =>
+        v == null ||
+        Buffer.byteLength(typeof v === 'string' ? v : JSON.stringify(v)) <= MAX_REPLAY_BYTES, // 与写入侧 bodyBytes 同口径：文本按原字节、JSON 按序列化字节。本闸只兜 create/save 直写（测试/脚本）；中间件的 updateOne 默认不跑校验，由它自己的 size 判据收口
+      message: '响应体超过回放上限（MAX_REPLAY_BYTES），不得以可回放形态落库',
+    },
+  },
   contentType: { type: String, default: null }, // 非 JSON 响应的媒体类型：回放要连 Content-Type 一起还原
   responseLocation: { type: String, default: null }, // 首次响应给的 Location：重放要还原指针，但绝不伪造
   replayOmitted: { type: Boolean, default: false }, // true = 已完成但无体可回放（超限/流式/无体）
@@ -30,3 +38,4 @@ const idempotencyRecordSchema = new mongoose.Schema({
 idempotencyRecordSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
 module.exports = mongoose.model('IdempotencyRecord', idempotencyRecordSchema);
+module.exports.MAX_REPLAY_BYTES = MAX_REPLAY_BYTES; // 单一来源导出（与 User.PII_ENCRYPTED_FIELDS 同型）：中间件与测试从这里取

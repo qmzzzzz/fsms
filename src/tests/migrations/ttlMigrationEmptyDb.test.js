@@ -23,7 +23,10 @@ const MIGRATIONS = {
   '20260919000000-reconcile-audit-ttl-to-retention': require('../../../migrations/20260919000000-reconcile-audit-ttl-to-retention'),
 };
 
-const ISOLATED_DB = 'zzqA_ttl_migration_emptydb';
+// 库名带唯一后缀（时间戳 36 进制 + pid）：固定库名在 --randomize 乱序/多 worker 下
+// 会撞上「上一次中断运行留下的同库」，「前提自证：库里没有 auditlogs」这一档
+// 就可能测到脏库。口径同 cursorTiebreakIndexes.test.js 的 ISOLATED_DB（执行侧独立库惯例）。
+const ISOLATED_DB = `zzqA_ttl_migration_emptydb_${Date.now().toString(36)}p${process.pid}`;
 
 describe('TTL 对齐迁移的集合缺失分支', () => {
   let conn;

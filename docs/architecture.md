@@ -106,7 +106,7 @@ erDiagram
   ROLE {
     string name UK
     array permissions "ref Permission"
-    int level "数据范围 ≥9全部/≥7本部门/≥5本人"
+    int level "数据范围 ≥9全部/≥7本部门/≥4本人"
     boolean isBuiltIn
   }
   PERMISSION {

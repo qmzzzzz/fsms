@@ -30,6 +30,7 @@
           <button
             type="button"
             class="glass-btn glass-btn--default glass-btn--sm"
+            :disabled="summaryLoading"
             @click="loadSummary"
           >
             {{ $t('common.retry') }}
@@ -433,6 +434,8 @@ const loading = ref(false)
 const summary = reactive({ all: null, byType: {} })
 const summaryFailed = ref(false)
 const summaryGuard = useLatestRequest()
+// P3：分段重试在途标志——错误条里的重试按钮随它禁用（连点会重发同一路 GET）
+const summaryLoading = ref(false)
 
 const typeOptions = computed(() => [
   { label: t('attackAlerts.tabsAll'), value: '', count: summary.all },
@@ -516,6 +519,7 @@ const buildFilterParams = () => {
 const loadSummary = async () => {
   const isCurrent = summaryGuard()
   summaryFailed.value = false
+  summaryLoading.value = true
   try {
     const res = await api.security.getAttackEventSummary(buildFilterParams())
     if (!isCurrent()) return
@@ -530,6 +534,9 @@ const loadSummary = async () => {
     }
     // 计数失败不拖垮列表：分段降级为无角标，留一条可重试的痕迹
     summaryFailed.value = true
+  } finally {
+    // 过期请求收尾不得解除新请求的在途标志
+    if (isCurrent()) summaryLoading.value = false
   }
 }
 

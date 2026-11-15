@@ -22,6 +22,25 @@ const { execFileSync } = require('child_process');
 
 const DEFAULT_MAX_OFFSET_MS = 1000;
 
+/**
+ * CLOCK_MAX_OFFSET_MS 的严格解析（纯函数）：全串必须是十进制整数，否则返回 null。
+ *
+ * 为什么不用 `Number.parseInt`：parseInt 按**前缀**解析（`"30abc"` 静默得 30、
+ * `" 42 "` 得 42），阈值里混进一个字符就悄悄降级成另一个阈值——时钟偏移的
+ * 「通过/不通过」边界被环境变量里的一个手误改变了，而脚本毫无察觉。
+ * 未配置（undefined/空串）返回 null ⇒ 调用方取默认值；其余任何非法形态都由
+ * 调用方报错退出（fail-closed），不做「尽力解析」。
+ * 判据/执行分离：解析在这里、报错在 main，测试直接打本函数。
+ * @param {string|undefined} raw 环境变量原值
+ * @returns {number|null} 合法整数毫秒；未配置/空串返回 null
+ */
+function parseMaxOffsetMs(raw) {
+  if (raw === undefined || raw === '') return null;
+  if (!/^\d+$/.test(String(raw))) return null;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) ? value : null;
+}
+
 /** 从 timedatectl 的 NTPSynchronized 输出解析布尔（yes/no） */
 function parseNtpSynchronized(value) {
   const text = String(value || '')
@@ -126,9 +145,14 @@ function checkClock(maxOffsetMs = DEFAULT_MAX_OFFSET_MS) {
 
 function main() {
   const raw = process.env.CLOCK_MAX_OFFSET_MS;
-  const maxOffsetMs =
-    raw === undefined || raw === '' ? DEFAULT_MAX_OFFSET_MS : Number.parseInt(raw, 10);
-  if (!Number.isInteger(maxOffsetMs) || maxOffsetMs < 1 || maxOffsetMs > 60000) {
+  const parsed = parseMaxOffsetMs(raw);
+  // 配置了但解析不了 ⇒ 报错退出；未配置/空串才允许落到默认阈值
+  if (parsed === null && raw !== undefined && raw !== '') {
+    console.error('CLOCK_MAX_OFFSET_MS 必须是 1..60000 的整数（毫秒）');
+    process.exit(2);
+  }
+  const maxOffsetMs = parsed === null ? DEFAULT_MAX_OFFSET_MS : parsed;
+  if (maxOffsetMs < 1 || maxOffsetMs > 60000) {
     console.error('CLOCK_MAX_OFFSET_MS 必须是 1..60000 的整数（毫秒）');
     process.exit(2);
   }
@@ -152,6 +176,7 @@ if (require.main === module) main();
 
 module.exports = {
   DEFAULT_MAX_OFFSET_MS,
+  parseMaxOffsetMs,
   parseNtpSynchronized,
   parseTimesyncOffsetMs,
   parseChronyTracking,

@@ -159,8 +159,31 @@ const checkBruteForce = async (username, ip, attribution = null) => {
     // 告警已落库（上方 create 在 await 内，即时性保留），这里只走网络投递
 
     // R-H2：IP 维度未达标（分布式撞单账号）到此为止——告警与审计已落库
-    // （body 的 ipAttempts 即判据），封禁只对「这个 IP 自己刷满了失败」执行
-    if (ipFailures < THRESHOLDS.bruteForceAttempts) return;
+    // （body 的 ipAttempts 即判据），封禁只对「这个 IP 自己刷满了失败」执行。
+    // 但**通知**此前也在这条 return 上断了线：SOC 若只接 webhook（审计行要人去查），
+    // 分布式撞单账号就成了"只有证据、没人被叫醒"的告警。账号维度与 IP 维度同走
+    // dispatchNotification 统一入口（fire-and-forget 纪律不变），频控键沿用
+    // `brute_force_user_<username>`（与下方 IP 维度路径的账户键同族、同一张表节流）：
+    // 5 分钟窗口内同一账号只投一条，攻击持续也不放大投递量。payload 带
+    // accountDimension:true，让接收端能把两个维度的撞库分开归因。
+    if (ipFailures < THRESHOLDS.bruteForceAttempts) {
+      if (shouldSendAlert(`brute_force_user_${username}`)) {
+        dispatchNotification(
+          ALERT_TYPES.BRUTE_FORCE,
+          ALERT_LEVELS.CRITICAL,
+          `检测到分布式撞库攻击（账号维度）：用户 ${username} 失败 ${userFailures} 次，跨 ${distinctAccounts} 个来源 IP`,
+          {
+            username,
+            ip,
+            attempts: userFailures,
+            distinctAccounts,
+            ipBanApplied,
+            accountDimension: true,
+          }
+        );
+      }
+      return;
+    }
 
     if (ipBanApplied) {
       await applyBruteForceIpBan({ normalizedIp, priorBans, fallbackIp: ip });
@@ -288,16 +311,13 @@ const checkPermissionAbuse = async (userId, attribution) => {
   });
 
   if (recentFailures >= THRESHOLDS.permissionFailures) {
-    // username 为 AuditLog 必填字段：缺失会让告警写入 ValidationError 静默失败
-    //（无调用方的潜伏缺陷，一旦接入路径即触发）
+    // username 为 AuditLog 必填字段：缺失会让告警写入 ValidationError 静默失败（无调用方的潜伏缺陷，一旦接入路径即触发）
     const User = require('../models/User');
     const abuser = await User.findById(userId).select('username').lean();
     if (!abuser) return;
 
-    // 处置侧整块（审计 / 遏制封禁 / 通知）抽到 securityAlertPermissionAbuse.js：
-    // 本文件 max-lines 已贴棘轮上限，且"遏制"是本次新增的一整条职责。
-    // 该模块的头注释记着为什么这里必须封 IP（只告警不封任何东西时，有效凭据
-    // 持有者把探测压到 <20 次/5 分钟即可永久试探权限边界）。
+    // 处置侧整块（审计 / 遏制封禁 / 通知）抽到 securityAlertPermissionAbuse.js：本文件 max-lines 已贴棘轮上限，且"遏制"是本次新增的一整条职责。
+    // 该模块的头注释记着为什么这里必须封 IP（只告警不封任何东西时，有效凭据持有者把探测压到 <20 次/5 分钟即可永久试探权限边界）。
     await require('./securityAlertPermissionAbuse').recordAndContain({
       userId,
       username: abuser.username || String(userId),
@@ -346,16 +366,14 @@ const getSecurityOverview = async (days = 7, scopeFilter = {}) => {
         100,
         Math.max(
           0,
-          // unusualAccess 每项 +5 纳入评分：非常规时间访问是独立风险信号，
-          // 此前查询后未参与计算，导致该维度风险被完全忽略
+          // unusualAccess 每项 +5 纳入评分：非常规时间访问是独立风险信号，此前查询后未参与计算，导致该维度风险被完全忽略
           criticalAlerts * 10 + highAlerts * 5 + failedLogins * 2 + unusualAccess * 5
         )
       ),
     };
   } catch (error) {
     logger.error(`安全概览获取失败: ${error.message}`);
-    // A-2：失败不能伪装成「零风险」。调用方（安全面板）必须能区分
-    // 「确实没有告警」与「查询根本没成功」——后者按 503 明确降级。
+    // A-2：失败不能伪装成「零风险」。调用方（安全面板）必须能区分「确实没有告警」与「查询根本没成功」——后者按 503 明确降级。
     return { degraded: true, period: `${days}天` };
   }
 };
@@ -364,7 +382,7 @@ const getSecurityOverview = async (days = 7, scopeFilter = {}) => {
  * 获取最近的告警列表
  *
  * 数据范围必须与 GET /api/security/audit-logs **同源**：两个端点挂同一个权限码
- * `security:audit`（routes/securityRoutes.js:235 / :276），而 /audit-logs 走
+ * `security:audit`（routes/securityRoutes.js:387 即 /alerts、:438 即 /audit-logs），而 /audit-logs 走
  * `applyAuditDataScope`（auditQueryService.js:217）。此前本函数不带范围条件，
  * 于是 level 8 的 SECURITY_ADMIN（initData 的口径：level ≥7 只有本部门范围）
  * 可以从这里读出全系统的高危审计行（username/ip/path）——
@@ -379,9 +397,8 @@ const getRecentAlerts = async (limit = 50, operatorId = null) => {
     { riskLevel: { $in: AUDIT_ERROR_RISK_LEVELS } },
     operatorId
   );
-  // 投影与 GET /security/audit-logs 同口径：只给元数据，不含 body/params/query/hmac。
-  // body 经 sanitizer 仍可能残留业务上下文与其他 PII，而审计列表/导出明确不返回它；
-  // 同权限下的告警卡片不应成为更宽的那个出口。
+  // 投影与 GET /security/audit-logs 同口径：只给元数据，不含 body/params/query/hmac。body 经 sanitizer 仍可能残留业务上下文与其他 PII，
+  // 而审计列表/导出明确不返回它；同权限下的告警卡片不应成为更宽的那个出口。
   return await AuditLog.find(query)
     .sort({ timestamp: -1 })
     .limit(limit)
@@ -398,11 +415,9 @@ module.exports = {
   IPBanEvents,
   ESCALATION_TIERS,
   BAN_ESCALATION_WINDOW_MS,
-  // 检测器统一经 guardDetection 在导出边界包一层：它们内部只挡住了"审计落库"和
-  // "封禁写入"两处抛点，入口那次"用来观测的计数查询"一直是裸 await，而所有调用方
-  // （authService 五处、rbac 一处）都是空 catch ⇒ 观测失败会整块静默掉检测与封禁。
-  // checkBulkExport 不包：它的计数来自调用方，写入与投递两处已各自收口，
-  // 实测找不出任何可达抛点（写不出用例来证明它需要这层壳），不做无据防御。
+  // 检测器统一经 guardDetection 在导出边界包一层：它们内部只挡住了"审计落库"和"封禁写入"两处抛点，入口那次"用来观测的
+  // 计数查询"一直是裸 await，而所有调用方（authService 五处、rbac 一处）都是空 catch ⇒ 观测失败会整块静默掉检测与封禁。
+  // checkBulkExport 不包：它的计数来自调用方，写入与投递两处已各自收口，实测找不出任何可达抛点（写不出用例来证明它需要这层壳），不做无据防御。
   checkBruteForce: guardDetection('暴力破解检测', checkBruteForce),
   checkBulkExport,
   checkUnusualTime,

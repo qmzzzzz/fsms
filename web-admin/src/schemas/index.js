@@ -173,6 +173,36 @@ export const PermissionUpdateEventSchema = z.looseObject({
 })
 
 /**
+ * GET /api/security/stats 的 data 载荷（SecurityStatsCard，P3：形状校验）
+ *
+ * 只校验 data 部分——外层包络（success/message）已由 api.js 的通用
+ * verifyResponseShape（ApiEnvelopeSchema）把关，这里不重复。
+ * 计数字段类型必须是 number（缺位/null 允许，由组件归一到 0——「缺字段按 0 兜底」
+ * 是既有契约；但字符串/对象必须拒绝，否则模板直出 "NaN"、"[object Object]"）；
+ * anomalies 两个聚合必须是**数组**（卡片只读 .length，对象/缺位会抛 TypeError
+ * 把整卡打白）；securityLevel 收敛到既有两值，未知值回落 normal。
+ * 聚合条目（{_id,count,firstEventAt}）卡片不消费，用 unknown 放行。
+ */
+export const SecurityStatsDataSchema = z
+  .looseObject({
+    overview: z
+      .looseObject({
+        todayLogins: z.number().nullish(),
+        todayFailedLogins: z.number().nullish(),
+        highRiskOperations: z.number().nullish(),
+      })
+      .nullish(),
+    anomalies: z
+      .looseObject({
+        failedOperationUsers: z.array(z.unknown()).nullish(),
+        unusualTimeUsers: z.array(z.unknown()).nullish(),
+      })
+      .nullish(),
+    securityLevel: z.enum(['normal', 'high']).nullish(),
+  })
+  .nullish()
+
+/**
  * 把 zod 的 issues 压成单行日志文本（控制台里一眼能看出哪个字段漂了）
  * @param {import('zod').ZodError} error
  * @returns {string}

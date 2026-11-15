@@ -1,3 +1,5 @@
+'use strict';
+
 /**
  * 设备状态「清单视图」的单一来源（值仍来自 utils/constants.js 的 DEVICE_STATUS）
  *

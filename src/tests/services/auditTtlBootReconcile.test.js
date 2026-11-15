@@ -274,6 +274,10 @@ describe('业务集合 TTL 的启动期对账（D2：改档不生效 / 关开关
     await coll()
       .drop()
       .catch(() => {});
+    // 本块 beforeAll 里自己重连过（第一个 describe 的 afterAll 已关连接）：
+    // 随套件归还连接——不关则 worker 在最后一个文件后被强杀、套件输出被吞
+    // （同 ci/mongooseTeardownLedger.test.js 头注的机理）。
+    await mongoose.connection.close().catch(() => {});
   });
 
   test('改档漂移（库里 90 天 / 声明 180 天）⇒ 启动对账把它纠回声明值', async () => {

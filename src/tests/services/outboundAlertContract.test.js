@@ -166,6 +166,8 @@ describe('出站告警：档位词表、投递名次表、调用点闭包', () =
       .mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
     process.env.SECURITY_ALERT_WEBHOOK = WEBHOOK;
     process.env.SECURITY_ALERT_WEBHOOK_ALLOWLIST = '';
+    // 缺签名密钥已 fail-closed（不投递）：名次表测的是投递语义，须给密钥
+    process.env.SECURITY_ALERT_WEBHOOK_SECRET = 'whsec-contract-probe';
     // 阈值压到词表的最低档：这样"能不能投递"就只由名次表说了算
     process.env.SECURITY_ALERT_MIN_LEVEL = 'low';
   });
@@ -175,6 +177,7 @@ describe('出站告警：档位词表、投递名次表、调用点闭包', () =
     dnsLookup.mockRestore();
     delete process.env.SECURITY_ALERT_WEBHOOK;
     delete process.env.SECURITY_ALERT_WEBHOOK_ALLOWLIST;
+    delete process.env.SECURITY_ALERT_WEBHOOK_SECRET;
     delete process.env.SECURITY_ALERT_MIN_LEVEL;
   });
 

@@ -35,8 +35,7 @@ const { resolvePunishableIp, clientIpForSecurityDecision } = require('../../util
  * 用户注册（业务层）
  * @param {object} body 请求体
  * @param {object} [ctx] `{ req }`：注册成功即建立会话，UserSession 的 ip / UA / 设备指纹
- *   都只能从真实请求对象取（见 sessionService.createSession），没有 req 时按既有降级口径
- *   签发不可吊销的令牌
+ *   都只能从真实请求对象取（见 sessionService.createSession），没有 req 时按既有降级口径签发不可吊销的令牌
  * @returns {Promise<{outcome:'CAPTCHA_INVALID'|'CONSENT_REQUIRED'|'CONSENT_RECORD_FAILED'|'ENC_INVALID'|'WEAK'|'DUPLICATE'|'OK'}>}
  *   OK 时附 { userId, username, email, token, refreshToken }
  */
@@ -61,25 +60,22 @@ async function registerUser(body, ctx = {}) {
   }
 
   // department 刻意不解构：它是数据范围的唯一来源（middleware/rbac.js 以
-  // user.department 构造部门域 dataScope），公开注册若能自带部门，任何访客
-  // 都能把新账号投放到目标部门，借部门隔离边界读取该部门数据。
-  // 部门归属只能由管理员经 userController 创建/更新接口写入。
+  // user.department 构造部门域 dataScope），公开注册若能自带部门，任何访客都能把
+  // 新账号投放到目标部门、借部门隔离边界读取数据。归属只能由管理员接口写入。
   const { username, email, realName, phone } = body;
 
   // 哨兵用户名（canary）闸：系统保留名不经注册进入用户集合——幽灵名的价值
   // 完全建立在"不可能是真账号"上，注册通过即把哨兵变成普通用户（启动期
-  // 遮蔽对账会把这种状态告警，但不该先把库写脏）。对外与重名同口径
-  // （模糊拒绝防枚举，且不新增 outcome，credentials 层 switch 不动）；
-  // 探测方的尝试会在登录路径被 canaryWatch 记录与告警。
+  // 遮蔽对账会把这种状态告警，但不该先把库写脏）。对外与重名同口径（模糊拒绝
+  // 防枚举，且不新增 outcome，credentials 层 switch 不动）；探测方会在登录路径留痕。
   //
   // 注册路径自身的探测留痕（渗透测试 i760 #28 长期加固项）：此前只写一条
   // logger.warn——注册探测与登录探测不同，它**不需要口令正确**就能零成本
   // 批量枚举保留名单（201/400 差异即预言机），只留日志等于信号等级与风险
   // 错配。复用登录路径同一通道 recordGhostAttempt：审计必写（CANARY_
   // USERNAME_ATTEMPT，critical）、网络告警按每哨兵每日一次频控；函数永不
-  // reject，调用点仍按防御性口径 catch。响应侧维持既有 400 口径不变——
-  // 「对保留名返回虚假 201」在报告建议之列但未采纳：虚假成功无法签发会话
-  // cookie，脚本化枚举以 Set-Cookie 有无即可二次区分，预言机只是换了位置。
+  // reject，调用点仍按防御性口径 catch。响应侧维持既有 400 口径不变（「对保留名
+  // 返回虚假 201」未采纳：虚假成功签不出会话 cookie，Set-Cookie 有无即可二次区分）。
   if (canaryWatch.matchCanaryName(username)) {
     logger.warn('注册被拒 - 用户名为安全哨兵保留名', { username });
     await canaryWatch
@@ -118,8 +114,8 @@ async function registerUser(body, ctx = {}) {
   // 而带 collation 的查询无法命中默认 collation 的索引，合并写会让另一分支退化。
   // A3（2026-10-16）：邮箱分支改查 **emailKey**（HMAC 检索键）。原先查的是明文
   // `email_1` 索引，而 email 列已加密（随机 IV）——明文相等性在密文列上不再成立，
-  // 继续查明文列会**恒不命中**，表现为「注册时重名邮箱能通过判重」。
-  // 归一化由 piiSearchKey 内部完成（trim + lowercase），与落库键同口径。
+  // 继续查明文列会**恒不命中**（注册时重名邮箱能通过判重）。归一化由 piiSearchKey
+  // 内部完成（trim + lowercase），与落库键同口径。
   const [existingByName, existingByEmail] = await Promise.all([
     User.findByUsername(username).select('_id').lean(),
     User.findOne({ emailKey: piiSearchKey(email) })
@@ -146,10 +142,10 @@ async function registerUser(body, ctx = {}) {
       roles: roleIds,
     });
   } catch (e) {
-    // 判重与写入之间存在窗口（双击提交 / 前端重试 / 并发脚本）：先到者 201，
-    // 后到者撞 username_ci / emailKey_1 唯一索引。原始 MongoError 冒泡成 500 会给
-    // 「该用户名刚刚被注册」的弱时间信号（500 vs 模糊拒绝可分），与防枚举统一
-    // 口径矛盾——归一到与上方判重相同的 DUPLICATE 出口（审计 2026-11-02 B-F-3）。
+    // 判重与写入之间存在窗口（双击提交 / 前端重试 / 并发脚本）：先到者 201，后到者撞
+    // username_ci / emailKey_1 唯一索引。原始 MongoError 冒泡成 500 会给「该用户名刚刚
+    // 被注册」的弱时间信号（500 vs 模糊拒绝可分），与防枚举统一口径矛盾——归一到
+    // 与上方判重相同的 DUPLICATE 出口（审计 2026-11-02 B-F-3）。
     if (isDuplicateKeyError(e)) return { outcome: 'DUPLICATE' };
     throw e;
   }
@@ -173,10 +169,10 @@ async function registerUser(body, ctx = {}) {
   // 否则新账号在面板上最长一个 TTL 不可见。
   statsCache.invalidateAll('user-register');
 
-  // 注册成功即建立会话：注册后立即登录无需再次输密码。
-  // 「建立会话」得真的建立——与登录走同一段 sid + UserSession 落库（判据与降级方向
-  // 见 issueRevocableTokenPair）：只签令牌而不落库，这条登录态在「登录会话」界面里
-  // 不存在、踢不掉，且不带 sid 的 refresh 轮换会一路自我续期而永不过期。
+  // 注册成功即建立会话：注册后立即登录无需再次输密码。「建立会话」得真的建立——
+  // 与登录走同一段 sid + UserSession 落库（判据与降级方向见 issueRevocableTokenPair）：
+  // 只签令牌而不落库，这条登录态在「登录会话」界面里不存在、踢不掉，且不带 sid 的
+  // refresh 轮换会一路自我续期而永不过期。
   const regRoles = defaultRole ? [defaultRole.code] : [];
   const { token, refreshToken, sid, sessionRegistered } = await issueRevocableTokenPair({
     user,
@@ -204,9 +200,9 @@ async function registerUser(body, ctx = {}) {
  *
  * 为什么必须共用：`sid` 的语义是"跨 refresh 轮换保持不变 ⇒ 踢掉某台设备后那台设备刷新令牌
  * 也无法复活"，而"落库失败就退回不带 sid 的令牌"是这条语义的唯一兜底。两处 mint 各抄一份时，
- * 注册路径正是漏抄的那一份（F-175）：它既不建 UserSession，签出的 refresh 令牌却能一路自续
- * ——`refreshSession` 里的 `if (rotateSid)` 对无 sid 的令牌整段跳过，于是每次轮换再签一对新的
- * 无 sid 7 天令牌，这条血统不出现在「登录会话」界面、点不掉，只有改密码（tokenVersion）能终止。
+ * 注册路径正是漏抄的那一份（F-175）：它不建 UserSession，签出的 refresh 令牌却能一路自续
+ * ——`refreshSession` 对无 sid 的令牌整段跳过，于是每次轮换再签一对新的无 sid 7 天令牌，
+ * 这条血统不出现在「登录会话」界面、点不掉，只有改密码（tokenVersion）能终止。
  * 共用之后新增的登录态一律可吊销；降级只保留给真正的落库失败（那条仍属无上限血统，见待拍板项）。
  *
  * 降级方向是"少给一份可吊销性"而不是"拒绝这次登录/注册"（理由见 issueLoginSession 的 JSDoc），
@@ -253,8 +249,8 @@ async function issueRevocableTokenPair({ user, roles, req }) {
  * 登录成功后的收尾（自 loginUser 拆出）：非常规时间审计、登录信息更新、
  * 角色权限读取、令牌签发、设备会话注册与成功审计。
  * 会话注册表落库失败不阻断登录，但要降级为「令牌不含可吊销会话」：若此处失败
- * 仍下发带 sid 的令牌，authenticate 会因查不到会话而拒绝该令牌，用户登录成功
- * 却立刻无法访问任何接口——比「本次登录不支持设备级吊销」严重得多。
+ * 仍下发带 sid 的令牌，authenticate 会因查不到会话而拒绝该令牌——比「本次登录
+ * 不支持设备级吊销」严重得多。并发删号返回 outcome USER_GONE（fail-closed 拒发）。
  */
 async function issueLoginSession(user, ctx, username) {
   const { ip, userAgent, fingerprint } = ctx;
@@ -293,7 +289,15 @@ async function issueLoginSession(user, ctx, username) {
     match: { status: 'active' },
     populate: { path: 'permissions', select: 'code', match: { status: 'active' } },
   });
-  // 安全修复：populate 后可能存在 null（指向已删除角色的 ObjectId），需过滤
+  // 并发删号防护（审计 2026-11-14 B，fail-closed）：② 段查到可用账户之后、这条重查
+  // 之前账户可能已被删除——populatedUser 为 null 时旧代码 .roles 直接 TypeError ⇒
+  // 登录接口 500。此刻口令已验证通过，绝不能崩、也不能再签发任何令牌：拒发并交由
+  // 控制器转注册码 USER_NOT_FOUND_OR_DELETED（401）。
+  if (!populatedUser) {
+    logger.warn('登录中止 - 角色快照重查时账户已不存在（并发删号）', { username });
+    return { outcome: 'USER_GONE' };
+  }
+  // populate 后可能存在 null（指向已删除角色的 ObjectId），需过滤
   const roles = populatedUser.roles.map((r) => r?.code).filter(Boolean);
   const permissions = [
     ...new Set(populatedUser.roles.flatMap((r) => r?.permissions?.map((p) => p.code) || [])),

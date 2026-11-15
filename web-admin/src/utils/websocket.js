@@ -60,7 +60,8 @@ export class WebSocketService {
     this._onReconnectFailed = null
     // P3-43：重连彻底失败的回调（默认为空，由调用方注入 UI 提示）
     this._onGiveUp = null
-    /** 是否已耗尽重连次数（供调用方查询「实时推送是否已失效」） */
+    /** 是否已耗尽重连次数（供调用方查询「实时推送是否已失效」）。UI 侧的消费由
+     * 布局层统一注册的 onGiveUp 回调承担（usePermissionSync），本标志保持为可查询状态 */
     this.reconnectExhausted = false
     /**
      * 需要加入的房间集合
@@ -202,6 +203,13 @@ export class WebSocketService {
       this._onReconnectFailed = () => {
         this.isConnecting = false
         this.reconnectExhausted = true
+        // P2-6：与上方 auth-error 同口径——通道就此不可自愈（manager 停止重连），
+        // 必须上报降级，否则只剩「give-up 提示注册了才有人知道」这一条腿：
+        // 没注册回调时连接照旧静默死亡，监控里毫无痕迹。
+        reportDegradation('websocket: 重连次数耗尽，实时推送不可用', {
+          reason: 'reconnect-exhausted',
+          url: this.url,
+        })
         if (this._onGiveUp) {
           try {
             this._onGiveUp()
@@ -235,7 +243,7 @@ export class WebSocketService {
   /**
    * 发送事件。返回值是调用方唯一能拿到的送达语义：
    *   `true`  = 已交给 socket.io 的发送队列（**不等于**对端收到）
-   *   `false` = 未发送（socket 不存在或未连接），已计入 `droppedSends`
+   *   `false` = 未发送（socket 不存在 / 未连接 / 未完成握手鉴权），已计入 `droppedSends`
    *
    * 为什么不再"静默丢弃"（F-13，2026-10-17）：断线窗口里丢掉的 join-room 不会自愈——
    * 重连后房间不会自动重建，页面表现是"连着却收不到推送"。现在至少让丢弃可分辨、可见：
@@ -243,6 +251,11 @@ export class WebSocketService {
    *   2. `this.droppedSends` 累计数（调用方/监控/测试可读）；
    *   3. `reportDegradation` 上报，但按 `DROP_REPORT_INTERVAL_MS` 节流——断线期间
    *      每次 send 都上报会把错误上报通道自己打爆（降级引发降级）。
+   *
+   * P2-7：除 connected 外还要求 `authenticated`。传输层连通 ≠ 服务端鉴权完成
+   * （authenticateSocket 是异步链：黑名单/用户/会话查询），握手窗口内经未鉴权
+   * socket 发出的业务事件会被服务端以「请先完成认证」拒绝且不会重试——与
+   * joinRoom 等 authenticated 的口径一致（见 _onAuthenticated 注释）。
    *
    * 刻意**不做**自动排队：排队要先定义容量、过期与顺序语义。幂等事件（join-room、
    * 订阅）重连后由 onConnect 重放更可靠；非幂等事件（指令下发）排队重放会重复执行。
@@ -253,7 +266,7 @@ export class WebSocketService {
    * @returns {boolean} 是否已交给 socket.io 发送队列
    */
   send(event, payload) {
-    if (this.socket && this.socket.connected) {
+    if (this.socket && this.socket.connected && this.authenticated) {
       this.socket.emit(event, payload)
       return true
     }
@@ -261,7 +274,7 @@ export class WebSocketService {
     const now = Date.now()
     if (now - this._lastDropReportAt >= DROP_REPORT_INTERVAL_MS) {
       this._lastDropReportAt = now
-      reportDegradation('websocket: 未连接，事件未发送', {
+      reportDegradation('websocket: 未就绪（未连接或未鉴权），事件未发送', {
         event,
         dropped: this.droppedSends,
         url: this.url,

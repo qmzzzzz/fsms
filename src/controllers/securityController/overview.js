@@ -17,6 +17,9 @@ const { AUDIT_RISK_LEVELS, AUDIT_ERROR_RISK_LEVELS } = require('../../constants/
 // 英文界面下无从翻译。见 constants/securitySuggestions.js 文件头。
 const { SECURITY_SUGGESTION_CODES } = require('../../constants/securitySuggestions');
 
+// 概览统计窗口（天）：取数窗口与缺省 period 同一来源——修掉 `${7}天` 死模板，period 数据字段放机器可读的天数而非本地化字符串（文案归前端，同建议码口径）
+const OVERVIEW_WINDOW_DAYS = 7;
+
 /**
  * 获取系统安全统计
  * GET /api/security/stats
@@ -114,8 +117,7 @@ const rejectMalformedOverview = (overview, res) => {
 
 /** 非负钳位与缺省值（原实现逐字段展开，取值口径不变） */
 const clampOverviewNumbers = (overview) => {
-  // 添加默认值
-  overview.period = overview.period || `${7}天`;
+  overview.period = overview.period || OVERVIEW_WINDOW_DAYS;
   // 确保所有数字字段都是非负数
   overview.criticalAlerts = Math.max(0, overview.criticalAlerts);
   overview.highAlerts = Math.max(0, overview.highAlerts);
@@ -264,7 +266,7 @@ const getSecurityOverview = asyncHandler(async (req, res) => {
     // 能从概览读出全系统的失败登录/高危告警数。范围解析失败（403）由下面的 catch
     // 原样上冒。
     const { query: scopeFilter } = await applyAuditDataScope({}, req.user.userId);
-    const overview = await securityAlert.getSecurityOverview(7, scopeFilter);
+    const overview = await securityAlert.getSecurityOverview(OVERVIEW_WINDOW_DAYS, scopeFilter);
     // A-2：服务层查询失败时返回 degraded，而不是补齐全 0 字段。必须先于形状校验：
     // 让「数据不可用」显式表现为 503，而不是一张写着 0 风险的面板。
     if (overview && overview.degraded === true) {

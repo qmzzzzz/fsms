@@ -106,8 +106,10 @@ describe('保留通配的铸造防线（POST /api/roles）', () => {
   });
 
   afterAll(async () => {
-    // 只清自己造的东西：`*:*` 权限与内置 SUPER_ADMIN 可能是 initData 播种的共享状态，
-    // 同一 jest run 里其它套件（globalSetup 共享库）会依赖它们。
+    // 只清自己造的东西（O，2026-11-15 更正：原注释称「globalSetup 共享库、其它套件
+    // 会依赖它们」——setup.js 现已按文件隔离，每个测试文件一个全新空库，不存在
+    // 其它套件依赖本文件数据的前提；「只清自己造的」作为收尾纪律保留）。
+    // `*:*` 权限与内置 SUPER_ADMIN 属 initData 播种态，不因本套件而变。
     await Role.deleteMany({ code: new RegExp(`^${stamp}`, 'i') }).catch(() => {});
     if (createdSuper) {
       await Role.deleteMany({ _id: superRoleId, code: 'SUPER_ADMIN' }).catch(() => {});

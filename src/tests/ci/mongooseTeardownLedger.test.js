@@ -109,22 +109,12 @@ function emptyReadyStateShells(text) {
  */
 const LEDGER = [
   {
-    rel: 'src/tests/controllers/reportExportRowOrderAndCells.test.js',
-    owner: '他人脏文件（M）',
-    note: '同族漏关：在文件末尾补 root 级 afterAll，内 await mongoose.connection.close()',
-  },
-  {
     rel: 'src/tests/services/auditUsernameCastGate.test.js',
     owner: '他人脏文件（M）',
     note: '同族漏关：在文件末尾补 root 级 afterAll，内 await mongoose.connection.close()',
   },
   {
     rel: 'src/tests/services/observabilityWritesNeverReject.test.js',
-    owner: '他人脏文件（AM）',
-    note: '同族漏关：在文件末尾补 root 级 afterAll，内 await mongoose.connection.close()',
-  },
-  {
-    rel: 'src/tests/ci/stuffingProfileWriteSites.test.js',
     owner: '他人脏文件（AM）',
     note: '同族漏关：在文件末尾补 root 级 afterAll，内 await mongoose.connection.close()',
   },

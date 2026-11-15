@@ -171,8 +171,7 @@ const methods = {
     const cookieHeader = socket.handshake?.headers?.cookie;
     if (cookieHeader) {
       const cookies = parseCookies(cookieHeader);
-      // 双名兼容读（__Host- 前缀迁移，见 cookie.js）：HTTP 侧与 WS 侧必须同源，
-      // 否则升级窗口内「HTTP 已登录、WS 握手却匿名」。
+      // 双名兼容读（__Host- 前缀迁移，见 cookie.js）：HTTP 侧与 WS 侧必须同源，否则升级窗口内「HTTP 已登录、WS 握手却匿名」。
       const cookieToken = pickCookieValue(cookies, activeAccessCookieNames());
       if (cookieToken) return cookieToken;
     }
@@ -188,7 +187,8 @@ const methods = {
   async authenticateSocket(socket, token, authTimer) {
     try {
       // 黑名单闸（2026-10-01 审计 D-1）：HTTP 侧 checkIPBlacklist 挂在 authenticate
-      // **之前**（app.js:263），WS 侧此前全文 0 处引用 IPBlacklist ⇒ 被自动升级封禁
+      // **之前**（app.js:261；原写 :263，2026-11-15 密度裁剪批 app.js 注释压缩后顺移），
+      // WS 侧此前全文 0 处引用 IPBlacklist ⇒ 被自动升级封禁
       // 或被人工拉黑的 IP，只要手里还有一枚未失效令牌就能建立推送通道并订阅
       // alarm / device-alert / role-management，封禁对它只关上了 HTTP 那扇门。
       // 放在令牌校验之前，与 HTTP 侧同序：被禁 IP 一律不消耗后续查库与解密开销。

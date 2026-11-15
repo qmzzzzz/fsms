@@ -240,6 +240,15 @@ describe('蜜罐聚合端点表：声明与真实路由表同源', () => {
       expect(item.why.length).toBeGreaterThan(8);
     }
   });
+
+  test('MODULE_NAMES 无死键：每个键都必须被 permission-tree 的合成权限行读到', () => {
+    // 唯一消费方是 moduleNodeOf(module)，module 集合来自 DECOY_PERMISSION_ROWS；
+    // 目录里不存在的模块名登记了也读不到（真实控制器的九模块全表不在这里抄）。
+    const modules = new Set(decoy.DECOY_PERMISSION_ROWS.map((row) => row.module));
+    for (const key of Object.keys(aggData.MODULE_NAMES)) {
+      expect(modules.has(key)).toBe(true);
+    }
+  });
 });
 
 describe('载荷形状与独立复算', () => {

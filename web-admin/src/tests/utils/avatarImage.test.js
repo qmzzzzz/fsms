@@ -41,6 +41,15 @@ const drawCalls = []
 let createObjectUrlCalls = 0
 let revokeObjectUrlCalls = 0
 
+// S（2026-11-15）：beforeEach 覆盖的全局替身必须在 afterEach 还原——
+// 这些是普通赋值不是 vi mock，restoreAllMocks 管不到它们；尤其 document.createElement
+// 在 driveChain 里还会再包一层，不还原会让包装层数逐用例累积。
+let originalCreateElement
+let originalImage
+let srcDescriptorBefore
+let originalCreateObjectURL
+let originalRevokeObjectURL
+
 const FakeImage = class {
   constructor() {
     this.naturalWidth = 0
@@ -61,6 +70,13 @@ beforeEach(() => {
   drawCalls.length = 0
   createObjectUrlCalls = 0
   revokeObjectUrlCalls = 0
+
+  // 安装置身前先存原件（含"原本不存在"的形态）
+  originalCreateElement = document.createElement
+  originalImage = globalThis.Image
+  srcDescriptorBefore = Object.getOwnPropertyDescriptor(StubImage.prototype, 'src')
+  originalCreateObjectURL = URL.createObjectURL
+  originalRevokeObjectURL = URL.revokeObjectURL
 
   // Image：src 一赋值就同步回调（jsdom 不会真的去解码 blob:）
   const imageInstances = []
@@ -113,6 +129,20 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  // 全局替身逐项还原（与 beforeEach 的安装一一对应）；undefined 的原件用
+  // delete 摘掉 own property，避免留下「存在但不是函数」的伪实现
+  document.createElement = originalCreateElement
+  globalThis.Image = originalImage
+  if (originalImage === undefined) delete globalThis.Image
+  if (srcDescriptorBefore) {
+    Object.defineProperty(StubImage.prototype, 'src', srcDescriptorBefore)
+  } else {
+    delete StubImage.prototype.src
+  }
+  URL.createObjectURL = originalCreateObjectURL
+  if (originalCreateObjectURL === undefined) delete URL.createObjectURL
+  URL.revokeObjectURL = originalRevokeObjectURL
+  if (originalRevokeObjectURL === undefined) delete URL.revokeObjectURL
   vi.restoreAllMocks()
 })
 

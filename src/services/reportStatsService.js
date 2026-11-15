@@ -22,7 +22,7 @@ const TREND_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
  * 报表内嵌"即将到期"清单的单次上限（资源护栏）。
  *
  * 刻意**不**与 `EXPIRING_LIST_LIMIT`(50) 合并：那是提醒出口的上限，这里是报表出口，两者要各自调参（是否统一属待拍板项，见 AGENT 工作总账 §104.7）。
- * 但「截断必须可数」这条约定（`constants/deviceAlerts.js:38-48`、F-174）对本出口同样成立，所以响应体如实带 `expiringSoonTotal` / `expiringSoonTruncated`：
+ * 但「截断必须可数」这条约定（`constants/deviceAlerts.js:42-52`、F-174）对本出口同样成立，所以响应体如实带 `expiringSoonTotal` / `expiringSoonTruncated`：
  * 修复前 20 行的清单与库里 5000 台的清单**同形**，安全员据此排巡检/备耗材。
  */
 const EXPIRING_REPORT_LIMIT = 20;
@@ -58,7 +58,7 @@ const getDeviceReportData = async (query) => {
               { $group: { _id: '$location.building', count: { $sum: 1 } } },
               { $sort: { count: -1 } },
             ],
-            // 不用 $unwind 展开数组：数组只留最新 RECORD_TAIL_CAP(200) 条（models/FireDevice.js:256），展开计数会在第 201 条起永久少报，而"截断必须可数"正是 maintenanceRecordCount 存在的理由。
+            // 不用 $unwind 展开数组：数组只留最新 RECORD_TAIL_CAP(200) 条（models/FireDevice.js:258），展开计数会在第 201 条起永久少报，而"截断必须可数"正是 maintenanceRecordCount 存在的理由。
             // 取两者较大值兼容存量文档（无计数字段时按数组长度算），并顺带去掉随总条数线性增长的 $unwind 代价。
             maintenanceTotal: [
               {

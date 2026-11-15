@@ -76,6 +76,20 @@ export function usePermissionSync() {
     try {
       ws = acquireWebSocket()
       ws.on('permission-sync', handlePermissionSync)
+      // P2-6：give-up 提示上收全局。重连耗尽 / 握手认证失败后推送永久失效，
+      // 此前唯一的 onGiveUp 注册在角色管理页——用户在其它页面看到的界面照常，
+      // 却不会再有任何实时更新（挂着过期数据做决策比明确报错更危险）。
+      // 布局层的本 composable 覆盖整个登录会话，由这里统一注册；
+      // RoleView 的局部注册已删，避免「角色页注册却全局弹出」的错位。
+      // duration=0 不自动消失：这条信息决定用户是否该信任眼前的数据。
+      ws.onGiveUp(() => {
+        ElNotification({
+          title: t('common.warning'),
+          message: t('messages.wsDisconnected'),
+          type: 'warning',
+          duration: 0,
+        })
+      })
     } catch (error) {
       // P1-18：建连失败退化为原有行为（下次登录或刷新页面后生效），不影响主流程；
       // 但此前完全静默——界面照旧，只是权限热同步永久失效，线上无从发现。

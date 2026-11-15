@@ -1,14 +1,11 @@
-/**
- * 安全告警投递服务：负责结构化日志、指标、SSRF 校验与 Webhook 重试。
- * 检测服务只决定是否产生告警，不关心出站投递细节。
- */
+// 安全告警投递服务：负责结构化日志、指标、SSRF 校验与 Webhook 重试。
+// 检测服务只决定是否产生告警，不关心出站投递细节。
 
 const logger = require('../utils/logger');
-const { incSecurityAlert } = require('../utils/metrics');
+// 经命名空间调用而非解构：jest.spyOn(metrics, 'incSecurityAlert') 只能拦属性访问，解构出的局部引用在模块加载期就定死、spy 不生效（实测本文件首个 fail-closed 用例）。
+const metrics = require('../utils/metrics');
 const { resolvePinnedTarget } = require('./webhookTargetResolver');
-// F-04（2026-10-17）：生产判定必须与 validate.js 的归一判据同源。
-// 用字面量比较时 `NODE_ENV=prod`（生产硬闸全开）在这条告警里被当成开发环境 ⇒
-// 「webhook 已配置但没设 allowlist」这条最重要的生产告警**一声不响**。
+// F-04（2026-10-17）：生产判定必须与 validate.js 的归一判据同源——用字面量比较时 `NODE_ENV=prod`（生产硬闸全开）在这条告警里被当成开发环境 ⇒「webhook 已配置但没设 allowlist」这条最重要的生产告警**一声不响**。
 const { requiresProductionSemantics } = require('../config/validate');
 
 const MAX_ACTIVE_DELIVERIES = Math.max(1, Number(process.env.SECURITY_ALERT_MAX_CONCURRENT) || 5);
@@ -30,35 +27,28 @@ if (
 
 /**
  * 出站网域判定采用**白名单**：ipaddr.js 只有把字面量归为全局单播（'unicast'）才放行。
- *
- * 原先写的是禁止网段黑名单（loopback/private/linkLocal/uniqueLocal/reserved/
- * unspecified/carrierGradeNat）。黑名单的失败方向是错的：**没列到的名字一律当公网**。
- * 实测（ipaddr.js 2.5.0）至少漏掉这几类，而它们都能指向内网：
- *   - rfc6052  64:ff9b::/96 —— NAT64 Well-Known Prefix，目的 IPv4 直接嵌在地址里：
- *     http://[64:ff9b::7f00:1]/ 在有 NAT64 的主机上等价于 127.0.0.1，
- *     http://[64:ff9b::a9fe:a9fe]/ 等价于 169.254.169.254（云元数据）。
- *   - teredo   2001::/32 —— 同样把 IPv4 嵌进地址。
- *   - broadcast 255.255.255.255 / multicast 224/4 / as112 / 文档与基准测试段
- *     （reserved）—— 不可能是合法 webhook 目标。
- * 白名单把这些连同未来新增的特殊网段一并归入拒绝；失败代价是"少投一条告警"
- * （日志、指标与落库都在投递之前），而不是"帮攻击者打穿内网"。
+ * 原先写的是禁止网段黑名单（loopback/private/linkLocal/uniqueLocal/reserved/unspecified/
+ * carrierGradeNat）——黑名单的失败方向是错的：**没列到的名字一律当公网**。实测
+ * （ipaddr.js 2.5.0）至少漏掉这几类，而它们都能指向内网：rfc6052 64:ff9b::/96（NAT64
+ * Well-Known Prefix，目的 IPv4 直接嵌在地址里：http://[64:ff9b::7f00:1]/ 在有 NAT64 的
+ * 主机上等价于 127.0.0.1；http://[64:ff9b::a9fe:a9fe]/ 等价于 169.254.169.254 云元数据）、
+ * teredo 2001::/32（同样嵌 IPv4）、broadcast/multicast 224/4/as112/文档与基准测试段
+ * （reserved）——都不可能是合法 webhook 目标。白名单把这些连同未来新增的特殊网段一并
+ * 归入拒绝；失败代价是"少投一条告警"（日志、指标与落库都在投递之前），而不是"帮攻击者打穿内网"。
  */
 const ALLOWED_WEBHOOK_IP_RANGE = 'unicast';
 
 // 判断一个主机名（可能是 IP 字面量）是否**不属于**允许投递的地址范围。
 // 返回 true=禁止；false=全局单播公网地址。非 IP 字面量（域名）返回 false，
 // 由上层 ALLOWLIST 白名单约束，域名解析出的地址另由 webhookTargetResolver
-// 逐个过本函数后再钉住（防 DNS 重绑定），见 sendNotification。
-// 绕过点（SSRF 内网探测）：
-//  1) IPv6 字面量在 URL 里带方括号（new URL('http://[::1]/').hostname === '[::1]'）——
-//     方括号不在 `[0-9a-f.:]` 字符集里，若不剥离，[::1]（loopback）、[fd00::1]（ULA）、
-//     [fe80::1]（linkLocal）、[::ffff:127.0.0.1] 会整段跳过网域检查并放行。故先剥方括号。
-//     注：十进制/十六进制/八进制（含全角数字）IPv4 已被 WHATWG URL 归一化成点分十进制，
-//     无同类绕过——已实测核对。
-//  2) IPv4 映射地址 ::ffff:x 的 range() 一律是 'ipv4Mapped'（实测 ipaddr.js 2.5.0），
-//     在白名单下**必然**落进拒绝分支——所以必须先 toIPv4Address() 展开再判：
-//     ::ffff:127.0.0.1 → loopback（拒绝，与裸写 127.0.0.1 同口径），
-//     ::ffff:8.8.8.8   → unicast（放行，否则白名单会误伤合法公网目标）。
+// 逐个过本函数后再钉住（防 DNS 重绑定），见 sendNotification。绕过点（SSRF 内网探测）：
+//  1) IPv6 字面量在 URL 里带方括号（new URL('http://[::1]/').hostname === '[::1]'）——方括号
+//     不在 `[0-9a-f.:]` 字符集里，若不剥离，[::1]（loopback）、[fd00::1]（ULA）、[fe80::1]
+//     （linkLocal）、[::ffff:127.0.0.1] 会整段跳过网域检查并放行，故先剥方括号。注：十进制/
+//     十六进制/八进制（含全角数字）IPv4 已被 WHATWG URL 归一化成点分十进制，无同类绕过（已实测）。
+//  2) IPv4 映射地址 ::ffff:x 的 range() 一律是 'ipv4Mapped'（实测 ipaddr.js 2.5.0），白名单下
+//     **必然**落进拒绝分支——所以必须先 toIPv4Address() 展开再判：::ffff:127.0.0.1 → loopback
+//     （拒绝，与裸写 127.0.0.1 同口径）；::ffff:8.8.8.8 → unicast（放行，否则误伤合法公网目标）。
 const isForbiddenIpLiteral = (targetHost) => {
   const ipLiteral = targetHost.replace(/^\[/, '').replace(/\]$/, '');
   if (!/^[0-9a-f.:]+$/i.test(ipLiteral)) return false;
@@ -78,13 +68,12 @@ const isForbiddenIpLiteral = (targetHost) => {
     parsedIp = parsedIp.toIPv4Address();
   }
   if (parsedIp.kind() === 'ipv6') {
-    // IPv4 兼容前缀 ::/96（`::10.0.0.1` 经 WHATWG URL 归一后就是 `::a00:1`，
-    // 实测 URL 解析器总会把点分改写成十六进制，所以判据看到的是十六进制形态）：
-    // ipaddr 给它 range()==='unicast' ⇒ 单看白名单会放行，而它把 IPv4 目的嵌在低 32 位里。
-    // 整段按拒绝处理：这是 1990 年代的历史前缀，现代协议栈（Linux/Node）不做 ::/96→IPv4
-    // 转换，真实 webhook 目标不可能落在这里；`::`（unspecified）与 `::1`（loopback）
-    // 也同属本段，二者本来就该拒。定级为加固而非漏洞——要打穿得依赖 NAT64，
-    // 而 `64:ff9b::/96`（rfc6052）已由上面的白名单拒掉。
+    // IPv4 兼容前缀 ::/96（`::10.0.0.1` 经 WHATWG URL 归一后就是 `::a00:1`；实测 URL 解析器
+    // 总会把点分改写成十六进制，所以判据看到的是十六进制形态）：ipaddr 给它 range()==='unicast'
+    // ⇒ 单看白名单会放行，而它把 IPv4 目的嵌在低 32 位里，整段按拒绝处理——这是 1990 年代的
+    // 历史前缀，现代协议栈（Linux/Node）不做 ::/96→IPv4 转换，真实 webhook 目标不可能落在
+    // 这里；`::`（unspecified）与 `::1`（loopback）同属本段本就该拒。定级为加固而非漏洞——
+    // 要打穿得依赖 NAT64，而 `64:ff9b::/96`（rfc6052）已由上面的白名单拒掉。
     const octets = parsedIp.toByteArray();
     if (octets.slice(0, 12).every((byte) => byte === 0)) {
       logger.warn(`安全告警 webhook 禁止 IPv4 兼容前缀 ::/96（${parsedIp.toString()}），跳过投递`);
@@ -148,15 +137,14 @@ const buildWebhookBody = ({ alertType, level, message, payload }) =>
   });
 
 /**
- * 签名头：HMAC 覆盖「时间戳.随机数.请求体」。
- *
- * 只签 body 时，任何抓到一次请求的人都可以原样重放（签名始终有效）。
- * 接收方必须校验时间戳在容忍窗口内、并去重 nonce，二者缺一不可；
+ * 签名头：HMAC 覆盖「时间戳.随机数.请求体」。只签 body 时，任何抓到一次请求的人都可以
+ * 原样重放（签名始终有效）。接收方必须校验时间戳在容忍窗口内、并去重 nonce，二者缺一不可；
  * 时间戳与 nonce 必须参与签名，否则可被单独篡改。
  */
 const signedHeaders = (body) => {
   const headers = {};
   const secret = process.env.SECURITY_ALERT_WEBHOOK_SECRET;
+  // 密钥缺省在 sendNotification 已 fail-closed（不投递），这里不会再走到；保留守卫作为纵深防御：签名构造函数永远不产出"无签名的出站头"。
   if (!secret) return headers;
   const crypto = require('crypto');
   const timestamp = Math.floor(Date.now() / 1000).toString();
@@ -170,8 +158,8 @@ const signedHeaders = (body) => {
 };
 
 /**
- * 把已校验的解析结果钉进 http 客户端：连接期不再查询 DNS。
- * 兼容 Node 在 `all: true` 与默认模式下两种回调签名。
+ * 把已校验的解析结果钉进 http 客户端：连接期不再查询 DNS。兼容 Node 在 `all: true`
+ * 与默认模式下两种回调签名。
  */
 const pinnedLookup = (address, family) => (hostname, options, callback) => {
   if (options && options.all) {
@@ -179,6 +167,26 @@ const pinnedLookup = (address, family) => (hostname, options, callback) => {
     return;
   }
   callback(null, address, family);
+};
+
+/**
+ * 出站投递的前置收敛判定（返回需要跳过投递的原因，null=可投递）。
+ * 闸的次序=旧内联次序：minLevel → 目标白名单 → 签名密钥。单独成函数还兼任
+ * sendNotification 的复杂度收口（前置闸族聚在一处，主函数只剩投递与重试）。
+ */
+const deliveryRefusalReason = (webhookUrl, level) => {
+  const levelOrder = { low: 1, medium: 2, high: 3, critical: 4 };
+  const minLevel = process.env.SECURITY_ALERT_MIN_LEVEL || 'high';
+  if ((levelOrder[level] || 0) < (levelOrder[minLevel] || 3)) return 'below_min_level';
+  if (!isWebhookTargetAllowed(webhookUrl)) return 'target_not_allowed';
+  // 缺签名密钥 ⇒ **不投递**（fail-closed，2026-11-15 审计收敛项）：旧 signedHeaders
+  // 对缺密钥静默返回空头，告警载荷无签名/无时间戳出站——接收方要么拒收（渠道静默断），
+  // 要么收下一条无法鉴别的消息（重放与篡改都没有校验面）。缺密钥=配置不完整，
+  // 宁可不投也不能发"看起来是本系统发的但没法验证"的东西出站。日志、指标与落库
+  // 都发生在这一步之前，收敛掉的只有出站通道；台账登记见 constants/failOpenSites.js
+  // 的 security_alert_webhook_unsigned_dropped。
+  if (!process.env.SECURITY_ALERT_WEBHOOK_SECRET) return 'unsigned_secret_missing';
+  return null;
 };
 
 const sendNotification = async (alertType, level, message, data) => {
@@ -201,15 +209,20 @@ const sendNotification = async (alertType, level, message, data) => {
   // 只在日志边界另立一个不冲突的键名；`payload` 本体不动 ⇒ 出站 webhook 的
   // `alert.level` 契约与带内消息文本完全不变（改动出站面要同步 OpenAPI/下游解析）。
   logger[logMethod]('SECURITY_ALERT', { ...payload, alertLevel: level });
-  incSecurityAlert(alertType, level);
+  metrics.incSecurityAlert(alertType, level);
 
   const webhookUrl = process.env.SECURITY_ALERT_WEBHOOK;
   if (!webhookUrl) return;
 
-  const levelOrder = { low: 1, medium: 2, high: 3, critical: 4 };
-  const minLevel = process.env.SECURITY_ALERT_MIN_LEVEL || 'high';
-  if ((levelOrder[level] || 0) < (levelOrder[minLevel] || 3)) return;
-  if (!isWebhookTargetAllowed(webhookUrl)) return;
+  const refusal = deliveryRefusalReason(webhookUrl, level);
+  if (refusal === 'unsigned_secret_missing') {
+    metrics.incSecurityAlert('security_alert_webhook_unsigned_dropped', 'high');
+    logger.warn(
+      `SECURITY_ALERT_WEBHOOK 已配置但 SECURITY_ALERT_WEBHOOK_SECRET 缺省，本条不投递（fail-closed）：${alertType}`
+    );
+    return;
+  }
+  if (refusal) return;
 
   // 校验与投递之间不能再解析一次，否则域名可被换到内网（DNS 重绑定）
   const pinned = await resolvePinnedTarget(

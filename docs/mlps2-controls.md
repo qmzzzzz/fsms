@@ -2,7 +2,7 @@
 
 > 对应审计缺口：`deliverables/安全缺口核查-2026-09-30.md` P3-⑮。
 > 口径：只列**可出示证据**的对照，证据是文件/测试/端点，不是口号。
-> 代码注释里多处按等保 2.0 设计（`constants/retention.js:22`、`utils/superAdmin.js:12`、
+> 代码注释里多处按等保 2.0 设计（`constants/retention.js:24`、`utils/superAdmin.js:12`、
 > `services/behaviorBaseline.js:19`）——本表把这些散点收拢成测评可交的材料。
 > 其中 `behaviorBaseline` 为**能力已建成、未接线**：当前无生产调用方，不构成运行时控制，
 > 正文「入侵防范」表下有其如实行，测评引用时按该口径作答。

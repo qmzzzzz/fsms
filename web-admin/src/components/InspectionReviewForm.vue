@@ -132,9 +132,12 @@ const factoryState = () => ({
 const form = reactive(factoryState())
 
 const rules = computed(() => ({
+  // P2-4：只保留 required——后端 inspectionRoutes 的 reviewValidation 对
+  // reviewComment 仅 optional + max(500)（src/routes/inspectionRoutes.js），
+  // 前端 min:10 属单方面加严，会把合法的短意见（如「合格」）拦在本地。
+  // 长度上限由模板上的 maxlength=500 镜像后端上限，不在此重复声明。
   reviewComment: [
     { required: true, message: t('inspection.reviewCommentPlaceholder'), trigger: 'blur' },
-    { min: 10, message: t('inspection.reviewCommentMinMsg'), trigger: 'blur' },
   ],
 }))
 

@@ -134,7 +134,8 @@ describe('DashboardWelcome 用户名回退与头像', () => {
 
     const none = mount({})
     await flush(2)
-    expect(none.find('h2').textContent).toContain('Admin')
+    // P3：兜底称呼走 i18n（zh-CN 词表为「管理员」，原为模板硬编码 'Admin'）
+    expect(none.find('h2').textContent).toContain('管理员')
   })
 
   test('头像取用户名首字母并大写（小写字母必须转为大写）', async () => {

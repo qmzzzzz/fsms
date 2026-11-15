@@ -300,8 +300,6 @@ describe('未脱敏 PII 导出：pii:export + 二次验证（L-17）', () => {
 
   test('② 口令错误 → REAUTH_PASSWORD_INCORRECT，且不产出文件', async () => {
     const res = await exportPost(piiToken, { currentPassword: `${PASSWORD}_wrong` });
-    // 临时诊断（乱序复现期）：打印 429 的来源层后即删
-    if (res.status !== 403) console.error('②-debug', res.status, JSON.stringify(jsonOf(res)));
     expect(res.status).toBe(403);
     expect(res.body?.errors?.errorCode ?? jsonOf(res)?.errors?.errorCode).toBe(
       'REAUTH_PASSWORD_INCORRECT'

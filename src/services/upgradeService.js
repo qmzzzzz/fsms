@@ -376,10 +376,35 @@ function readJob(id) {
   });
 }
 
+/**
+ * 列表读取的两段式上限（保守投影）：状态目录每个升级任务留一个文件且**没有清理机制**，旧实现把
+ * 全目录逐个 readJsonFile+parse，成本随历史任务数线性涨，而 getOverview 是管理页的读路径。现在先按
+ * mtime 粗选 `2×limit` 个候选再精读（stat 是元数据读，远廉价于全文 parse），窗口内仍按 requestedAt
+ * 精排——对外的「最近 limit 条」语义不变。语义边界（如实声明）：mtime 是状态文件**最后一次写入**
+ * （≥ requestedAt），长跑任务被反复改写时 mtime 序会前移；2× 富余窗口下 requestedAt 前 limit 名落到
+ * 窗口外需要 ≥2×limit 个更新鲜的写入，实际分布不可能触达。队列认领（hotUpgradeQueue 按 requestedAt
+ * 读 requestsDir）与活动任务判定（findActiveJob 全量）都不经过本函数，回滚/认领判据不受影响。
+ * @param {number} limit 返回条数上限（缺省 UPGRADE_HISTORY_LIMIT，钳制 [1,50]）
+ */
 function listJobs(limit = upgradeConfig.historyLimit) {
-  const jobs = listJsonFiles(upgradeConfig.statusDir)
-    .map((file) => normalizeJob(readJsonFile(file)))
-    .filter(Boolean);
+  const preselect = Math.max(1, limit) * 2;
+  const files = listJsonFiles(upgradeConfig.statusDir);
+  let candidates = files;
+  if (files.length > preselect) {
+    candidates = files
+      .map((file) => {
+        try {
+          return { file, mtime: fs.statSync(file).mtimeMs };
+        } catch {
+          // stat 失败不隐藏文件：落到候选尾（真读失败会在 normalizeJob 处按既有口径被滤掉）
+          return { file, mtime: 0 };
+        }
+      })
+      .sort((a, b) => b.mtime - a.mtime)
+      .slice(0, preselect)
+      .map((c) => c.file);
+  }
+  const jobs = candidates.map((file) => normalizeJob(readJsonFile(file))).filter(Boolean);
   const at = (job) => toEpochMs(job.requestedAt || job.startedAt || 0) || 0;
   jobs.sort((a, b) => at(b) - at(a));
   return jobs.slice(0, limit);
@@ -545,8 +570,7 @@ function getOverview({ buildInfo, now = Date.now() }) {
       ready: readiness.ready && !queueReadError,
       enabled: readiness.enabled,
       reasons: reasonList,
-      // 稳定原因码（与 reasons 同序）：英文界面据此本地化，中文界面继续用 reasons 原文
-      reasonCodes: codeList,
+      reasonCodes: codeList, // 稳定原因码（与 reasons 同序）：英文界面据此本地化，中文界面继续用 reasons 原文
       allowlist: readiness.allowlist,
       heartbeat: readiness.heartbeat,
       // 离线包候选（代理心跳携带）：仅用于展示与下拉，不是完整性背书——全量校验在代理执行时做

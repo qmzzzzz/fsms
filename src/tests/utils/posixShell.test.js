@@ -27,6 +27,14 @@ const {
 
 const resolved = resolveShell();
 
+// P（2026-11-15）：原为用例体内 `if (!resolved) return;`——无 shell 环境下静默绿通过
+// （违背仓库纪律「不静默 return」），改为显式 test.skip：意图可见、不计绿。
+// 跳过原因：本机没有可用 POSIX shell，shell 语义 / PATH 注入 / 端到端行为无从验证，
+// 属环境缺失而非代码缺陷（helpers/posixShell.js 顶部与「前提自证」用例有完整说明）。
+const maybe = resolved ? test : test.skip;
+const shellTitle = (t) =>
+  resolved ? t : `${t} — SKIPPED：本机无可用 POSIX shell（环境缺失，非代码缺陷）`;
+
 /** 环境对象里 PATH 键的实际拼写（Windows 上常是 Path） */
 function pathKeyOf(env) {
   return Object.keys(env).find((k) => k.toUpperCase() === 'PATH') || 'PATH';
@@ -75,8 +83,7 @@ describe('测试用 POSIX shell 解析', () => {
     expect(['override', 'git-bash', 'path', 'posix']).toContain(resolved.source);
   });
 
-  test('正向：解析出的 shell 具备 shell 语义（算术 / 管道 / stderr / 退出码）', () => {
-    if (!resolved) return;
+  maybe(shellTitle('正向：解析出的 shell 具备 shell 语义（算术 / 管道 / stderr / 退出码）'), () => {
     const r = runWith(
       resolved,
       "printf '%s' \"$((6*7))\"; printf 'a' | tr a b; printf 'E' >&2; exit 7"
@@ -96,8 +103,7 @@ describe('测试用 POSIX shell 解析', () => {
     );
   });
 
-  test('幂等：ensureShellOnPath 重复调用不重复插 PATH，且把来源落进环境变量', () => {
-    if (!resolved) return;
+  maybe(shellTitle('幂等：ensureShellOnPath 重复调用不重复插 PATH，且把来源落进环境变量'), () => {
     const env = { ...process.env };
     const key = pathKeyOf(env);
     const first = ensureShellOnPath(env);
@@ -117,14 +123,16 @@ describe('测试用 POSIX shell 解析', () => {
     }
   });
 
-  test('端到端：本进程里裸命令 bash 已经命中可用 shell（既有用例不改一行也能跑）', () => {
-    if (!resolved) return;
-    const r = spawnSync('bash', ['-c', "printf '%s' shell-ok"], {
-      encoding: 'utf8',
-      timeout: 20000,
-      windowsHide: true,
-    });
-    expect(String(r.stdout || '')).toBe('shell-ok');
-    expect(r.status).toBe(0);
-  });
+  maybe(
+    shellTitle('端到端：本进程里裸命令 bash 已经命中可用 shell（既有用例不改一行也能跑）'),
+    () => {
+      const r = spawnSync('bash', ['-c', "printf '%s' shell-ok"], {
+        encoding: 'utf8',
+        timeout: 20000,
+        windowsHide: true,
+      });
+      expect(String(r.stdout || '')).toBe('shell-ok');
+      expect(r.status).toBe(0);
+    }
+  );
 });

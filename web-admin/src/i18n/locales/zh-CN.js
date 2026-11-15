@@ -349,6 +349,8 @@ export default {
   },
   device: {
     title: '设备管理',
+    // P3：deviceRoutes 已收紧 deviceCode 必填——原「留空则自动生成」占位与后端不符
+    deviceCodeRequiredHint: '请输入设备编号（必填，不超过 50 个字符）',
     deviceName: '设备名称',
     deviceCode: '设备编号',
     deviceType: '设备类型',
@@ -504,7 +506,6 @@ export default {
     issuesFound: '发现问题',
     reviewCommentPlaceholder: '请输入审核意见',
     submitReviewBtn: '提交审核',
-    reviewCommentMinMsg: '审核意见至少需要10个字符',
     title: '巡检管理',
     inspectionTitle: '巡检标题',
     inspectionType: '巡检类型',
@@ -631,6 +632,8 @@ export default {
     permTreeForbidden:
       '当前账号无权查看权限目录（需要 permission:read 或 permission:tree），仅显示角色基本信息。',
     permLoadFailed: '权限集加载失败：当前勾选不代表该角色的真实权限，已禁止保存。请重试后再操作。',
+    permTreeLoadFailed:
+      '权限目录加载失败，无法展示可分配的权限项。请重试；重试会一并恢复当前角色的勾选。',
     codePlaceholder: '如：SUPER_ADMIN，只能大写字母和下划线',
     moduleFull: '已全选',
     modulePartial: '部分启用',
@@ -644,7 +647,6 @@ export default {
     clearPermTitle: '清空权限确认',
     clearPermConfirm:
       '将移除该角色的全部权限。持有该角色的用户会立即失去相应操作能力（相当于临时冻结）。是否继续？',
-    wsDisconnected: '实时推送连接已中断，当前页面数据可能不是最新。请刷新页面恢复。',
     typeMenu: '菜单',
     typeData: '数据',
   },
@@ -756,7 +758,8 @@ export default {
     securityPolicy: '安全策略',
     bruteForceBan: '暴力破解自动封禁',
     ipRequired: '请输入 IP 地址',
-    added: '已将',
+    // P3：原文案「已将」是残缺句（拼接后成「已将 1.2.3.4 黑名单」），改为完整插值句
+    added: '已将 {ip} 加入{list}',
     queryMatch: 'IP 命中查询',
     querying: '查询中…',
     queryPlaceholder: '输入 IP 查询命中情况，如 192.168.1.10',
@@ -982,6 +985,7 @@ export default {
     createdHighRisk: '高敏授权已提交，需 {count} 人签批后生效',
     rejectTitle: '驳回申请',
     rejectPrompt: '请填写驳回「{user}」的理由（可选）',
+    reasonTooLong: '驳回理由不能超过 200 个字符',
     revokeTitle: '撤销授权',
     revokeConfirm: '撤销后「{user}」的 {count} 项权限立即失效，且无法恢复。确定撤销？',
     reasonPlaceholder: '例如：配合今晚消防设备联调，需要临时查看报警与设备状态',
@@ -1556,6 +1560,7 @@ export default {
         captcha_active_bound_lost: '验证码活跃数边界丢失',
         captcha_global_cap_reached: '验证码全局并发触顶',
         captcha_ip_cap_reached: '验证码同源 IP 并发触顶',
+        captcha_issue_store_degraded: '验证码签发存储降级',
         captcha_switch_db_fallback: '验证码配置回落数据库',
         forensic_capture_trigger_unavailable: '取证采集触发不可用',
         forensic_capture_write_failed: '取证采集写入失败',
@@ -1581,6 +1586,7 @@ export default {
         reauth_grant_store_degraded: '二次验证凭据存储降级',
         scan_probe_detected: '扫描器路径探测',
         scan_probe_storm: '404 目录爆破风暴',
+        security_alert_webhook_unsigned_dropped: '未签名安全告警 webhook 丢弃',
         security_detection_failed: '安全检测执行失败',
         sql_injection_attempt: 'SQL 注入特征命中',
         suspicious_ip_activity: '可疑 IP 活动',
@@ -1840,6 +1846,8 @@ export default {
   },
   dashboard: {
     welcome: '欢迎回到消防安全管理系统，祝您工作顺利！',
+    // P3：欢迎语在身份缺失时的兜底称呼（原为模板内硬编码 'Admin'）
+    defaultUserName: '管理员',
     greetingLateNight: '凌晨好',
     greetingMorning: '早上好',
     greetingNoon: '中午好',
@@ -1902,7 +1910,6 @@ export default {
     startConfirm: '确定开始执行',
     permissionDenied: '权限不足，无法访问该页面',
     selectRequired: '请选择',
-    autoGenerate: '留空则自动生成',
     remark: '备注',
     exportSuccess: '导出成功',
     exportFailed: '导出失败',
@@ -1920,6 +1927,9 @@ export default {
     requestFailed: '请求失败',
     schemaDrift: '服务端返回的数据结构与预期不符，部分功能可能异常，请联系管理员',
     permissionsUpdated: '您的权限已被管理员调整，界面已自动更新（无需重新登录）',
+    // P2-6：实时推送重连耗尽/认证失败后的全局提示（原 role.wsDisconnected 上收）。
+    // 推送失效影响所有页面，提示由布局层统一注册，文案不再挂在 role 命名空间下
+    wsDisconnected: '实时推送连接已中断，当前页面数据可能不是最新。请刷新页面恢复。',
     // 措辞与 errors.sessionExpired 对齐（即后端错误码 SESSION_EXPIRED 的规范文案）：
     // 码化翻译与无码兜底两条路径都经 ElMessage 提示给用户，不允许同一事件两种说法
     sessionExpired: '会话已失效，请重新登录',
@@ -2048,6 +2058,7 @@ export default {
     parentPermissionSelf: '父级权限不能是权限自身',
     parentPermissionNotFound: '父级权限不存在',
     parentPermissionCycle: '父级权限设置会形成循环引用（该权限已是目标父级的祖先）',
+    permissionStateConflict: '权限编码已被其他操作创建，请刷新后重试',
     permissionTreeDepthAnomaly: '权限树层级异常，请联系管理员核查父级引用',
     permissionListInvalid: '请提供有效的权限列表',
     exportFormatUnsupported: '不支持的导出格式: {format}',
@@ -2081,6 +2092,7 @@ export default {
     targetUserIdInvalid: '目标用户 ID 格式无效',
     targetUserNotFound: '目标用户不存在',
     targetUserLacksRole: '目标用户未持有该角色，无法单独调整',
+    targetUserNotClonable: '仅内置角色支持按用户克隆权限，请勿携带目标用户 ID',
     userRolePermPeerOrHigherForbidden: '无权变更同级或更高级别用户的角色权限',
     passwordConfirmMismatch: '两次输入的新密码不一致',
     passwordSameAsCurrent: '新密码不能与当前密码相同',

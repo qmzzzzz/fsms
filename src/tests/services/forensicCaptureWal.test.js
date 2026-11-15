@@ -16,6 +16,12 @@ const os = require('os');
 const path = require('path');
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forensic-wal-'));
+// 写入前快照原值（env 泄漏收口）：这两个容量档 getWalMaxBytes/getStatInterval 运行期现读，
+// 不还原的话同 worker 后续套件的取证 WAL 被钉在 4096 字节、逐条抽查——超限即丢一半
+const PREV_WAL_ENVS = {
+  FORENSIC_WAL_CAP_BYTES: process.env.FORENSIC_WAL_CAP_BYTES,
+  FORENSIC_WAL_STAT_INTERVAL: process.env.FORENSIC_WAL_STAT_INTERVAL,
+};
 process.env.FORENSIC_WAL_CAP_BYTES = '4096';
 process.env.FORENSIC_WAL_STAT_INTERVAL = '1';
 const wal = require('../../services/forensicCaptureWal');
@@ -45,6 +51,11 @@ describe('取证 WAL：追加/裁剪/容量退让', () => {
     await wal.drain();
     wal.disable();
     fs.rmSync(tmpDir, { recursive: true, force: true });
+    // env 随套件归还（快照见文件头）：被测模块已加载，还原 env 不影响本文件
+    for (const [key, prev] of Object.entries(PREV_WAL_ENVS)) {
+      if (prev === undefined) delete process.env[key];
+      else process.env[key] = prev;
+    }
   });
 
   test('追加后可整行读回；未启用时不写文件（不产生空文件副作用）', async () => {

@@ -13,6 +13,7 @@ describe('securityAlert delivery and failure guards', () => {
   const originalWebhook = process.env.SECURITY_ALERT_WEBHOOK;
   const originalAllowlist = process.env.SECURITY_ALERT_WEBHOOK_ALLOWLIST;
   const originalConcurrency = process.env.SECURITY_ALERT_MAX_CONCURRENT;
+  const originalSecret = process.env.SECURITY_ALERT_WEBHOOK_SECRET;
 
   beforeAll(() => {
     process.env.SECURITY_ALERT_MAX_CONCURRENT = '1';
@@ -28,6 +29,8 @@ describe('securityAlert delivery and failure guards', () => {
     else process.env.SECURITY_ALERT_WEBHOOK_ALLOWLIST = originalAllowlist;
     if (originalConcurrency === undefined) delete process.env.SECURITY_ALERT_MAX_CONCURRENT;
     else process.env.SECURITY_ALERT_MAX_CONCURRENT = originalConcurrency;
+    if (originalSecret === undefined) delete process.env.SECURITY_ALERT_WEBHOOK_SECRET;
+    else process.env.SECURITY_ALERT_WEBHOOK_SECRET = originalSecret;
 
     if (mongoose.connection.readyState !== 0) {
       await mongoose.connection.close();
@@ -39,6 +42,8 @@ describe('securityAlert delivery and failure guards', () => {
     postJson.mockResolvedValue({ ok: true });
     process.env.SECURITY_ALERT_WEBHOOK = 'https://alerts.example.com/hook';
     delete process.env.SECURITY_ALERT_WEBHOOK_ALLOWLIST;
+    // 缺签名密钥已 fail-closed（不投递）：本文件测投递守卫语义，统一给默认密钥
+    process.env.SECURITY_ALERT_WEBHOOK_SECRET = 'whsec-default-for-guards-tests';
     // 投递前会对域名做解析校验并钉住地址（DNS 重绑定防护）；单测不出网
     dnsLookup = jest
       .spyOn(dns.promises, 'lookup')
@@ -82,7 +87,9 @@ describe('securityAlert delivery and failure guards', () => {
     const [url, headers, body] = postJson.mock.calls[0];
     expect(url).toBe('https://alerts.example.com/hook');
     expect(body).toContain('attack');
-    expect(headers).toEqual({});
+    // 缺密钥 fail-closed 之后，出站恒带签名头（无签名载荷不得出站）
+    expect(headers['X-Webhook-Signature']).toMatch(/^sha256=[0-9a-f]{64}$/);
+    expect(headers['X-Webhook-Timestamp']).toMatch(/^\d+$/);
   });
 
   test('does not exceed the configured concurrent delivery limit', async () => {

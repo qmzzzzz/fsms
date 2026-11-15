@@ -9,6 +9,9 @@
  *   3. 本进程的后继调用立即失败（冻结），不得进入临界区；
  *   4. 僵尸落定后强制重同步（删共享链尾键）再解冻、再释放锁。
  */
+// 写入前快照原值（env 泄漏收口）：链锁预算是 withChainLock 每次现读的，
+// 不还原的话同 worker 后续套件的锁预算被钉死在 30ms——满载下 flush 全部超时回缓冲
+const PREV_LOCK_TIMEOUT = process.env.AUDIT_CHAIN_LOCK_TIMEOUT_MS;
 process.env.AUDIT_CHAIN_LOCK_TIMEOUT_MS = '30';
 
 jest.mock('../../services/sharedCache', () => ({
@@ -65,4 +68,11 @@ describe('僵尸窗口：分布式锁保持与续租', () => {
 
     await expect(withChainLock(async () => 'after')).resolves.toBe('after');
   });
+});
+
+// 链锁预算随套件归还（快照见文件头）：auditChainZombieDuplicate.test.js 的 afterAll 同款口径
+// ——不还则同 worker 后续套件（如 attackDetectionIntegration 的真实链路）在满载下全线超时回缓冲。
+afterAll(() => {
+  if (PREV_LOCK_TIMEOUT === undefined) delete process.env.AUDIT_CHAIN_LOCK_TIMEOUT_MS;
+  else process.env.AUDIT_CHAIN_LOCK_TIMEOUT_MS = PREV_LOCK_TIMEOUT;
 });

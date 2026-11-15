@@ -122,6 +122,19 @@ describe('运行时健康信号：挂钩真的接上了（集成，不测自己�
     expect(t.buffer.length).toBeGreaterThan(0);
     t.close?.();
   });
+
+  test('行序列化失败时，该行必须计入 log_shipper_dropped_lines_total（不得静默消失）', () => {
+    const t = makeTransport();
+    // 环形引用：JSON.stringify 对它必抛（winston info 的 meta 里完全可以出现）
+    const circular = { level: 'info', message: 'circular' };
+    circular.self = circular;
+    const before = sampleOf(formatPrometheus(), 'log_shipper_dropped_lines_total');
+    expect(() => t.log(circular, () => {})).not.toThrow();
+    // 前提自证：坏行确实没进缓冲（不会在发送时二次爆炸），且丢行计数 +1
+    expect(t.buffer.length).toBe(0);
+    expect(sampleOf(formatPrometheus(), 'log_shipper_dropped_lines_total')).toBe(before + 1);
+    t.close?.();
+  });
 });
 
 describe('运行时健康信号：app.js 的 /readyz 必须真的记录判定', () => {

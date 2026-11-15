@@ -16,6 +16,10 @@
  *
  * 无 tar 或无法构造 POSIX 路径时显式 test.skip（同 importOfflineBundle.test.js 的
  * canSymlink 惯例）：静默 return 会留下一条永远绿、什么也没验证的用例。
+ *
+ * P2-11（2026-11-15）：「软链条目必拒」「绝对路径条目必拒」的夹具改为手工构造
+ * ustar 头（writeHandcraftedUstarGz），不再依赖 python tarfile / tar -P——
+ * 原先能力缺失时 console.warn + 静默 return 的两处分支已消除。
  */
 
 'use strict';
@@ -24,6 +28,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
+const zlib = require('zlib');
 const { spawnSync } = require('child_process');
 
 const ROOT = path.resolve(__dirname, '../../..');
@@ -155,6 +160,51 @@ const baseArgs = (ctx) => ({
   allowlist: ALLOWLIST,
   apply: true,
 });
+
+/**
+ * P2-11（2026-11-15）：手工构造 ustar 归档（zlib.gzipSync 压缩），让
+ * 「软链条目必拒」「绝对路径条目必拒」两条端到端用例**不依赖外部能力**
+ * （原先分别依赖 python tarfile 与 tar -P，缺能力时 console.warn + 静默 return，
+ * 违背本文件头「不静默 return」的自订纪律）。实测 GNU tar 1.35 对这种归档
+ * 的 `-tvzf` 清单：普通文件类型位 `-`、链接类型位 `l` 且印 `name -> linkname`、
+ * 绝对路径条目名原样保留（stderr 另有 "Removing leading `/'" 提示，不进 stdout）。
+ *
+ * @param {string} archivePath 目标 .tar.gz 路径
+ * @param {Array<{name: string, typeflag?: '0'|'2', content?: string|Buffer, linkname?: string}>} members
+ */
+function writeHandcraftedUstarGz(archivePath, members) {
+  const blocks = [];
+  for (const m of members) {
+    const content = m.content == null ? Buffer.alloc(0) : Buffer.from(m.content);
+    const header = Buffer.alloc(512, 0);
+    header.write(m.name.slice(0, 100), 0, 100, 'utf8'); // name（条目名都足够短，不需 prefix）
+    header.write(m.typeflag === '2' ? '0000777\0' : '0000644\0', 100, 8, 'utf8'); // mode
+    header.write('0000000\0', 108, 8, 'utf8'); // uid
+    header.write('0000000\0', 116, 8, 'utf8'); // gid
+    header.write(`${content.length.toString(8).padStart(11, '0')}\0`, 124, 12, 'utf8'); // size
+    header.write('00000000000\0', 136, 12, 'utf8'); // mtime（清单展示用，与静默期无关）
+    header.write('        ', 148, 8, 'utf8'); // chksum 先置 8 空格参与求和
+    header.write(m.typeflag || '0', 156, 1, 'utf8');
+    header.write((m.linkname || '').slice(0, 100), 157, 100, 'utf8'); // linkname
+    header.write('ustar\0', 257, 6, 'utf8'); // POSIX magic
+    header.write('00', 263, 2, 'utf8'); // version
+    header.write('root', 265, 32, 'utf8'); // uname
+    header.write('root', 297, 32, 'utf8'); // gname
+    header.write('0000000\0', 329, 8, 'utf8'); // devmajor
+    header.write('0000000\0', 337, 8, 'utf8'); // devminor
+    let sum = 0;
+    for (const b of header) sum += b;
+    header.write(`${sum.toString(8).padStart(6, '0')}\0 `, 148, 8, 'utf8');
+    blocks.push(header);
+    if (content.length > 0) {
+      blocks.push(content);
+      const pad = (512 - (content.length % 512)) % 512;
+      if (pad > 0) blocks.push(Buffer.alloc(pad));
+    }
+  }
+  blocks.push(Buffer.alloc(1024)); // 归档结束符：两个全零块
+  fs.writeFileSync(archivePath, zlib.gzipSync(Buffer.concat(blocks)));
+}
 
 describe('落位：成功路径', () => {
   maybe('演练不动盘；apply 后落到 bundles，且只解点名条目', () => {
@@ -327,71 +377,51 @@ describe('落位：静默期与条目判据', () => {
   });
 
   maybe('归档里含符号链接条目 ⇒ 拒绝（**类型位层面**拦下，不靠解包后的 lstat）', () => {
-    // 造归档：用 python 的 tarfile 精确设置 SYMTYPE（GNU tar 命令行无法直接造链接条目，
-    // 而 MSYS 的 ln -s 在本机退化成真目录，实测踩过——见 ADR-020）。
+    // P2-11（2026-11-15）重构：原实现用 python tarfile 造 SYMTYPE 条目（GNU tar 命令行
+    // 无法直接造链接条目，MSYS 的 ln -s 又退化成真目录，见 ADR-020），本机无 python 时
+    // console.warn + 静默 return——留下一条永远绿、什么都没验证的用例，且这是「符号
+    // 链接必拒」的唯一真归档端到端。现改为手工构造 ustar 头（见 writeHandcraftedUstarGz），
+    // 除真 tar 的 -tvzf 清单外不依赖任何外部能力，任何环境都真跑。
+    // 夹具故意带上全部必需条目（manifest/SHA256SUMS/sig/payload），使唯一可能的拒绝
+    // 原因就是那条链接——否则报错可能来自缺条目，断言失去判别力。
     const ctx = makeArchive();
-    const py = [
-      'import tarfile, io, sys',
-      'p = sys.argv[1]',
-      'with tarfile.open(p, "w:gz") as t:',
-      '    def add(name, data):',
-      '        i = tarfile.TarInfo(name); i.size = len(data)',
-      '        t.addfile(i, io.BytesIO(data))',
-      '    add("manifest.json", b"{}")',
-      '    add("SHA256SUMS", b"")',
-      '    add("manifest.sig", b"x")',
-      '    add("payload/fsms-app.tar", b"x")',
-      '    link = tarfile.TarInfo("evil")',
-      '    link.type = tarfile.SYMTYPE',
-      '    link.linkname = "/etc"',
-      '    t.addfile(link)',
-    ].join('\n');
-    const pyProbe = spawnSync('python', ['-c', 'import tarfile; print("ok")'], {
-      encoding: 'utf8',
-      timeout: 20000,
-    });
-    if (pyProbe.status !== 0) {
-      // 无 python 时显式跳过（不静默 return——那会留下一条永远绿、什么都没验证的用例）
-      console.warn('[skip] 本机无 python，跳过「软链条目必拒」的真归档用例');
-      return;
-    }
-    const pack = spawnSync('python', ['-c', py, ctx.archive], {
-      encoding: 'utf8',
-      timeout: 60000,
-    });
-    expect(pack.status).toBe(0);
+    writeHandcraftedUstarGz(ctx.archive, [
+      { name: 'manifest.json', typeflag: '0', content: '{}' },
+      { name: 'SHA256SUMS', typeflag: '0', content: '' },
+      { name: 'manifest.sig', typeflag: '0', content: 'x' },
+      { name: 'payload/fsms-app.tar', typeflag: '0', content: 'x' },
+      { name: 'evil', typeflag: '2', linkname: '/etc' },
+    ]);
     const old = new Date(Date.now() - 300000);
     fs.utimesSync(ctx.archive, old, old);
 
     const result = intakeOne({ ...baseArgs(ctx), pubkeyFile: '' });
     expect(result).toMatchObject({ ok: false, outcome: 'aborted_archive_invalid' });
-    // 关键：报错指向**类型位**，且落位目标未建立（拦在解包之前）
+    // 关键：报错指向**类型位**且点名那条链接条目，落位目标未建立（拦在解包之前）
     expect(result.reason).toMatch(/非普通文件条目/);
+    expect(result.reason).toMatch(/evil/);
     expect(fs.existsSync(path.join(ctx.bundles, 'v1.2.3'))).toBe(false);
     expect(fs.readdirSync(ctx.bundles).filter((n) => n.startsWith('.staging-'))).toEqual([]);
   });
 
   maybe('归档里条目的路径不安全 ⇒ 拒绝（不在碰任何文件之前解包）', () => {
+    // P2-11（2026-11-15）重构：原实现用 `tar -czPf` 造绝对路径条目，本机 tar 不支持
+    // -P 时 console.warn + 静默 return（同样违背文件头纪律）。现改为手工构造 ustar
+    // 头直接写绝对路径条目名——不依赖 tar 的 -P 能力，任何环境都真跑。
     const ctx = makeArchive();
-    // 造一个绝对路径条目的 tar（tar -P 才会接受绝对名）
-    const evilPkg = path.join(ctx.dir, 'evil');
-    fs.mkdirSync(evilPkg, { recursive: true });
-    fs.writeFileSync(path.join(evilPkg, 'manifest.json'), '{}');
-    const pack = spawnSync(
-      'tar',
-      ['-czPf', cygpath(ctx.archive), cygpath(path.join(evilPkg, 'manifest.json'))],
-      { encoding: 'utf8', timeout: 60000 }
-    );
-    if (pack.status === 0) {
-      // 该 tar 支持 -P：构造出了绝对路径条目，正常走断言
-      const old = new Date(Date.now() - 300000);
-      fs.utimesSync(ctx.archive, old, old);
-      const result = intakeOne({ ...baseArgs(ctx), pubkeyFile: '' });
-      expect(result).toMatchObject({ ok: false, outcome: 'aborted_archive_invalid' });
-      return;
-    }
-    // -P 不被支持（本机 tar 的实现差异，与被测代码无关）：显式记明，不让用例静默变绿
-    console.warn('[skip] 本机 tar 不支持 -P，跳过「绝对路径条目必拒」分支');
+    writeHandcraftedUstarGz(ctx.archive, [
+      { name: 'manifest.json', typeflag: '0', content: '{}' },
+      { name: '/etc/fsms-evil-should-not-land', typeflag: '0', content: 'x' },
+    ]);
+    const old = new Date(Date.now() - 300000);
+    fs.utimesSync(ctx.archive, old, old);
+
+    const result = intakeOne({ ...baseArgs(ctx), pubkeyFile: '' });
+    expect(result).toMatchObject({ ok: false, outcome: 'aborted_archive_invalid' });
+    // 报错必须指向「绝对路径」并点名那条恶意条目（判据：assertSafeRelativePath）
+    expect(result.reason).toMatch(/绝对路径/);
+    expect(result.reason).toMatch(/fsms-evil-should-not-land/);
+    expect(fs.existsSync(path.join(ctx.bundles, 'v1.2.3'))).toBe(false);
   });
 
   maybe('缺少必需条目（如归档只装了 payload）⇒ 拒绝并点名缺什么', () => {

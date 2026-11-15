@@ -18,6 +18,8 @@ import i18n from '@/i18n'
 const acquired = []
 const released = []
 const notifications = []
+/** 记录布局层注册的 onGiveUp 回调（P2-6：give-up 提示上收全局） */
+const giveUps = []
 
 vi.mock('@/utils/websocket', () => ({
   acquireWebSocket: vi.fn(() => {
@@ -25,6 +27,7 @@ vi.mock('@/utils/websocket', () => ({
     const ws = {
       on: vi.fn((evt, fn) => handlers.set(evt, fn)),
       off: vi.fn((evt) => handlers.delete(evt)),
+      onGiveUp: vi.fn((fn) => giveUps.push(fn)),
       __handlers: handlers,
       __emit: (evt, payload) => handlers.get(evt)?.(payload),
     }
@@ -81,6 +84,7 @@ beforeEach(() => {
   acquired.length = 0
   released.length = 0
   notifications.length = 0
+  giveUps.length = 0
   degradations.length = 0
 })
 
@@ -133,13 +137,20 @@ describe('usePermissionSync 载荷校验与安全兜底', () => {
     const auth = useAuthStore()
     auth.currentUser = { username: 'u1' }
     auth.permissions = []
-    vi.spyOn(auth, 'refreshPermissionsFromServer').mockResolvedValue(true)
+    const refreshSpy = vi.spyOn(auth, 'refreshPermissionsFromServer').mockResolvedValue(true)
+    const syncSpy = vi.spyOn(auth, 'syncPermissionsFromEvent')
     const consoleErr = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {
       const c = mountSync()
-      for (const payload of [null, undefined, [], 'x', 42, { permissionCodes: 'not-array' }]) {
+      const payloads = [null, undefined, [], 'x', 42, { permissionCodes: 'not-array' }]
+      for (const payload of payloads) {
         await expect(c.api().handlePermissionSync(payload)).resolves.toBeUndefined()
       }
+      // 标题承诺的「都走权威兜底」必须有断言（I，2026-11-15）：每个非法载荷各触发
+      // 一次 refreshPermissionsFromServer；store 未经乐观更新被污染
+      expect(refreshSpy).toHaveBeenCalledTimes(payloads.length)
+      expect(syncSpy).not.toHaveBeenCalled()
+      expect(auth.permissions).toEqual([])
     } finally {
       consoleErr.mockRestore()
     }
@@ -232,6 +243,29 @@ describe('usePermissionSync 连接生命周期', () => {
     await nextTick()
     expect(acquired).toHaveLength(1)
     expect(acquired[0].__handlers.has('permission-sync')).toBe(true)
+  })
+
+  test('已登录 → 注册全局 give-up 回调；触发时弹不自动消失的警示（P2-6 上收布局层）', async () => {
+    const auth = useAuthStore()
+    auth.currentUser = { username: 'u1' }
+    mountSync()
+    await nextTick()
+    expect(giveUps).toHaveLength(1)
+    // 重连耗尽 / 握手认证失败 → websocket 层触发回调
+    giveUps[0]()
+    await nextTick()
+    expect(notifications).toHaveLength(1)
+    expect(notifications[0]).toMatchObject({ type: 'warning', duration: 0 })
+    // 文案走 i18n（本测试环境默认 locale 不确定），只断言非空且为断连语义
+    expect(String(notifications[0].message)).toMatch(/实时推送连接已中断|Realtime connection lost/)
+  })
+
+  test('未登录 → 不注册 give-up 回调（与不建连同口径）', async () => {
+    const auth = useAuthStore()
+    auth.currentUser = null
+    mountSync()
+    await nextTick()
+    expect(giveUps).toHaveLength(0)
   })
 
   test('卸载 → 解除订阅并 releaseWebSocket（引用计数释放）', async () => {

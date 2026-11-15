@@ -12,7 +12,6 @@ import { mountComponent, click, flush, waitFor } from '../helpers/componentHarne
 
 const changePassword = vi.fn()
 const encryptPassword = vi.fn(async () => null)
-const clearAuth = vi.fn()
 vi.mock('@/utils/api', () => ({
   api: { auth: { changePassword: (...a) => changePassword(...a) } },
   isCanceledError: () => false,
@@ -66,7 +65,6 @@ afterEach(() => {
   changePassword.mockReset()
   encryptPassword.mockReset()
   encryptPassword.mockImplementation(async () => null)
-  clearAuth.mockReset()
   ElMessage.success.mockReset()
   ElMessage.error.mockReset()
   ElMessage.warning.mockReset()
@@ -129,20 +127,22 @@ describe('ChangePasswordCard 密文双轨（FE-H1）', () => {
     expect(encryptPassword.mock.calls[1][0]).toBe(STRONG)
   })
 
-  test('WebCrypto 不可用（返回 null）：降级明文轨，属设计内', async () => {
+  test('加密返回 null（dev 非安全上下文）：fail-closed 阻断提交并提示，不发请求（P2-5）', async () => {
     encryptPassword.mockResolvedValue(null)
-    changePassword.mockResolvedValue({ data: { success: true } })
+    // 不配 changePassword 的返回值：本用例断言请求根本不发（H，2026-11-15——
+    // 原先给一个永远不会被消费的成功返回值，是死配置，误导读者以为请求路径被走到）
     const c = await open()
     typeInto(c, 'currentPassword', 'OldPass_2026')
     typeInto(c, 'newPassword', STRONG)
     typeInto(c, 'confirmPassword', STRONG)
     await flush(4)
     submit(c)
-    await waitFor(() => changePassword.mock.calls.length === 1, { message: '改密请求发出' })
-    const payload = changePassword.mock.calls[0][0]
-    expect(payload.currentPassword).toBe('OldPass_2026')
-    expect(payload.newPassword).toBe(STRONG)
-    expect(payload).not.toHaveProperty('encCurrentPassword')
+    await waitFor(() => ElMessage.error.mock.calls.length === 1, { message: '阻断提示' })
+    await flush(20)
+    // 明文回退轨已删（G2 统一口径）：null 按生产同款 INSECURE_CONTEXT 语义阻断
+    expect(changePassword).not.toHaveBeenCalled()
+    expect(ElMessage.success).not.toHaveBeenCalled()
+    expect(ElMessage.error.mock.calls[0][0]).toContain('HTTPS')
   })
 
   test('加密抛错：阻断提交并提示重试，绝不静默明文上行', async () => {
@@ -162,7 +162,7 @@ describe('ChangePasswordCard 密文双轨（FE-H1）', () => {
 
 describe('ChangePasswordCard 成功后行为', () => {
   test('改密成功：清空三个输入框，延时后清会话并跳登录', async () => {
-    encryptPassword.mockResolvedValue(null)
+    encryptPassword.mockResolvedValue('ENV')
     changePassword.mockResolvedValue({ data: { success: true } })
     const c = await open()
     typeInto(c, 'currentPassword', 'OldPass_2026')
@@ -185,7 +185,7 @@ describe('ChangePasswordCard 成功后行为', () => {
   })
 
   test('定时器未到期就卸载：不得在组件销毁后跳转（防内存泄漏）', async () => {
-    encryptPassword.mockResolvedValue(null)
+    encryptPassword.mockResolvedValue('ENV')
     changePassword.mockResolvedValue({ data: { success: true } })
     const c = await open()
     typeInto(c, 'currentPassword', 'OldPass_2026')
@@ -206,7 +206,7 @@ describe('ChangePasswordCard 成功后行为', () => {
   })
 
   test('连点/长按回车「修改密码」：并发只发一次改密请求（in-flight 守卫，防撞 5/15min 限流）', async () => {
-    encryptPassword.mockResolvedValue(null)
+    encryptPassword.mockResolvedValue('ENV')
     let resolveChange
     changePassword.mockImplementation(
       () =>
@@ -228,7 +228,7 @@ describe('ChangePasswordCard 成功后行为', () => {
   })
 
   test('改密成功后在 1.5s 登出窗口内卸载：就地 clearAuth（不留"看似已登录/token 全死"错乱态）', async () => {
-    encryptPassword.mockResolvedValue(null)
+    encryptPassword.mockResolvedValue('ENV')
     changePassword.mockResolvedValue({ data: { success: true } })
     let store
     const c = await open((pinia) => {

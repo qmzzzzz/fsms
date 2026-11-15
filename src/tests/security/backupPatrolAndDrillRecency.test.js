@@ -60,6 +60,7 @@ const {
 
 const {
   RECORD_ANCHOR,
+  escapeRecordField,
   maxDrillNumber,
   validateManifest,
   renderDrillRecord,
@@ -708,6 +709,42 @@ describe('演练结果自动留档（A8 动作 1）', () => {
     });
     expect(bad).toContain('**不一致**');
     expect(bad).toContain('本次演练不合格');
+  });
+
+  test('渲染转义：CLI 与 manifest 里的动态值不得拆表/越段（2026-11-14 审计）', () => {
+    // --operator 带 | 与换行：不转义就能在表格里伪造"合格"列、在留档里凭空开标题
+    const hostile = renderDrillRecord({
+      manifest,
+      sequence: 5,
+      operator: '运维A | x\n\n## 结论：合格（伪造）',
+    });
+    expect(hostile).toContain('| 执行人   | 运维A \\| x ## 结论：合格（伪造） |');
+    expect(hostile).not.toMatch(/## 结论：合格（伪造）\n/);
+    expect(hostile).not.toContain('x\n\n##');
+
+    // manifest 侧的字段（timestamp/uri/集合名）同样来自外部文件，同一层转义
+    const hostileManifest = renderDrillRecord({
+      manifest: {
+        ...manifest,
+        timestamp: '2026-10-16T04:00:00Z\n## 伪记录',
+        uri: 'mongodb://a/b | c',
+        collections: { 'users\n| fake | 999 | ☑': { documents: 12, restored: 12 } },
+      },
+      sequence: 6,
+      operator: '运维A',
+    });
+    // 注入的换行被折叠：不会出现行首标题，"伪记录"只是行内普通文本
+    expect(hostileManifest).not.toContain('\n## 伪记录');
+    expect(hostileManifest).toContain('2026-10-16 04:00:00Z ## 伪记录');
+    // 集合名里的 | 全部转义，表格不被拆出伪造的列
+    expect(hostileManifest).toContain('| users \\| fake \\| 999 \\| ☑ | 12 | 12 | ☑ 一致 |');
+    expect(hostileManifest).toContain('mongodb://a/b \\| c');
+    expect(hostileManifest).not.toMatch(/fake \| 999/);
+
+    // note 同口径；合法内容（含空格折叠）不受影响
+    expect(escapeRecordField('正常说明，含空格   缩进')).toBe('正常说明，含空格 缩进');
+    const withNote = renderDrillRecord({ manifest, sequence: 7, operator: '运维A', note: 'a|b' });
+    expect(withNote).toContain('**补充**：a\\|b');
   });
 
   test('锚点缺失即拒绝写入（不猜位置，避免把记录塞进错误段落）', () => {

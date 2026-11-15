@@ -170,7 +170,9 @@ describe('sendNotification 投递矩阵（webhook 成熟化）', () => {
     jest.clearAllMocks();
     _alertCounters.clear();
     delete process.env.SECURITY_ALERT_MIN_LEVEL;
-    delete process.env.SECURITY_ALERT_WEBHOOK_SECRET;
+    // 缺签名密钥已 fail-closed（不投递）：投递矩阵用例统一给默认密钥，
+    // "缺密钥不投递"由专用用例显式删掉再测
+    process.env.SECURITY_ALERT_WEBHOOK_SECRET = 'test-webhook-secret';
     delete process.env.SECURITY_ALERT_WEBHOOK_ALLOWLIST;
     // 域名型目标投递前会解析并校验地址（DNS 钉扎）；单测不出网，给一个公网结果
     dnsLookup = jest
@@ -209,8 +211,8 @@ describe('sendNotification 投递矩阵（webhook 成熟化）', () => {
     expect(parsed.msgtype).toBe('text');
     expect(parsed.alert.type).toBe('brute_force_login');
     expect(parsed.alert.username).toBe('u1');
-    // Content-Type 由 httpPostJson 统一补发，此处未配置密钥时应无签名头
-    expect(headers['X-Webhook-Signature']).toBeUndefined();
+    // 缺密钥 fail-closed 之后出站恒带签名头（旧"无密钥出空签名头"路径已删）
+    expect(headers['X-Webhook-Signature']).toMatch(/^sha256=[0-9a-f]{64}$/);
   });
 
   test('首次失败自动重试，第二次成功（共 2 次调用）', async () => {
@@ -270,6 +272,20 @@ describe('sendNotification 投递矩阵（webhook 成熟化）', () => {
     postJson.mockResolvedValueOnce({ ok: true, status: 200 });
     await securityAlert.sendNotification('brute_force_login', 'critical', 't');
     expect(postJson).toHaveBeenCalledTimes(1);
+  });
+
+  test('webhook 已配置但密钥缺省 ⇒ fail-closed 不投递，并计入 unsigned_dropped 信号', async () => {
+    delete process.env.SECURITY_ALERT_WEBHOOK_SECRET;
+    process.env.SECURITY_ALERT_WEBHOOK = 'https://hooks.example.com/hook';
+    postJson.mockResolvedValueOnce({ ok: true, status: 200 });
+
+    await securityAlert.sendNotification('brute_force_login', 'critical', '缺密钥测试');
+
+    expect(postJson).not.toHaveBeenCalled();
+    const prom = formatPrometheus();
+    expect(prom).toMatch(
+      /security_alerts_total\{type="security_alert_webhook_unsigned_dropped",level="high"\} 1/
+    );
   });
 
   test('告警计入 security_alerts_total 指标（含失败投递）', async () => {

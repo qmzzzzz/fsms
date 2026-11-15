@@ -128,6 +128,38 @@ describe('时间线：只出摘要字段（体只在被标记过时才有）', (
     expect(sort).toHaveBeenCalledWith({ createdAt: -1 });
     expect(r.records.map((x) => x.ip)).toEqual(['1.1.1.1', '2.2.2.2']);
   });
+
+  test('截断判据边界：库里恰好 limit 条 ⇒ truncated=false（旧 count>=limit 会误报）', async () => {
+    // mock 不排序 ⇒ 直接给「倒序（最新在前）」的库形态
+    const exact = Array.from({ length: 3 }, (_, i) => ({
+      seq: 3 - i,
+      createdAt: new Date(`2026-10-0${3 - i}T00:00:00Z`),
+      ip: '1.2.3.4',
+    }));
+    const model = modelOf(exact);
+    const r = await trace.traceTimeline({ model, ip: '1.2.3.4', limit: 3 });
+    expect(r.count).toBe(3);
+    expect(r.truncated).toBe(false);
+    // 探针取数 = cap+1：恰好等于上限时只多要 1 条来回答「后面还有没有」
+    const limitMock =
+      model.find.mock.results[0].value.select.mock.results[0].value.sort.mock.results[0].value
+        .limit;
+    expect(limitMock).toHaveBeenCalledWith(4);
+  });
+
+  test('截断判据边界：库里多于 limit 条 ⇒ truncated=true 且只返回 cap 条', async () => {
+    const overflow = Array.from({ length: 5 }, (_, i) => ({
+      seq: 5 - i,
+      createdAt: new Date(`2026-10-0${5 - i}T00:00:00Z`),
+      ip: '1.2.3.4',
+    }));
+    const model = modelOf(overflow);
+    const r = await trace.traceTimeline({ model, ip: '1.2.3.4', limit: 3 });
+    expect(r.count).toBe(3);
+    expect(r.truncated).toBe(true);
+    // 「取最近 N 条」契约在探针路径上仍成立：留下的是最新三条（seq 5/4/3），再翻回正序
+    expect(r.records.map((x) => x.seq)).toEqual([3, 4, 5]);
+  });
 });
 
 describe('时间线行摘要：子文档字段提升到行顶层（界面「触发说明/状态码」两列的数据源）', () => {

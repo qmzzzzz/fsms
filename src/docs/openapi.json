@@ -136,26 +136,30 @@
       "post": {
         "tags": ["Auth"],
         "summary": "用户登录",
+        "description": "口令双轨（与 authRoutes 的 loginValidation 同口径）：密文轨优先——encPassword 经 GET /api/auth/login-public-key 公钥加密上行；明文轨为灰度兼容——仅未携带 encPassword 时接受，LOGIN_ENCRYPT_STRICT=true 后明文轨整体关闭。前端（web-admin LoginView）走密文轨。",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["username", "password"],
+                "required": ["username"],
                 "properties": {
                   "username": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 128
                   },
                   "password": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "明文口令（灰度兼容轨）：仅未携带 encPassword 时必填，上限 128 字符；LOGIN_ENCRYPT_STRICT=true 时被直接拒绝"
                   },
                   "captchaId": {
                     "type": "string"
                   },
                   "encPassword": {
                     "type": "string",
-                    "description": "口令密文（ECDH+HKDF+AES-GCM 信封，经 GET /api/auth/login-public-key 公钥加密）；与 password 二选一"
+                    "maxLength": 1024,
+                    "description": "口令密文（ECDH+HKDF+AES-GCM 信封，经 GET /api/auth/login-public-key 公钥加密）；与 password 二选一，携带时优先走密文轨"
                   },
                   "captchaText": {
                     "type": "string",
@@ -172,7 +176,7 @@
         },
         "responses": {
           "200": {
-            "description": "登录成功，返回 token 和 refreshToken"
+            "description": "登录成功：令牌经 httpOnly cookie 下发，响应体返回 { expires, user }"
           },
           "401": {
             "description": "用户名或密码错误"
@@ -370,9 +374,7 @@
             "description": "头像已更新，返回 { avatar, width, height, size }"
           },
           "400": {
-            "400": {
-              "description": "参数错误"
-            }
+            "description": "参数错误"
           }
         }
       },
@@ -432,14 +434,10 @@
             "description": "未修改（If-None-Match 命中）"
           },
           "403": {
-            "403": {
-              "description": "无权限"
-            }
+            "description": "无权限"
           },
           "404": {
-            "404": {
-              "description": "资源不存在"
-            }
+            "description": "资源不存在"
           }
         }
       }
@@ -4656,9 +4654,7 @@
             "description": "返回 { server, upgrade, checkedAt }；upgrade.reasons 逐条解释升级按钮为何不可用"
           },
           "403": {
-            "403": {
-              "description": "无权限"
-            }
+            "description": "无权限"
           }
         }
       }
@@ -4688,9 +4684,7 @@
             "description": "返回 { job }；非 UUID 或状态文件不存在时按 404 处理"
           },
           "404": {
-            "404": {
-              "description": "资源不存在"
-            }
+            "description": "资源不存在"
           }
         }
       }
@@ -4750,14 +4744,10 @@
             "description": "请求已入队，返回 { job }"
           },
           "400": {
-            "400": {
-              "description": "参数错误"
-            }
+            "description": "参数错误"
           },
           "403": {
-            "403": {
-              "description": "无权限"
-            }
+            "description": "无权限"
           },
           "409": {
             "description": "已有任务进行中或排队（errorCode=UPGRADE_ALREADY_RUNNING）"

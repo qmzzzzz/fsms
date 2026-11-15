@@ -4,7 +4,10 @@
   <el-card class="welcome-card" shadow="never">
     <div class="welcome-content">
       <div>
-        <h2>{{ greeting }}, {{ currentUser?.realName || currentUser?.username || 'Admin' }}</h2>
+        <h2>
+          {{ greeting }},
+          {{ currentUser?.realName || currentUser?.username || $t('dashboard.defaultUserName') }}
+        </h2>
         <p>{{ $t('dashboard.welcome') }}</p>
       </div>
       <div class="welcome-right">

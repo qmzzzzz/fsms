@@ -1,7 +1,4 @@
-/**
- * 系统配置模型
- * 持久化系统级开关设置（如注册开关），支持运行时动态修改
- */
+// 系统配置模型：持久化系统级开关设置（如注册开关），支持运行时动态修改
 
 const mongoose = require('mongoose');
 const { requiresProductionSemantics } = require('../config/envSemantics');
@@ -228,7 +225,8 @@ systemConfigSchema.statics.invalidateRegisterCaptchaCache = function () {
  *   · `authService.resolveLoginPassword`（loginUser 链）
  *   · `authController.getCaptchaStatus`
  * ⇒ 「降级到静态默认」这个安全相关的 fail-open 动作**没有任何统一信号**，
- *   只有 3 个各自的空 catch。本仓纪律见 middleware/rateLimitStore.js:53-56：
+ *   只有 3 个各自的空 catch。本仓纪律见 middleware/rateLimitStore.js:22-27
+ *   （2026-11-14 审计修复批 makeDegradationSignal 抽到模块级，纪律句由 :53-56 迁 :22-27）：
  *   「降级态只写日志等于没有可告警信号——`grep 日志` 不是运维动作」。
  * 现已收口：3 处一律改调本文件下方的 `SystemConfig.captchaSwitch(kind)`，
  * 降级判定与信号都只在那一个函数里发生，调用点不再自带 try/catch。

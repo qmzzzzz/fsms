@@ -144,13 +144,12 @@ describe('表单校验文案跟随当前语言', () => {
     await flush(30)
     click(active.findAll('button').find((b) => b.textContent.includes('新增')))
     await flush(30)
-    const zh = (() => {
-      click(dlgBtn(['新增']))
-      return dlgErrTexts()
-    })()
+    // 先等校验渲染完再取文案：原写法在 settleValidation 前捕获 zh（必为空数组），
+    // 然后 expect(zh).toBeDefined() 是恒真死断言（E，2026-11-15 修复）。
+    click(dlgBtn(['新增']))
     await settleValidation()
-    expect(dlgErrTexts()).toContain('请输入用户名')
-    expect(zh).toBeDefined()
+    const zh = dlgErrTexts()
+    expect(zh).toContain('请输入用户名')
 
     await expectNoZhThenEn(
       [

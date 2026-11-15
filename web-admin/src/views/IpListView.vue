@@ -600,8 +600,12 @@ const handleAdd = async () => {
       body.typedConfirm = typedConfirmText.value.trim()
     }
     await apiClient.post('/security/ip-list', body)
+    // P3：security.added 已改为完整插值句（原「已将」是残缺句靠拼接凑数）
     ElMessage.success(
-      `${t('security.added')} ${ip} ${listType.value === 'black' ? t('security.blacklist') : t('security.whitelist')}`
+      t('security.added', {
+        ip,
+        list: listType.value === 'black' ? t('security.blacklist') : t('security.whitelist'),
+      })
     )
     addForm.ip = ''
     addForm.reason = ''

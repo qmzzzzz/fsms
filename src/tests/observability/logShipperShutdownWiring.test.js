@@ -145,7 +145,8 @@ describe('关停链排空 SIEM 转发缓冲（F-186）', () => {
       drainShippingBuffer({ logger: { transports: [slow] }, allowMs: 30 })
     ).resolves.toBe('over-budget');
     // 判据用"送达"而不是"缓冲长度"：_flush 先 splice 出本批再 await _post
-    // （logShipper.js:246），所以在途那批此刻已经不在缓冲里了。
+    // （logShipper.js:266-268；原写 :246，2026-11-15 审计收敛批在 log() 加序列化失败计数
+    // +20 行后顺移），所以在途那批此刻已经不在缓冲里了。
     expect(sent).toHaveLength(0);
 
     // 收尾：放行那次被放弃的排空，证明放弃不留半成品状态（也避免跨用例悬挂）。
@@ -224,34 +225,34 @@ describe('关停链排空 SIEM 转发缓冲（F-186）', () => {
   });
 
   test('⑥ 两条崩溃链也各自接了排空（F-186b：只有优雅关闭有＝台账 L 项只修一半）', () => {
+    // 收尾链抽在 utils/crashFlush.js（index.js 贴体积棘轮 + 两臂逐字共享）：
+    // 优雅关闭 1 处在 index.js，崩溃两臂共用 crashFlush 里的 1 处 bestEffortDrain。
     const codeView = jsCodeOnly(readIndex());
-    // 1（优雅关闭）+ 2（uncaughtException / unhandledRejection）
-    expect(countCalls(codeView)).toBe(3);
+    expect(countCalls(codeView)).toBe(1);
 
-    const handlerSlice = (tag) => {
-      const from = codeView.indexOf(`process.on('${tag}'`);
-      expect(from).toBeGreaterThan(-1);
-      const next = codeView.indexOf('process.on(', from + 12);
-      return codeView.slice(from, next > -1 ? next : codeView.length);
-    };
-    for (const tag of ['uncaughtException', 'unhandledRejection']) {
-      // tag 必须对得上：只保证"调用了"会让复制粘贴的两个 handler 共用一个 tag，
-      // 崩溃时看不出是哪条链报的。
-      expect(handlerSlice(tag)).toMatch(
-        new RegExp(`bestEffortDrain\\(\\{[^)]*tag:\\s*'${tag}'`),
-        `${tag} 的崩溃链没接排空（或 tag 写错）`
-      );
-    }
+    const readCrashFlush = () =>
+      fs.readFileSync(path.join(REPO_ROOT, 'src/utils/crashFlush.js'), 'utf8');
+    const crashFlushView = jsCodeOnly(readCrashFlush());
+    expect(countCalls(crashFlushView)).toBe(1);
 
-    // 反例：注释掉其中一条 ⇒ 代码视图 3→2，而文本视图仍是 3（字样还在括号还在，
-    // 只是被包进块注释里）——这正是"纯文本闸会被骗绿"的那个形状。
-    const half = readIndex().replace(
-      ".then(() => bestEffortDrain({ allowMs: CRASH_DRAIN_BUDGET_MS, tag: 'uncaughtException' }))",
+    // tag 必须对得上：两臂共用 drainAndExit(tag)，调用方把崩溃臂名传进来——
+    // 只保证"调用了"的话，复制粘贴的两臂共丢一个 tag，崩溃时看不出是哪条链报的。
+    const arms = readIndex().match(/drainAndExit\('(uncaughtException|unhandledRejection)'\)/g);
+    expect(arms).toEqual([
+      "drainAndExit('uncaughtException')",
+      "drainAndExit('unhandledRejection')",
+    ]);
+    expect(crashFlushView).toMatch(/bestEffortDrain\(\{ allowMs: CRASH_DRAIN_BUDGET_MS, tag \}/);
+
+    // 反例：把 crashFlush 的排空调用注释掉 ⇒ 代码视图 1→0，而文本视图仍是 1
+    //（字样还在、括号还在——这正是"纯文本闸会被骗绿"的那个形状）。
+    const half = readCrashFlush().replace(
+      '.then(() => bestEffortDrain({ allowMs: CRASH_DRAIN_BUDGET_MS, tag }))',
       '.then(() => /* bestEffortDrain( */ undefined)'
     );
-    expect(half).not.toBe(readIndex());
-    expect(countCalls(jsCodeOnly(half))).toBe(2);
-    expect(countCalls(half)).toBe(3);
+    expect(half).not.toBe(readCrashFlush());
+    expect(countCalls(jsCodeOnly(half))).toBe(0);
+    expect(countCalls(half)).toBe(1);
   });
 
   test('⑦ logger.end() 触发 close() 却不等它 ⇒ 单靠 end() 不保证送达（探针实测的用例化）', async () => {

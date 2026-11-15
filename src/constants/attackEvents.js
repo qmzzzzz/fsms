@@ -1,3 +1,5 @@
+'use strict';
+
 /**
  * 攻击告警分类注册表 ——「安全分析 · 攻击告警查询」读面的单一事实来源。
  *
@@ -27,7 +29,7 @@ const ATTACK_EVENT_TYPES = Object.freeze([
   { code: 'data_exfil', nameKey: 'dataExfil' }, // 数据外泄
   { code: 'rate_abuse', nameKey: 'rateAbuse' }, // 资源滥用
   { code: 'anomaly', nameKey: 'anomaly' }, // 异常行为
-]);
+]); // 分类法②（攻击告警查询读面）：另一套是 constants/attackProfile.js 的 ATTACK_CATEGORIES（IP 画像读面）——两套映射同一批 action、按读面各自归组（如 profile 的 UNAUTHORIZED_ACTIONS 在本表拆入 privilege/probe 两类），互注见双方文件头
 
 // action → 分类码。行尾即审计写入点（逐一核实，非凭白名单推断）。canary_username_attempt
 // 归 credential：表现形态是凭证失败，两类都讲得通但映射必须单值，蜜罐 tab 由 honeypot_* 撑起。

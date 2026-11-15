@@ -1,31 +1,20 @@
 /**
- * 共享缓存门面（R-3/基础设施；2026-10-19 批 3c 自 services/sharedCache.js 拆分）
- *
- * 问题：限流计数、验证码、权限缓存、审计链锁等关键状态全是进程内内存态，
- * 多副本部署时各实例状态互不可见——限流配额翻倍、验证码跨实例校验失败、
- * 权限失效不跨实例传播。
- *
- * 解法：统一经本门面读写。配置 `REDIS_URL` 时走 Redis（跨实例一致）；
- * 未配置时自动回退到进程内内存实现（单机/开发/测试零配置照旧可用）。
- * 两种后端对外同一套异步 API，调用方无需感知部署形态。
- *
- * 为什么回退而不是报错：本仓库测试与本地开发不依赖 Redis，
- * 强制依赖会让 1000+ 用例与单机部署全部无法启动；多实例是**部署选择**，
- * 该由部署侧显式提供 REDIS_URL，而不是由代码强制。
- *
- * O-15（TTL 抖动与穿透防护）也在本层统一提供：
- * - jitterTtl：所有建议走此函数的 TTL 附加 ±10% 随机抖动，
- *   避免大批键同一时刻过期引发的缓存雪崩；
+ * 共享缓存门面（R-3/基础设施；2026-10-19 批 3c 自 services/sharedCache.js 拆分）。
+ * 问题：限流计数、验证码、权限缓存、审计链锁等关键状态全是进程内内存态，多副本部署时各实例状态互不可见——
+ * 限流配额翻倍、验证码跨实例校验失败、权限失效不跨实例传播。解法：统一经本门面读写。配置 `REDIS_URL` 时走 Redis（跨实例一致）；
+ * 未配置时自动回退到进程内内存实现（单机/开发/测试零配置照旧可用）。两种后端对外同一套异步 API，调用方无需感知部署形态。
+ * 为什么回退而不是报错：本仓库测试与本地开发不依赖 Redis，强制依赖会让 1000+ 用例与单机部署全部无法启动；多实例是**部署选择**，
+ * 该由部署侧显式提供 REDIS_URL，而不是由代码强制。O-15（TTL 抖动与穿透防护）也在本层统一提供：
+ * - jitterTtl：所有建议走此函数的 TTL 附加 ±10% 随机抖动，避免大批键同一时刻过期引发的缓存雪崩；
  * - EMPTY_SENTINEL：空结果哨兵值，调用方可缓存「查无结果」防穿透。
- *
- * 分块：state.js（Redis 连接态与判据）、memoryStore.js（内存回退存储/容量收口/降级留痕）、
- * invalidation.js（L-4 失效广播）；本文件保留门面与核心读写（set/get/del/getDel/
- * incrWithTtl/setIfAbsent）及锁装配。对外导出面逐字同序，调用方无需改动。
+ * 分块：state.js（Redis 连接态与判据）、memoryStore.js（内存回退存储/容量收口/降级留痕）、invalidation.js（L-4 失效广播）；
+ * 本文件保留门面与核心读写（set/get/del/getDel/incrWithTtl/setIfAbsent）及锁装配。对外导出面逐字同序，调用方无需改动。
  */
 
 const logger = require('../../utils/logger');
 const { createLockOperations } = require('../sharedCacheLocks');
 const { state, isRedisEnabled, isRedisConfigured, redisConnectionPassword } = require('./state');
+const { INCR_WITH_TTL_SCRIPT, DECR_FLOOR_ZERO_SCRIPT } = require('./scripts');
 const {
   memStore,
   enforceMemCap,
@@ -55,9 +44,7 @@ const lockOperations = createLockOperations({
 });
 
 /**
- * TTL 抖动：±10% 随机（O-15）。
- * 固定 TTL 的大批缓存键会在同一时刻集体过期，下一波请求同时打穿到
- * 数据库（缓存雪崩的理论面）。抖动把过期点摊开，成本为零。
+ * TTL 抖动：±10% 随机（O-15）。固定 TTL 的大批缓存键会在同一时刻集体过期，下一波请求同时打穿到数据库（缓存雪崩的理论面）。抖动把过期点摊开，成本为零。
  * @param {number} ttlMs 基准毫秒
  * @returns {number} 抖动后的毫秒
  */
@@ -111,8 +98,7 @@ async function initSharedCache() {
       password: redisConnectionPassword(),
     });
     state.redisClient.on('error', (err) => {
-      // 只在"就绪 → 不可用"这一次转换上报（随后 state.redisReady=false，
-      // ioredis 的重试风暴不会再刷日志）
+      // 只在"就绪 → 不可用"这一次转换上报（随后 state.redisReady=false，ioredis 的重试风暴不会再刷日志）
       if (state.redisReady) {
         logger.error(
           `共享缓存 Redis 连接异常，跨实例状态已降级为单进程语义：${err.message}。${degradedMechanismHint()}`
@@ -302,17 +288,6 @@ async function getDel(key) {
  *
  * @returns {Promise<number|null>} 自增后的值；Redis 启用但命令失败时为 null（计数不可信）
  */
-const INCR_WITH_TTL_SCRIPT = `
-local v = redis.call('INCR', KEYS[1])
-local ttl = tonumber(ARGV[1])
-if ttl and ttl > 0 then
-  if v == 1 or redis.call('PTTL', KEYS[1]) < 0 then
-    redis.call('PEXPIRE', KEYS[1], ttl)
-  end
-end
-return v
-`;
-
 async function incrWithTtl(key, ttlMs) {
   if (isRedisEnabled()) {
     try {
@@ -355,16 +330,19 @@ async function incrWithTtl(key, ttlMs) {
  * 验证码的全局上限一旦被顶满，即使攻击停了也要等整个 TTL 窗口才恢复——
  * 而窗口内的持续请求还会反复重置/维持它。与 incr 同口径（F-211）：
  * 配了共享层就绝不拿本地值冒充全局计数，命令失败返回 null 由调用方决定降级方向。
+ *
+ * 下界分支的三种成因必须分开处置（2026-11-15 审计修复）：
+ *  ① 键存在、带 TTL、被减穿：SET 0 会清掉 TTL，须按 DECR 前的 PTTL 原值补回；
+ *  ② 键存在但无 TTL（历史遗留永久键）：SET 0 维持永久（不引入调用方没有的过期语义）；
+ *  ③ 键缺失/刚过期：DECR 会凭空造出一个**无 TTL 的 -1**——旧实现对它走 ① 的
+ *     PEXPIRE(pttl)，而 pttl 此时是 -1/-2 ⇒ PEXPIRE 不执行，结果是本应随窗口
+ *     过期、归零即清的计数被一条回收事件**复活成永久键**（计数复活窗口偏松 +
+ *     共享层垃圾键）。正确动作与内存后端对齐（过期/缺失按 0 处理、不落新键）：
+ *     把 DECR 造出的残键删掉直接返回 0，下次真实流量自增时 incrWithTtl 从 1 重新起窗。
+ * 因此 PTTL 必须在 DECR **之前**读：DECR 之后缺失与永久键的 PTTL 同为 -1，不可分辨。
+ * 残留窗口（如实记录）：PTTL 读到正值后、DECR 前键恰好过期 ⇒ 按 ① 复活，残余寿命
+ * ≤ 原 TTL 的剩余值，到期自清——比「永久」已收窄一个数量级。
  */
-const DECR_FLOOR_ZERO_SCRIPT = `
-local v = redis.call('DECR', KEYS[1])
-if v >= 0 then return v end
-local pttl = redis.call('PTTL', KEYS[1])
-redis.call('SET', KEYS[1], 0)
-if pttl > 0 then redis.call('PEXPIRE', KEYS[1], pttl) end
-return 0
-`;
-
 async function decrWithFloorZero(key) {
   if (isRedisEnabled()) {
     try {

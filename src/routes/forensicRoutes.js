@@ -1,4 +1,4 @@
-// 取证溯源路由（T5/T6），挂 /api/security/forensic。独立成文件是因为 securityRoutes.js 有效行已超 300（棘轮 max-lines 1）。读溯源 security:audit，改封禁 security:config；封禁两步都要 strictLimiter（写 IP 名单是重资源操作）。
+// 取证溯源路由（T5/T6），挂 /api/security/forensic。独立成文件是因为 securityRoutes.js 有效行已超 300（棘轮 max-lines 1）。读溯源 security:audit，改封禁 security:config；五个面（两个重读面 + 封禁两步 + 导出）都挂 strictLimiter：读面是多集合聚合查询，写面是重资源写。
 
 const express = require('express');
 const router = express.Router();
@@ -24,6 +24,7 @@ router.get(
   '/trace',
   authenticate,
   checkPermission('security:audit'),
+  strictLimiter, // 与同族读面（audit-logs 族）对齐：溯源是多集合回扫聚合，重资源读
   ...traceValidation,
   forensicController.getTrace
 );
@@ -33,6 +34,7 @@ router.get(
   '/clusters',
   authenticate,
   checkPermission('security:config'),
+  strictLimiter, // 与 /trace 同款：聚类按时间窗聚合全量审计行，重资源读
   query('windowHours').optional({ values: 'falsy' }).isInt({ min: 1, max: 720 }),
   query('minHits').optional({ values: 'falsy' }).isInt({ min: 1, max: 100000 }),
   query('minIps').optional({ values: 'falsy' }).isInt({ min: 1, max: 1000 }),

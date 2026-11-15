@@ -380,6 +380,7 @@ import { useI18n } from 'vue-i18n'
 import { api } from '@/utils/api'
 import { haptic } from '@/utils/haptic'
 import { encryptPassword } from '@/utils/loginCipher'
+import { encryptionErrorMessage } from '@/utils/encryptionError'
 import { passwordStrengthRule } from '@/utils/password'
 import LiquidGlassButtons from '@/components/LiquidGlassButtons.vue'
 import AuthPrefs from '@/components/AuthPrefs.vue'
@@ -717,15 +718,8 @@ const onRegister = async () => {
       enc = await encryptPassword(registerForm.password, 'REGISTER')
     } catch (e) {
       console.warn('[loginCipher] 口令加密失败，已阻断提交：', e?.message)
-      // 公钥指纹不符（PUBLIC_KEY_PIN_MISMATCH）：主动 MITM 或服务端轮换密钥后
-      // 前端包未随之重建——与「网络抖动、重试即可」不是一回事，文案须可执行
-      ElMessage.error(
-        e?.code === 'PUBLIC_KEY_PIN_MISMATCH'
-          ? t('login.publicKeyPinMismatch')
-          : e?.code === 'INSECURE_CONTEXT'
-            ? t('login.insecureContext')
-            : t('login.encryptionFailed')
-      )
+      // 文案统一走共享 helper（P2 收敛）：指纹不符/非安全上下文/通用失败三分支
+      ElMessage.error(encryptionErrorMessage(t, e))
       return
     }
     if (enc) payload.encPassword = enc

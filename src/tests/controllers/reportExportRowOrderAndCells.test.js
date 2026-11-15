@@ -282,3 +282,13 @@ describe('xlsx 导出的行序与单元格文本', () => {
     expect(cols['执行时长'][idxZero]).toBe('0ms');
   });
 });
+
+// 收尾（mongooseTeardownLedger 台账条目「他人脏文件（M）」晋升）：本套件 beforeAll 里
+// connect 了内存 Mongo，describe 内的 cleanup afterAll 先跑（内层钩子先于 root 钩子，
+// 还要查库删夹具），这里最后断连——不关则 worker 被强杀、套件输出被吞
+// （机理见 src/tests/ci/mongooseTeardownLedger.test.js 头注）。
+afterAll(async () => {
+  if (mongoose.connection.readyState !== 0) {
+    await mongoose.connection.close();
+  }
+});

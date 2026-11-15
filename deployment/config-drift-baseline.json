@@ -15,7 +15,7 @@
     "compose:mongo:security_opt": "1020b17a73c96bf8",
     "compose:mongo:tmpfs": "cf753b8e25feda6d",
     "compose:mongo:networks": "865d377f65b6c5f8",
-    "compose:mongo:healthcheck": "683e57c6fd06b4c3",
+    "compose:mongo:healthcheck": "8616ecd11e7d399a",
     "compose:mongo:memory_limit": "54776a45bd6986c8",
     "compose:mongo-rs-init:read_only": "b5bea41b6c623f7c",
     "compose:mongo-rs-init:cap_drop": "fe12c03fbb95fc9d",

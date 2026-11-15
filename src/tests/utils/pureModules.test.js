@@ -19,7 +19,9 @@ describe('encryption.js 缺口覆盖：DataMasking / HMACSigner / HashUtils / AE
   describe('DataMasking', () => {
     test('maskPhone：11 位打中间四位；非 11 位保留首尾', () => {
       expect(DataMasking.maskPhone('13812345678')).toBe('138****5678');
-      expect(DataMasking.maskPhone('12345')).toBe('12***45'.replace('***', '***'));
+      // Q（2026-11-15）：原写法 '12***45'.replace('***','***') 是恒等 replace（结果与
+      // 字面量相同，纯属噪音）；生产行为是 5 位数字 → 首两位 + *** + 末两位，直接写字面量
+      expect(DataMasking.maskPhone('12345')).toBe('12***45');
       expect(DataMasking.maskPhone('')).toBe('');
       expect(DataMasking.maskPhone(null)).toBe('');
     });

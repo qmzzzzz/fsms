@@ -181,14 +181,20 @@ describe('③ 三态对拍：关 / 开 / 抛错', () => {
   });
 
   test('开关关闭 ⇒ 即使已标记也零采集', async () => {
+    // 快照 + 终点归还（env 泄漏收口）：prev 可能是「未设」，直接赋值会把 env 写成
+    // 字符串 'undefined'（Node 对 process.env 的赋值一律转字符串）——按原形态归还
     const prev = process.env.FORENSIC_CAPTURE_ENABLED;
     process.env.FORENSIC_CAPTURE_ENABLED = 'false';
     mockState.on = true;
-    const handler = (req, res) => res.json({ ok: true });
-    await request(buildApp(handler)).post('/api/probe').send({});
-    await settle();
-    process.env.FORENSIC_CAPTURE_ENABLED = prev;
-    expect(service.getForensicCaptureStats().captured).toBe(0);
+    try {
+      const handler = (req, res) => res.json({ ok: true });
+      await request(buildApp(handler)).post('/api/probe').send({});
+      await settle();
+      expect(service.getForensicCaptureStats().captured).toBe(0);
+    } finally {
+      if (prev === undefined) delete process.env.FORENSIC_CAPTURE_ENABLED;
+      else process.env.FORENSIC_CAPTURE_ENABLED = prev;
+    }
   });
 
   test('触发判据抛错 ⇒ 请求照常完成（不 500、不挂起），且计 rejected', async () => {

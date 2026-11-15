@@ -1,37 +1,23 @@
 /**
  * CSRF 纵深防护：写操作 Origin/Referer 白名单校验（回应外部报告 CSRF 项）
- *
- * 背景：认证令牌经 httpOnly cookie 下发（utils/cookie.js，SameSite=Lax），
- * 现代浏览器下跨站写请求不携带 cookie，经典 CSRF 已被阻断。本中间件在其上
- * 再加一层服务端校验：携带来源（Origin/Referer）的写请求，来源必须命中白名单，
- * 覆盖 SameSite 支持不全的旧浏览器与未来 cookie 策略变动。
- *
+ * 背景：认证令牌经 httpOnly cookie 下发（utils/cookie.js，SameSite=Lax），现代浏览器下跨站写请求不携带 cookie，经典 CSRF 已被阻断。本中间件在其上再加一层服务端校验：携带来源（Origin/Referer）的写请求，来源必须命中白名单，覆盖 SameSite 支持不全的旧浏览器与未来 cookie 策略变动。
  * 放行口径（重要，避免误伤非浏览器客户端）：
  * - 仅对写方法 POST/PUT/PATCH/DELETE 生效；OPTIONS 预检与其余方法（GET 等）直接放行
- * - 来源缺失（Origin 头不存在且 Referer 缺失/不可解析）→ 放行：
- *   curl/Postman/服务器间调用通常不带来源；而浏览器发起的跨站写请求必带 Origin，
- *   该放行不构成绕过路径
- * - Origin 头存在但为空串：正常浏览器不会发出此类请求，属于异常来源，
- *   视为校验失败直接拒绝——空串是 falsy 值，若与「头不存在」混同处理会形成绕过口子
- *
- * 白名单来源：优先使用调用方传入的数组（app.js 已计算的 CORS 白名单，单一配置源）；
- * 无参调用时从 config.corsOrigin 自行计算，开发期兜底清单与 app.js **共用同一个常量**
- * （utils/constants.js 的 DEV_CORS_ORIGINS）。
- * 两侧逻辑并非逐行相同，差别是**有意**的且方向为 fail-closed：`CORS_ORIGINS` 非空但
- * 切分后为空（如 `", "`）时，app.js 回落到开发兜底清单，本中间件落到空白名单（全拒）。
- * 早前这里的注释写的是"与 app.js 完全相同的逻辑"——那是两份字面量各抄一遍时的旧推断。
+ * - 来源缺失（Origin 头不存在且 Referer 缺失/不可解析）→ 放行：curl/Postman/服务器间调用通常不带来源；而浏览器发起的跨站写请求必带 Origin，该放行不构成绕过路径
+ * - Origin 头存在但为空串：正常浏览器不会发出此类请求，属于异常来源，视为校验失败直接拒绝——空串是 falsy 值，若与「头不存在」混同处理会形成绕过口子
+ * 白名单来源：优先使用调用方传入的数组（app.js 已计算的 CORS 白名单，单一配置源）；无参调用时从 config.corsOrigin 自行计算，开发期兜底清单与 app.js **共用同一个常量**（utils/constants.js 的 DEV_CORS_ORIGINS）。
+ * 两侧逻辑并非逐行相同，差别是**有意**的且方向为 fail-closed：`CORS_ORIGINS` 非空但切分后为空（如 `", "`）时，app.js 回落到开发兜底清单，本中间件落到空白名单（全拒）。早前这里的注释写的是"与 app.js 完全相同的逻辑"——那是两份字面量各抄一遍时的旧推断。
  */
 
 const config = require('../config');
 const { isDevelopmentLikeEnv } = require('../config/envSemantics');
 const logger = require('../utils/logger');
 const { DEV_CORS_ORIGINS } = require('../utils/constants');
-// 本中间件在认证之前就会被触发，两条拒绝日志都含**攻击者全控**的内容：
-// - originalUrl 的 query 可能带令牌（与 app.js 对 morgan :url 做 redactUrlQuery 同一理由）
-// - origin 本身：含 \n 即可在 printf 格式的日志里伪造整行
+// 本中间件在认证之前就会被触发，两条拒绝日志都含**攻击者全控**的内容：originalUrl 的 query 可能带令牌（与 app.js 对 morgan :url 做 redactUrlQuery 同一理由）；origin 本身含 \n 即可在 printf 格式的日志里伪造整行
 const { redactUrlQuery, stripControlChars } = require('../utils/helpers');
-// 早期 403 留痕：直连实现模块，不再经 security/index 门面。
-// 门面会拉入 IP 黑名单与告警链，而这里只需要一条影子审计写入。
+// 拒绝日志里的 IP 用代理感知的安全裁决地址（与 rateLimit.js 的限流触发日志同一口径）：req.ip 在 trust proxy 下取自 X-Forwarded-For，而那个头是请求方写的——对端不可信时 clientIpForSecurityDecision 落回 socket 对端，日志里的攻击者地址才没有被自选的可能
+const { clientIpForSecurityDecision } = require('../utils/ipUtils');
+// 早期 403 留痕：直连实现模块，不再经 security/index 门面。门面会拉入 IP 黑名单与告警链，而这里只需要一条影子审计写入。
 const { recordEarlyRejection } = require('./security/earlyRejection');
 const { setNoStore } = require('./noStore');
 const { WRITE_METHODS } = require('./httpMethods');
@@ -44,8 +30,7 @@ const { WRITE_METHODS } = require('./httpMethods');
  */
 const resolveRequestOrigin = (req) => {
   const origin = req.headers.origin;
-  // 区分「头不存在」（undefined，非浏览器客户端）与「头存在但为空串」：
-  // 空串是 falsy 值，若用真值判断会静默落入 Referer 回退或放行分支
+  // 区分「头不存在」（undefined，非浏览器客户端）与「头存在但为空串」：空串是 falsy 值，若用真值判断会静默落入 Referer 回退或放行分支
   if (origin !== undefined) {
     return typeof origin === 'string' && origin ? origin : '';
   }
@@ -86,11 +71,7 @@ const createOriginCheck = (allowedOrigins) => {
   }
 
   return (req, res, next) => {
-    // IP 白名单豁免：checkIPBlacklist 已在更早阶段（CORS 之前）判定可信来源，
-    // 白名单 IP 不受来源校验约束（内网工具/探针等非浏览器客户端可能携带非常规 Origin）。
-    // 该标记只在可信边界内发放（security.js isWhitelistExemptionTrustworthy）：
-    // 公网直连伪造 XFF 冒充白名单 IP 时标记不下发，来源校验不会被伪造头买通
-    // ——本中间件因此无需自带边界判定，消费侧保持"读标记"一个动作
+    // IP 白名单豁免：checkIPBlacklist 已在更早阶段（CORS 之前）判定可信来源，白名单 IP 不受来源校验约束（内网工具/探针等非浏览器客户端可能携带非常规 Origin）。该标记只在可信边界内发放（security.js isWhitelistExemptionTrustworthy）：公网直连伪造 XFF 冒充白名单 IP 时标记不下发，来源校验不会被伪造头买通——本中间件因此无需自带边界判定，消费侧保持"读标记"一个动作
     if (req.ipWhitelisted === true) {
       return next();
     }
@@ -101,18 +82,16 @@ const createOriginCheck = (allowedOrigins) => {
 
     const origin = resolveRequestOrigin(req);
 
-    // 无来源（Origin 头不存在且 Referer 不可解析，非浏览器客户端）→ 放行；
-    // 浏览器跨站写请求必带 Origin，不构成绕过
+    // 无来源（Origin 头不存在且 Referer 不可解析，非浏览器客户端）→ 放行；浏览器跨站写请求必带 Origin，不构成绕过
     if (origin === null) {
       return next();
     }
 
     if (origin === '') {
       logger.warn(
-        `来源校验失败（空 Origin）：method=${req.method} path=${redactUrlQuery(req.originalUrl)} ip=${req.ip}`
+        `来源校验失败（空 Origin）：method=${req.method} path=${redactUrlQuery(req.originalUrl)} ip=${clientIpForSecurityDecision(req)}`
       );
-      // 本中间件挂在 auditLog 之前（写操作必须在触达控制器前拦下），
-      // 其 403 此前只进 logger 不进审计——CSRF 探测在合规留存里毫无痕迹
+      // 本中间件挂在 auditLog 之前（写操作必须在触达控制器前拦下），其 403 此前只进 logger 不进审计——CSRF 探测在合规留存里毫无痕迹
       recordEarlyRejection(req, {
         action: 'csrf_origin_denied',
         reason: '写操作 Origin 头为空串（异常来源）',
@@ -126,7 +105,7 @@ const createOriginCheck = (allowedOrigins) => {
     }
 
     logger.warn(
-      `来源校验失败：origin=${stripControlChars(origin, 256)} method=${req.method} path=${redactUrlQuery(req.originalUrl)} ip=${req.ip}`
+      `来源校验失败：origin=${stripControlChars(origin, 256)} method=${req.method} path=${redactUrlQuery(req.originalUrl)} ip=${clientIpForSecurityDecision(req)}`
     );
     recordEarlyRejection(req, {
       action: 'csrf_origin_denied',

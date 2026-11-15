@@ -28,7 +28,13 @@ const AuditLog = require('../../models/AuditLog');
 const { incSecurityAlert } = require('../../utils/metrics');
 const { markForensicTarget } = require('../../services/forensicTrigger');
 
-// 风暴阈值压到 3：模块在 require 时读 env，必须先设再 require
+// 风暴阈值压到 3：模块在 require 时读 env，必须先设再 require。
+// 写入前快照原值（env 泄漏收口）：阈值是事件时现读的，不还原的话同 worker 后续套件的
+// 风暴档被钉在 3 次/60s——对生产形态的默认 40 次/5 分钟来说形同无闸
+const PREV_SCAN_ENVS = {
+  SCAN_404_THRESHOLD: process.env.SCAN_404_THRESHOLD,
+  SCAN_404_WINDOW_MS: process.env.SCAN_404_WINDOW_MS,
+};
 process.env.SCAN_404_THRESHOLD = '3';
 process.env.SCAN_404_WINDOW_MS = '60000';
 const {
@@ -271,4 +277,13 @@ describe('scanProbeDetector · 路径指纹与风暴', () => {
     expect(() => noteUnmatchedRequest(null)).not.toThrow();
     expect(() => noteUnmatchedRequest({ path: 123 })).not.toThrow();
   });
+});
+
+// 文件级压低的阈值随套件归还（快照见文件头）：本文件此前没有任何 root 收尾，
+// env 泄漏给同 worker 的后续套件；还原不影响本文件——检测器常量已按 3/60000 加载完。
+afterAll(() => {
+  for (const [key, prev] of Object.entries(PREV_SCAN_ENVS)) {
+    if (prev === undefined) delete process.env[key];
+    else process.env[key] = prev;
+  }
 });

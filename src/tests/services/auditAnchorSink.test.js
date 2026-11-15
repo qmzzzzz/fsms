@@ -39,6 +39,7 @@ const {
   ALLOW_PRIVATE_ENV,
   resolveSink,
   readAnchorStore,
+  appendToAnchorStore,
   shipCheckpoints,
 } = require('../../services/auditAnchorSink');
 
@@ -661,6 +662,34 @@ describe('shipCheckpoints（file sink）', () => {
       secret: SECRET,
     });
     expect(result).toMatchObject({ ok: true, shipped: 0, alreadyAnchored: 0 });
+  });
+
+  test('file sink 锁被占用（未过期）⇒ 读判「不可用」、写判 lock_timeout，不静默成功（审计 2026-11-14 I）', async () => {
+    // TOCTOU 收口的负向对照：读-去重-追加已收进跨进程锁，锁拿不到时读不能伪装成
+    // 「空存储」（那会把并发写中的存储误判成 no_external_anchors），写不能照常落盘。
+    writeLocal([mkRecord(1)]);
+    fs.mkdirSync(path.dirname(storeFile), { recursive: true });
+    const lockPath = path.join(path.dirname(storeFile), '.anchor-sink.lock');
+    const fd = fs.openSync(lockPath, 'wx', 0o600);
+    fs.writeSync(fd, 'held-by-test');
+    fs.closeSync(fd);
+    const sink = resolveSink(`file:${storeFile}`);
+    try {
+      const read = await readAnchorStore(sink, { timeoutMs: 150 });
+      expect(read).toMatchObject({ ok: false, error: 'anchor_store_unreachable' });
+      expect(read.detail).toContain('lock');
+
+      const append = await appendToAnchorStore(sink, [mkRecord(1)], { timeoutMs: 150 });
+      expect(append).toMatchObject({ ok: false, error: 'anchor_sink_lock_timeout' });
+      // 存储必须一个字节都没动
+      expect(fs.existsSync(storeFile)).toBe(false);
+    } finally {
+      fs.unlinkSync(lockPath);
+    }
+
+    // 锁释放后同一条路照常工作（陈锁接管/正常释放语义未被破坏）
+    const after = await shipCheckpoints({ filePath: localFile, sink, secret: SECRET });
+    expect(after).toMatchObject({ ok: true, shipped: 1 });
   });
 });
 

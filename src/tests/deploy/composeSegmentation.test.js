@@ -68,6 +68,28 @@ describe('compose 数据面分段与 Redis 认证合同', () => {
     expect(exec).not.toMatch(/redis-cli[^\n]*\s-a\s/);
   });
 
+  test('mongo 的 healthcheck 必须带认证，且凭据不得进入进程 argv（P2-17）', () => {
+    const block = serviceBlock('mongo');
+    const exec = block
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l && !l.startsWith('#'))
+      .join('\n');
+    // 凭据从 secret 文件读入并以环境变量前缀交给 mongosh（healthcheck 每 10s 跑一次，
+    // 唯一合法形态），--eval 里用 process.env 取用后 auth。ping 必须显式断言 ok
+    // （不带认证的 ping 对未授权实例同样回 ok，判不了「认证坏了」）。
+    expect(exec).toMatch(
+      /MONGO_HC_USER="\$\$\(cat \/run\/secrets\/mongo_root_username\)"\s+MONGO_HC_PASS="\$\$\(cat \/run\/secrets\/mongo_root_password\)"\s+mongosh/
+    );
+    expect(exec).toMatch(/process\.env\.MONGO_HC_USER/);
+    expect(exec).toMatch(/\.auth\(u, p\)/);
+    expect(exec).toMatch(/runCommand\(\{ ping: 1 \}\)\.ok !== 1\)\s*quit\(1\)/);
+    // P2-17（2026-11-14 审计）：--username/--password 的值一旦展开进 argv，
+    // /proc/<pid>/cmdline 同容器任意 uid 可读。可执行形态（非注释）里不允许出现。
+    expect(exec).not.toMatch(/--username/);
+    expect(exec).not.toMatch(/--password/);
+  });
+
   test('app 与 Redis 初始化链路都经 redis_password secret 注入', () => {
     const app = serviceBlock('app');
     expect(app).toMatch(/- REDIS_PASSWORD_FILE=\/run\/secrets\/redis_password/);

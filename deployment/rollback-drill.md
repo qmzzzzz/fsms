@@ -23,7 +23,8 @@ node scripts/check-clock-sync.js
 MONGODB_URI_FILE=./secrets/mongodb_uri ./scripts/backup-mongo.sh ./backups
 # 默认产出加密归档 .gz.gpg + .sha256（P1-①）；明文出口/异地副本/私钥托管见 backup-encryption.md
 # 本手册所有命令都在**宿主机**执行：运行镜像里只有 scripts/destructiveGuard.js
-# （Dockerfile:122-124 故意不把其余 scripts/ 打进镜像），而宿主机按生产口径
+# 与 scripts/hotUpgradePolicy.js 两个文件（Dockerfile 的 builder/runtime 阶段按单文件
+# 白名单 COPY，故意不把其余 scripts/ 打进镜像），而宿主机按生产口径
 # 只持密钥文件、不持明文变量，所以前缀是 *_FILE 而不是明文串。
 ```
 

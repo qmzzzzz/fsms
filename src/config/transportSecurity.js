@@ -1,19 +1,12 @@
 /**
  * 传输加密启动断言——Mongo/Redis 连接串指向非回环主机却不加密时拦下启动。
- *
- * 判据是 fail-closed + **显式命名的豁免旗**，不是默认放行：同宿主 docker 网络内
- * 明文风险有限（docker-compose.yml 即该形态，注释写明摘旗条件），但拓扑一变
- * （分库/云托管实例）忘关豁免必须在启动期被拦下，而不是先明文过网再事后发现。
- * 本文件同时收口 host 侧违例（「不能指向 localhost」）与 TLS 断言——两者判的是
- * 同一个对象（连接串的主机形态），分在两处只会让人以为那是两套事实来源。
+ * 判据是 fail-closed + **显式命名的豁免旗**，不是默认放行：同宿主 docker 网络内明文风险有限（docker-compose.yml 即该形态，注释写明摘旗条件），但拓扑一变（分库/云托管实例）忘关豁免必须在启动期被拦下，而不是先明文过网再事后发现。本文件同时收口 host 侧违例（「不能指向 localhost」）与 TLS 断言——两者判的是同一个对象（连接串的主机形态），分在两处只会让人以为那是两套事实来源。
  * 拆出本文件是因为 validate.js 已顶着体积/复杂度棘轮基线，内联会双双超标。
  */
 
 /**
- * 回环主机判定：回环是**地址性质**，写成 localhost / 127.0.0.1 / [::1] /
- * ::ffff:127.0.0.1 都是同一条"不出网卡"的事实；判不出的一律按非回环处理（fail-closed）。
- * 未指定地址 `::` / `0.0.0.0` 不是回环而是"任意接口"，明文连它可能出网卡，故一并落在
- * 判据外（口径必须对称：只把 `0.0.0.0` 留在外面会让 `mongodb://[::]/` 静默跳过 TLS 断言）。
+ * 回环主机判定：回环是**地址性质**，写成 localhost / 127.0.0.1 / [::1] / ::ffff:127.0.0.1 都是同一条"不出网卡"的事实；判不出的一律按非回环处理（fail-closed）。
+ * 未指定地址 `::` / `0.0.0.0` 不是回环而是"任意接口"，明文连它可能出网卡，故一并落在判据外（口径必须对称：只把 `0.0.0.0` 留在外面会让 `mongodb://[::]/` 静默跳过 TLS 断言）。
  */
 const isLoopbackHostname = (rawHostname) => {
   if (!rawHostname) return false;
@@ -31,8 +24,20 @@ const isLoopbackHostname = (rawHostname) => {
 };
 
 /**
- * 从 URI 取主机名；解析失败返回 null（调用方对 null 保持沉默）：URI 形态本就不合法时
- * 由驱动连接失败兜底，也避免对替身/脱敏形态的 URI（compose 契约测试用 "DUMMY:mongodb_uri"）误报。
+ * 「localhost 精确 host 判据」：主机名**就是** localhost 家族（RFC 6762 保留名及其子域）才算命中，用于「MONGODB_URI 不能指向 localhost」这道防呆闸——它拦的是「没配库串、还挂着开发默认值（mongodb://localhost:27017/...）」这一种部署事故。
+ * 曾按 `uri.includes('localhost')` 子串判：mongodb://mylocalhost.example.com 这类恰好含子串的合法生产域名被误杀，query/库名里带这个词也误杀；而 mongodb://LocalHost 因大小写反而漏网。判据换成 host：new URL().hostname 已剥端口与 IPv6 方括号并归一小写，大小写与端口形态自动正确。
+ * 注意 127.0.0.1/::1 **不**在本判据内——它们是回环但不是「开发默认值」形态，单机部署/prod-drill 靠它们放行（TLS 断言里另有 isLoopbackHostname 的回环豁免），把整个回环族塞进这道闸会误杀那些部署。
+ */
+const isLocalhostHostname = (rawHostname) => {
+  if (!rawHostname) return false;
+  const h = String(rawHostname)
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '');
+  return h === 'localhost' || h.endsWith('.localhost');
+};
+
+/**
+ * 从 URI 取主机名；解析失败返回 null（调用方对 null 保持沉默）：URI 形态本就不合法时由驱动连接失败兜底，也避免对替身/脱敏形态的 URI（compose 契约测试用 "DUMMY:mongodb_uri"）误报。
  */
 const uriHostname = (uri) => {
   try {
@@ -43,15 +48,8 @@ const uriHostname = (uri) => {
 };
 
 /**
- * Redis 认证闸：redis 与监控栈同处一张扁平网络时，Grafana 任意数据源 URL 即一条无密码
- * 写路径（删黑名单键 = 撤销封禁、清限流计数 = 解除封顶）。口令两种携带形态任一：URL
- * userinfo 段，或 REDIS_PASSWORD（生产经 REDIS_PASSWORD_FILE 注入，建连点见
- * sharedCache.redisConnectionPassword）；受信内网免认证须显式声明 REDIS_AUTH_EXEMPT=true
- * ——豁免必须可见，不许静默。
- *
- * **回环豁免**（与 TLS 闸同一条口径）：指向 127.0.0.1/localhost/::1 时只有本机进程可达，
- * 无认证的暴露面收敛到本机——production-drill 临时栈与单机部署形态靠这条放行。
- *
+ * Redis 认证闸：redis 与监控栈同处一张扁平网络时，Grafana 任意数据源 URL 即一条无密码写路径（删黑名单键 = 撤销封禁、清限流计数 = 解除封顶）。口令两种携带形态任一：URL userinfo 段，或 REDIS_PASSWORD（生产经 REDIS_PASSWORD_FILE 注入，建连点见 sharedCache.redisConnectionPassword）；受信内网免认证须显式声明 REDIS_AUTH_EXEMPT=true——豁免必须可见，不许静默。
+ * **回环豁免**（与 TLS 闸同一条口径）：指向 127.0.0.1/localhost/::1 时只有本机进程可达，无认证的暴露面收敛到本机——production-drill 临时栈与单机部署形态靠这条放行。
  * 独立成函数不只是拆复杂度：它判的是「Redis 上的身份」，与 host 侧的「流量去哪」是两个维度。
  */
 const collectRedisAuthErrors = (errors, parsedRedisUrl) => {
@@ -74,7 +72,9 @@ const collectRedisAuthErrors = (errors, parsedRedisUrl) => {
 const collectTransportErrors = (errors) => {
   const mongoUri = (process.env.MONGODB_URI || '').trim();
 
-  if (!mongoUri || mongoUri.includes('localhost')) {
+  // localhost 判据按 host 精确匹配（isLocalhostHostname）：URI 形态不合法时 hostname
+  // 解析为 null → 判据沉默，交给下方 TLS 断言与驱动连接失败兜底（与该文件头口径一致）
+  if (!mongoUri || isLocalhostHostname(uriHostname(mongoUri))) {
     errors.push('MONGODB_URI 不能指向 localhost');
     return;
   }
@@ -155,5 +155,6 @@ module.exports = {
   collectTransportErrors,
   collectMongoAuthWarnings,
   isLoopbackHostname,
+  isLocalhostHostname,
   uriHostname,
 };

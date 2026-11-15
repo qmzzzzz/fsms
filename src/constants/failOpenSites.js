@@ -1,3 +1,5 @@
+'use strict';
+
 // 降级台账把站点与可告警信号绑定：只有日志不足以证明防线失效可被发现。
 // FAIL_OPEN_SITES 登记护栏失效的降级，必须声明方向并有告警规则覆盖。
 // OTHER_ALERT_SIGNALS 登记安全事件；按实际 effect/why 分类，不能把护栏降级归成普通事件。
@@ -87,6 +89,19 @@ const FAIL_OPEN_SITES = Object.freeze([
       '可收紧方向：把本地影子计数当**单侧上界**用（只在本地数已超限时才拒），与 F-211「配了共享层就绝不拿本地凑全局值」不冲突（该判据反对的是把本地数当全局值，两个方向都偏）。未做——需先确认偏晚触发是否仍能兜住刷取。',
   },
   {
+    type: 'captcha_issue_store_degraded',
+    file: 'services/captchaService.js',
+    fn: 'generate',
+    level: 'medium',
+    direction: 'mixed',
+    trigger: 'Redis 已启用但条目写入（sharedCache.set）返回 false——未就绪或命令抛错',
+    effect:
+      '验证码条目只落在本进程内存回退里：本实例的 verify 仍可消费（fail-open），但负载均衡把校验请求派到其他实例时条目查无此物（fail-closed）——用户拿到一张换台机器就作废的验证码',
+    why: '方向与成文决策一致（captcha 是登录前置，不因 Redis 抖动拒发）：本批次修的是「set 返回值无人查」这条缝隙——门面对失败写入只有 debug 日志，生产默认 info 不落盘，降级完全不可见；不发信号等于让运维只能从「验证码校验失败率上升」反推。',
+    tightening:
+      '可收紧方向：写共享层失败时把返回体带降级标记（前端提示重试），或本次不发码并退回 captchaLimiter 计数；未做——两者都改变对外契约，且降级窗口内本实例仍可完成登录。',
+  },
+  {
     type: 'captcha_switch_db_fallback',
     file: 'models/SystemConfig.js',
     fn: 'captchaSwitch',
@@ -100,6 +115,19 @@ const FAIL_OPEN_SITES = Object.freeze([
       '真正该做的是**收敛降级动作本身**：此前同一个 try/catch 在 3 个调用点各复刻一份、全都没有信号，已收口到 `captchaSwitch(kind)`；register 生产侧已强制开启。是否要把 login 侧也改成 fail-closed 属产品决策（会把 Redis/Mongo 抖动传导为「没人能登录」）。',
   },
   {
+    type: 'security_alert_webhook_unsigned_dropped',
+    file: 'services/securityAlertDelivery.js',
+    fn: 'sendNotification',
+    level: 'high',
+    direction: 'fail-closed',
+    trigger: 'SECURITY_ALERT_WEBHOOK 已配置但 SECURITY_ALERT_WEBHOOK_SECRET 缺省',
+    effect:
+      'webhook 出站通道整体停摆：告警只走结构化日志/指标/落库，SIEM 若只接 webhook 将收不到任何安全告警',
+    why: '旧实现缺密钥时静默发**无签名头**的载荷：接收方要么拒收（渠道静默断、无信号），要么收下一条没有时间戳/nonce/签名的消息——重放与篡改都没有校验面。缺密钥是配置不完整，宁可停投也不能让"看起来是本系统发的但无法验证"的载荷出站；这正是台账要管的方向反转点，故必须留计数与告警。',
+    tightening:
+      '可收紧方向：启动期对"webhook 已配置但密钥缺省"直接 fail-loud（拒启动或 readyz 降级），把配置错误挡在部署面而不是逐条告警；未做——开发环境无 SIEM 不配密钥属正常形态。',
+  },
+  {
     type: 'reauth_grant_store_degraded',
     file: 'services/reauthGrantStore.js',
     fn: 'recordReauthGrant / hasLiveReauthGrant',
@@ -108,7 +136,7 @@ const FAIL_OPEN_SITES = Object.freeze([
     trigger: '记录或查询 5 分钟二次验证窗口时数据库读写失败',
     effect:
       '窗口既写不进也读不出，该会话只能继续走一次性票据：安全性不降级（票据更严），但全体用户会被反复要求 step-up',
-    why: '刻意不 fail-open：认不出窗口就放行等于把"另一次验证"整个取消。但"降级只写日志等于没有可告警信号"（middleware/rateLimitStore.js:54）——一次库抖动会让全站 step-up 率飙升，运维必须能从计数看见，而不是靠翻日志。',
+    why: '刻意不 fail-open：认不出窗口就放行等于把"另一次验证"整个取消。但"降级只写日志等于没有可告警信号"（middleware/rateLimitStore.js:23）——一次库抖动会让全站 step-up 率飙升，运维必须能从计数看见，而不是靠翻日志。',
     tightening:
       '可收紧方向：读失败时改用短 TTL 的内存新鲜缓存（只对本进程此前确认过的 sid 放行），把可用性损失限制在"库抖动开始后新发生的 step-up"。未做——需要先确认多副本下的缓存一致口径。',
   },
@@ -121,7 +149,7 @@ const FAIL_OPEN_SITES = Object.freeze([
     trigger: '幂等判据的 keyHash 唯一索引建立失败，或键登记/读取/回填/提前应答收尾时数据库读写失败',
     effect:
       '本次去重整个不生效：同一个 Idempotency-Key 的请求会被**重复执行**（资金/写操作语义上是真实副作用），而客户端只看到一次正常响应',
-    why: '刻意 fail-open：中间件在业务之前，把它做成 fail-closed 等于库抖一下就全站 5xx。但"降级只写日志等于没有可告警信号"（middleware/rateLimitStore.js:54）——重复执行是**静默的**，客户端无感、业务侧幂等也可能兜不住，必须能从计数看见。本条此前登记在 OTHER_ALERT_SIGNALS（定义为"安全事件上报，不是降级"），而它自己的 why 写着"是降级"——台账自相矛盾且无任何告警规则覆盖，本闸当时全绿。',
+    why: '刻意 fail-open：中间件在业务之前，把它做成 fail-closed 等于库抖一下就全站 5xx。但"降级只写日志等于没有可告警信号"（middleware/rateLimitStore.js:23）——重复执行是**静默的**，客户端无感、业务侧幂等也可能兜不住，必须能从计数看见。本条此前登记在 OTHER_ALERT_SIGNALS（定义为"安全事件上报，不是降级"），而它自己的 why 写着"是降级"——台账自相矛盾且无任何告警规则覆盖，本闸当时全绿。',
     tightening:
       '可收紧方向：登记失败时不直接放行，而要求下游写操作携带一次性的 requestHash（读-改-写时比对），把去重从"中间件尽力而为"移到"数据层强制"。未做——需要先确认所有写接口都有可比的 requestHash。',
   },
@@ -285,7 +313,7 @@ const OTHER_ALERT_SIGNALS = Object.freeze([
     type: 'ban_ladder_degraded',
     file: 'services/securityAlertIpBans.js',
     level: 'medium',
-    why: '自动封禁阶梯统计失败（B8，2026-11-03）：暴力破解链的 countPrior/countPriorOffenses 抛错时按第一档处理（宁少勿滥），但「阶梯事件源查不了」意味着反复触发的 IP 恒被封 1h 而告警面零信号——退化只写 error 日志，日志不是告警面（同 rateLimitStore.js:53 纪律）。归信号段而非 FAIL_OPEN_SITES：护栏（封禁动作）仍在执行且方向是更严不是放行，缺的是档位精度；单次退化只 +1，对速率型规则永不达标，由专条 BanLadderDegraded（for: 0m）承担。',
+    why: '自动封禁阶梯统计失败（B8，2026-11-03）：暴力破解链的 countPrior/countPriorOffenses 抛错时按第一档处理（宁少勿滥），但「阶梯事件源查不了」意味着反复触发的 IP 恒被封 1h 而告警面零信号——退化只写 error 日志，日志不是告警面（同 rateLimitStore.js:23 纪律）。归信号段而非 FAIL_OPEN_SITES：护栏（封禁动作）仍在执行且方向是更严不是放行，缺的是档位精度；单次退化只 +1，对速率型规则永不达标，由专条 BanLadderDegraded（for: 0m）承担。',
   },
   {
     type: 'ban_ladder_degraded',

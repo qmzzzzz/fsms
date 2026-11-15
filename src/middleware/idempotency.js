@@ -1,6 +1,5 @@
 /**
  * 请求级幂等（`Idempotency-Key`，审计一-1）。设计取舍见 docs/adr/ADR-014。
- *
  * 语义：同键同载荷的第二次到达原样回放第一次响应（`Idempotency-Replayed: true`）；同键不同载荷 409 `IDEMPOTENCY_KEY_REUSED`；上一请求在途 409 `IDEMPOTENCY_IN_PROGRESS`，在途超过租约（5 分钟）即视为无主、可被同键接管（崩溃/被杀/部署重启都不会再有人来收尾，不能把键钉满 24h）；业务非 2xx ⇒ 释放键；2xx 但响应体超限/无体 ⇒ **保留键**并标 `replayOmitted`（重试只拿到「已完成、无响应体」，绝不重放执行）；过期记录不是判据、可被同键接管。键**可选**（不带则不判），前端每次提交默认带上。存储不可用时 fail-open 放行并告警：丢的是去重便利，fail-closed 会把可用性事故扩大成写入事故。
  */
 
@@ -21,17 +20,14 @@ const {
 
 /** 键保留窗口：24 小时。比任何"用户可能重试"的时间尺度都长，又不至于长期堆积。 */
 const RETENTION_MS = 24 * 60 * 60 * 1000;
-/** 回放响应体的上限（字节）：只回放小表单类响应，避免把大导出留在记录里 */
-const MAX_REPLAY_BYTES = 64 * 1024;
+const { MAX_REPLAY_BYTES } = IdempotencyRecord; // 回放体上限的单一来源在 models/IdempotencyRecord（模型级校验器与写入侧必须同一把尺子）：只回放小表单类响应，避免把大导出留在记录里
 /** 在途租约（ADR-014 决策 7）：in_progress 超时无人收尾（进程被杀/部署重启/永久挂起）即视为无主、可被同键接管——不能把键钉满 24h；取值远大于全部幂等端点（均为亚秒级）。 */
 const IN_PROGRESS_LEASE_MS = 5 * 60 * 1000;
 const HEADER = 'idempotency-key';
 const REPLAY_OMITTED_MESSAGE = '该请求已处理完成（响应体超过回放上限或未留存），未重复执行';
 
-const readHeader = (req) => {
-  const value = req.headers?.[HEADER];
-  return Array.isArray(value) ? value[0] : value;
-};
+const readHeader = (req) =>
+  Array.isArray(req.headers?.[HEADER]) ? req.headers?.[HEADER][0] : req.headers?.[HEADER];
 
 /** 把一个已完成的记录回放给调用方：有体按原状态码/原媒体类型回放，无体则显式降级（绝不重复执行） */
 const replayStored = (res, record) => {
@@ -81,13 +77,15 @@ const bodyBytes = (kind, body) => {
 };
 
 /**
- * 2xx 存储判据与写入形态收口：!ok 删记录（释放键）；超限/无体留 completed +
- * replayOmitted（容量上限与"有没有体"只影响回放能力，不影响去重）；否则存可回放体。
+ * 2xx 存储判据与写入形态收口：!ok 删记录（释放键）；超限/无体留 completed + replayOmitted（容量上限与"有没有体"只影响回放能力，不影响去重）；否则存可回放体。
  * @param {object} p
+ * @param {string} p.keyHash - 本次受理的幂等键哈希
+ * @param {Date} p.expiresAt - 本次受理写下的认领时刻 + 保留窗口（识别「自己的认领」的唯一凭据）
  * @param {string} p.contentTypeOf - 文本类响应的 Content-Type 取值函数（读 res 头）
  */
 const buildOutcomeUpdate = ({
   keyHash,
+  expiresAt,
   statusCode,
   ok,
   kind,
@@ -99,7 +97,9 @@ const buildOutcomeUpdate = ({
   const replayable =
     ok && kind !== 'none' && !Buffer.isBuffer(storedBody) && size <= MAX_REPLAY_BYTES;
   if (!ok) {
-    return IdempotencyRecord.deleteOne({ keyHash });
+    // （审计 2026-11-14 P2-2）释放键只能删**本次受理自己的在途认领**，不能按 keyHash 无条件删：本请求挂起超过租约后，同键请求已经 takeOverStale 原子接管（接管不改 state，仍是 in_progress）并可能已收尾 completed——无条件删会把他人已完成的判据抹掉，同键第三次到达变成全新执行（重复执行已交付的写入）。
+    // 接管必然把 expiresAt 重写为认领时刻 + 保留窗口，故 (keyHash, expiresAt) 唯一指向自己的认领；state='in_progress' 再加一道防御（completed 行在任何交错下都不得被非 2xx 收尾触碰）。
+    return IdempotencyRecord.deleteOne({ keyHash, state: 'in_progress', expiresAt });
   }
   if (!replayable) {
     return IdempotencyRecord.updateOne(
@@ -132,7 +132,7 @@ const buildOutcomeUpdate = ({
 };
 
 /** 响应回填：任何出口都要收尾——2xx 落 completed（可回放的存体、无体的标降级），非 2xx 删记录（释放键）。 */
-function captureOutcome(res, keyHash, replayBodyFilter = null) {
+function captureOutcome(res, keyHash, replayBodyFilter = null, expiresAt) {
   let settled = false;
   let streamed = false;
   const settle = (kind, body) => {
@@ -143,16 +143,8 @@ function captureOutcome(res, keyHash, replayBodyFilter = null) {
     if (streamed) kind = 'none'; // 已流过 res.write：响应体不可知，绝不能把从未发出的字节存成可回放
     const location =
       typeof res.getHeader('location') === 'string' ? res.getHeader('location') : null;
-    // replayBodyFilter（审计 2026-11-02 C-F4）：挂载点声明的回放体裁剪。响应回放
-    // 副本是响应 PII 加密体系外的明文旁路（留存 24h）——回含 PII 的 scope 必须在
-    // 挂载点声明裁剪，只留重试方所需的结论字段（首次响应已交付，字段缺失对
-    // 重试方无损）。裁剪先行，容量判据按裁剪后的体计算。
-    //
-    // filter 抛错必须吞掉并降级为「不可回放」（审计 2026-11-02 复审 F1-3）：
-    // settled 已在入口置位，这里抛出会让 buildOutcomeUpdate 永不执行 ⇒ 记录
-    // 卡死 in_progress ⇒ 5 分钟租约后同键重试**二次执行已成功的写入**（违反
-    // 「回填失败只告警，不在响应路径上抛错」的本函数纪律）。filter 失败 =
-    // 不可回放（replayOmitted），不是不可完成。
+    // replayBodyFilter（审计 2026-11-02 C-F4）：挂载点声明的回放体裁剪。响应回放副本是响应 PII 加密体系外的明文旁路（留存 24h）——回含 PII 的 scope 必须在挂载点声明裁剪，只留重试方所需的结论字段（首次响应已交付，字段缺失对重试方无损）。裁剪先行，容量判据按裁剪后的体计算。
+    // filter 抛错必须吞掉并降级为「不可回放」（审计 2026-11-02 复审 F1-3）：settled 已在入口置位，这里抛出会让 buildOutcomeUpdate 永不执行 ⇒ 记录卡死 in_progress ⇒ 5 分钟租约后同键重试**二次执行已成功的写入**（违反「回填失败只告警，不在响应路径上抛错」的本函数纪律）。filter 失败 = 不可回放（replayOmitted），不是不可完成。
     let filterFailed = false;
     let storedBody = body;
     if (ok && kind === 'json' && replayBodyFilter && body !== null && body !== undefined) {
@@ -166,12 +158,12 @@ function captureOutcome(res, keyHash, replayBodyFilter = null) {
         storedBody = null;
       }
     }
-    // filter 失败复用「无体」出口：completed + replayOmitted，释放回放语义；
-    // 单一执行路径——降级分支绝不能绕过下方唯一的 update.exec()。
+    // filter 失败复用「无体」出口：completed + replayOmitted，释放回放语义；单一执行路径——降级分支绝不能绕过下方唯一的 update.exec()。
     const effectiveKind = filterFailed ? 'none' : kind;
     const size = ok ? bodyBytes(effectiveKind, storedBody) : 0;
     const update = buildOutcomeUpdate({
       keyHash,
+      expiresAt,
       statusCode,
       ok,
       kind: effectiveKind,
@@ -349,8 +341,7 @@ const idempotency = (options = {}) => {
 
     const userId = req.user?.userId;
     if (!userId) {
-      // 无身份时无法建立判据：放行（认证闸在更外层，匿名到达说明路由漏挂鉴权）；
-      // 真出现匿名到达说明路由挂错鉴权，那是另一个问题，不该被这里的 400 掩盖。
+      // 无身份时无法建立判据：放行（认证闸在更外层，匿名到达说明路由漏挂鉴权）；真出现匿名到达说明路由挂错鉴权，那是另一个问题，不该被这里的 400 掩盖。
       return next();
     }
 
@@ -380,7 +371,7 @@ const idempotency = (options = {}) => {
       if ((await resolveConflict(res, { keyHash, requestHash, expiresAt })) === 'done') return;
     }
 
-    captureOutcome(res, keyHash, replayBodyFilter);
+    captureOutcome(res, keyHash, replayBodyFilter, expiresAt);
     return next();
   };
 };

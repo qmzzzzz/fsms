@@ -1,11 +1,11 @@
 /**
- * 审计日志控制器（D-1 自 securityController 拆出）审计日志的查询、流式导出（CSV + 签名 manifest）与哈希链完整性校验。
- * action 白名单枚举以 constants/audit.js 为单一事实来源。
+ * 审计日志控制器（D-1 自 securityController 拆出）审计日志的查询、流式导出（CSV + 签名 manifest）与哈希链完整性校验；action 白名单枚举以 constants/audit.js 为单一事实来源。
  */
 
 const AuditLog = require('../models/AuditLog');
 const ApiResponse = require('../utils/apiResponse');
 const logger = require('../utils/logger');
+const { errText } = require('../utils/auditWriteFailure'); // catch 臂的 message 归一口径
 const { asyncHandler } = require('../middleware/errorHandler');
 const { listCountOptions, listAggregateOptions } = require('../utils/queryBudget');
 const { normalizePagination } = require('../utils/helpers');
@@ -227,7 +227,7 @@ const queryAuditCursorPage = async (req, res, query, { limitNum, cursorQuery, co
       '获取成功'
     );
   } catch (error) {
-    logger.error(`审计日志查询失败: ${error.message}`);
+    logger.error(`审计日志查询失败: ${errText(error)}`);
     return ApiResponse.codeError(res, 'AUDIT_QUERY_FAILED');
   }
 };
@@ -287,7 +287,7 @@ const queryAuditOffsetPage = async (req, res, query, { pageNum, limitNum, collat
       '获取成功'
     );
   } catch (error) {
-    logger.error(`审计日志查询失败: ${error.message}`);
+    logger.error(`审计日志查询失败: ${errText(error)}`);
     return ApiResponse.codeError(res, 'AUDIT_QUERY_FAILED');
   }
 };
@@ -305,7 +305,7 @@ const queryAuditLogs = asyncHandler(async (req, res) => {
     ({ query, startDate, endDate } = built);
     collation = built.usernamePrefix ? AuditLog.AUDIT_USERNAME_COLLATION : null;
   } catch (err) {
-    return ApiResponse.error(res, err.message, 400);
+    return ApiResponse.error(res, errText(err), 400);
   }
 
   warnLargeAuditRange({ startDate, endDate }, res);
@@ -330,7 +330,7 @@ const queryAuditLogs = asyncHandler(async (req, res) => {
         valueType: 'date',
       });
     } catch (err) {
-      return ApiResponse.error(res, err.message || '分页游标无效', err.statusCode || 400);
+      return ApiResponse.error(res, errText(err) || '分页游标无效', err.statusCode || 400);
     }
   }
 

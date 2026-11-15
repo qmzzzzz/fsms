@@ -82,13 +82,19 @@ describe('检查点新鲜度臂（degraded 档）', () => {
 
   const filePath = () => path.join(dir, 'checkpoints.jsonl');
 
-  test('新鲜度预算：默认 26h，env 置 0=显式关闭，非法值回退默认', () => {
+  test('新鲜度预算：默认 26h，env 置 0=显式关闭，空串=未配置，非法值回退默认', () => {
     expect(DEFAULT_FRESHNESS_MS).toBe(26 * 60 * 60 * 1000);
     expect(freshnessBudgetMs()).toBe(DEFAULT_FRESHNESS_MS);
     process.env.CHECKPOINT_FRESHNESS_MS = '3600000';
     expect(freshnessBudgetMs()).toBe(3600000);
     process.env.CHECKPOINT_FRESHNESS_MS = '0';
     expect(freshnessBudgetMs()).toBe(0);
+    // 空串/纯空白按「未配置」走默认（审计 2026-11-14 H）：Number('') = 0 曾被旧判据
+    // 误读成显式关闭，把检查点新鲜度臂静默关掉——compose 只写键名不留值正是这一形态
+    process.env.CHECKPOINT_FRESHNESS_MS = '';
+    expect(freshnessBudgetMs()).toBe(DEFAULT_FRESHNESS_MS);
+    process.env.CHECKPOINT_FRESHNESS_MS = '   ';
+    expect(freshnessBudgetMs()).toBe(DEFAULT_FRESHNESS_MS);
     process.env.CHECKPOINT_FRESHNESS_MS = '-5';
     expect(freshnessBudgetMs()).toBe(DEFAULT_FRESHNESS_MS);
     process.env.CHECKPOINT_FRESHNESS_MS = 'garbage';

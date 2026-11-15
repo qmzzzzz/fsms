@@ -169,4 +169,45 @@ describe('SecurityStatsCard（管理员安全统计）', () => {
     // 本次响应未给的字段按 0 兜底
     expect(values(c)).toEqual(['5', '0', '0'])
   })
+
+  test('形状漂移（计数成字符串）：落错误态，不渲染不可信读数（P3 形状校验）', async () => {
+    const consoleErr = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      getSecurityStats.mockResolvedValue({
+        data: {
+          data: {
+            overview: { todayLogins: '12x', todayFailedLogins: 3, highRiskOperations: 1 },
+            anomalies: { failedOperationUsers: [], unusualTimeUsers: [] },
+            securityLevel: 'normal',
+          },
+        },
+      })
+      const c = await open()
+      await waitFor(() => c.find('.self-error') !== null, { message: '漂移错误态出现' })
+      expect(values(c)).toHaveLength(0)
+      expect(consoleErr.mock.calls.some(([m]) => String(m).includes('[schema-drift]'))).toBe(true)
+    } finally {
+      consoleErr.mockRestore()
+    }
+  })
+
+  test('形状漂移（聚合非数组）：落错误态而非 .length 抛错打白整卡', async () => {
+    const consoleErr = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      getSecurityStats.mockResolvedValue({
+        data: {
+          data: {
+            overview: { todayLogins: 12, todayFailedLogins: 3, highRiskOperations: 1 },
+            anomalies: { failedOperationUsers: { 0: 'u1', length: 5 }, unusualTimeUsers: [] },
+            securityLevel: 'normal',
+          },
+        },
+      })
+      const c = await open()
+      await waitFor(() => c.find('.self-error') !== null, { message: '漂移错误态出现' })
+      expect(values(c)).toHaveLength(0)
+    } finally {
+      consoleErr.mockRestore()
+    }
+  })
 })

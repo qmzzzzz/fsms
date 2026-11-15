@@ -90,6 +90,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { api } from '@/utils/api'
 import { useLatestRequest } from '@/composables/useLatestRequest'
+import { SecurityStatsDataSchema, formatIssues } from '@/schemas'
 
 const { t } = useI18n()
 
@@ -119,9 +120,32 @@ const load = async () => {
     const { data: resp } = await api.security.getSecurityStats()
     // 过期响应直接丢弃：否则慢的旧请求会覆盖新读数
     if (!isCurrent()) return
-    const d = resp.data || {}
-    overview.value = { ...EMPTY_OVERVIEW, ...d.overview }
-    anomalies.value = { ...EMPTY_ANOMALIES, ...d.anomalies }
+    // P3：形状校验（与 usePermissionSync 的 permission-sync 同口径）。响应
+    // 来自网络，计数被改成字符串/对象、聚合被改成非数组时，此前 {...EMPTY, ...d}
+    // 的宽松合并会把 "NaN"、"[object Object]" 直出模板，甚至 .length 抛错打白整卡；
+    // 校验不过就落错误态，绝不渲染不可信读数。只校验 data 载荷：外层包络已由
+    // api.js 的通用 verifyResponseShape 把关。
+    const parsed = SecurityStatsDataSchema.safeParse(resp?.data)
+    if (!parsed.success) {
+      console.error(`[schema-drift] security/stats -> ${formatIssues(parsed.error)}`)
+      overview.value = { ...EMPTY_OVERVIEW }
+      anomalies.value = { ...EMPTY_ANOMALIES }
+      securityLevel.value = 'normal'
+      error.value = true
+      return
+    }
+    const d = parsed.data || {}
+    // 缺位/null 归一到 0 / 空数组：保持「缺字段按 0 兜底」既有契约，且防 null.length
+    const ov = d.overview || {}
+    overview.value = {
+      todayLogins: ov.todayLogins ?? 0,
+      todayFailedLogins: ov.todayFailedLogins ?? 0,
+      highRiskOperations: ov.highRiskOperations ?? 0,
+    }
+    anomalies.value = {
+      failedOperationUsers: d.anomalies?.failedOperationUsers ?? [],
+      unusualTimeUsers: d.anomalies?.unusualTimeUsers ?? [],
+    }
     securityLevel.value = d.securityLevel || 'normal'
   } catch (_) {
     // 过期响应的失败不得在新鲜数据上盖错误态

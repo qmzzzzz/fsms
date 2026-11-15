@@ -129,6 +129,20 @@ describe('overdue 巡检仍可开工与提交', () => {
     expect(again.threw).toBe(true);
   });
 
+  test('complete 开启 runValidators：超长 remark 被模型校验拒绝而非静默落库（审计 2026-11-14 K）', async () => {
+    // update 路径默认不跑 schema 校验：不开 runValidators 时 501 字 remark 会静默落库，
+    // 读回内容与路由层 isLength(max:500) 的承诺分叉。与 updateInspection / AlarmService
+    // 同判据——路由闸仍在，这里补直调服务层的最后防线。
+    const doc = await makeInspection({ status: 'in_progress', actualStartTime: new Date() });
+    await expect(
+      InspectionService.completeInspection(
+        doc,
+        { result: 'normal', remark: '长'.repeat(501) },
+        OWNER
+      )
+    ).rejects.toThrow(mongoose.Error.ValidationError);
+  });
+
   test('负向：终态不得被"开始/提交"，非指派人也不得（放宽只针对 overdue 一格）', async () => {
     const done = await makeInspection({ status: 'completed', actualEndTime: new Date() });
     const cancelled = await makeInspection({ status: 'cancelled' });

@@ -67,6 +67,7 @@ import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { useAuthStore } from '@/store'
 import { api } from '@/utils/api'
 import { encryptPassword } from '@/utils/loginCipher'
+import { encryptionErrorMessage } from '@/utils/encryptionError'
 import { isStrongPassword } from '@/utils/password'
 import { enterSubmit } from '@/utils/enterSubmit'
 
@@ -102,9 +103,12 @@ const changePwd = async () => {
   }
   submitting.value = true
   try {
-    // 口令密文轨（FE-H1）：两个字段各自独立信封（每次随机 ECDH 临时密钥+nonce）。
-    // null 仅限 WebCrypto 不可用（设计内降级）；「可用但失败」抛错时阻断提交
-    // 并提示重试，不静默明文上行（console.warn 留痕监控密文率）
+    // 口令密文轨（FE-H1 / G2 统一口径）：两个字段各自独立信封（每次随机 ECDH 临时密钥+nonce）。
+    // 加密失败一律 fail-closed 阻断提交，不存在明文上行（P2-5）：
+    //   - 抛错（公钥网络故障 / INSECURE_CONTEXT / 指纹不符）：catch 阻断并提示；
+    //   - 返回 null（仅剩 dev 非安全上下文一种形态）：同样阻断，按生产同款
+    //     INSECURE_CONTEXT 语义提示——改密不是登录页，没有「本地纯 HTTP 联调」豁免，
+    //     与 MfaSettingsCard / ReauthDialog / UpgradeDialog 同口径。
     const payload = {}
     let encCurrent
     let encNew
@@ -113,21 +117,15 @@ const changePwd = async () => {
       encNew = await encryptPassword(pwdForm.newPassword, 'PASSWORD_NEW')
     } catch (e) {
       console.warn('[loginCipher] 口令加密失败，已阻断提交：', e?.message)
-      // 公钥指纹不符（PUBLIC_KEY_PIN_MISMATCH）：主动 MITM 或服务端轮换密钥后
-      // 前端包未随之重建——与「网络抖动、重试即可」不是一回事，文案须可执行
-      ElMessage.error(
-        e?.code === 'PUBLIC_KEY_PIN_MISMATCH'
-          ? t('login.publicKeyPinMismatch')
-          : e?.code === 'INSECURE_CONTEXT'
-            ? t('login.insecureContext')
-            : t('login.encryptionFailed')
-      )
+      ElMessage.error(encryptionErrorMessage(t, e))
       return
     }
-    if (encCurrent) payload.encCurrentPassword = encCurrent
-    else payload.currentPassword = pwdForm.currentPassword
-    if (encNew) payload.encNewPassword = encNew
-    else payload.newPassword = pwdForm.newPassword
+    if (!encCurrent || !encNew) {
+      ElMessage.error(t('login.insecureContext'))
+      return
+    }
+    payload.encCurrentPassword = encCurrent
+    payload.encNewPassword = encNew
 
     await api.auth.changePassword(payload)
     ElMessage.success(t('profile.pwdChanged'))

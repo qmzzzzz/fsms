@@ -137,8 +137,19 @@
             >
               {{ $t('alarm.dispatch') }}
             </button>
+            <!--
+              办结入口按状态收口（P3）：终态行（resolved/false_alarm/cancelled）不再渲染
+              ——此前只在 pending/processing 行点了才吃 resolveRequiresProcessing 警告，
+              按钮本身挂在终态行上只会误导（看起来还能办结）。
+              pending 行保留入口：resolve() 的前置说明（须先派单+到场）是有意的信息路径（P3-45）。
+            -->
             <button
-              v-if="hasPerm('alarm:handle')"
+              v-if="
+                hasPerm('alarm:handle') &&
+                row.status !== 'resolved' &&
+                row.status !== 'false_alarm' &&
+                row.status !== 'cancelled'
+              "
               type="button"
               class="glass-btn glass-btn--success glass-btn--link"
               :disabled="rowBusy === row._id"
@@ -281,7 +292,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, computed, h } from 'vue'
+import { ref, reactive, onMounted, onUnmounted, computed, h } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { formatTime } from '@/utils/datetime'
 import { Bell, WarningFilled, CircleCheckFilled, Tools } from '@element-plus/icons-vue'
@@ -561,6 +572,14 @@ const refreshAllDebounced = () => {
   clearTimeout(notificationRefreshTimer)
   notificationRefreshTimer = setTimeout(refreshAll, 800)
 }
+// P3：防抖定时器随卸载清理。离开页面后到期的 setTimeout 仍会触发 refreshAll，
+// 对着已卸载的组件再打 2 个 GET（useLatestRequest 只守卫响应写回，拦不住请求发出）
+onUnmounted(() => {
+  if (notificationRefreshTimer) {
+    clearTimeout(notificationRefreshTimer)
+    notificationRefreshTimer = null
+  }
+})
 useRealtimeRefresh({
   rooms: ['alarm'],
   subscriptions: [{ event: 'notification', handler: refreshAllDebounced }],

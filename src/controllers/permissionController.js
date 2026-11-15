@@ -10,10 +10,10 @@ const logger = require('../utils/logger');
 const { asyncHandler } = require('../middleware/errorHandler');
 const { normalizePagination } = require('../utils/helpers');
 const permissionService = require('../services/permissionService');
-// 权限定义变更后必须失效「权限解析缓存」（userPermissionService 的
-// 进程内 TTL 缓存）。该缓存缓存的是**解析结果**，解析带 `status: active` 过滤，
-// 因此停用/启用/删除权限后若不失效，所有已缓存用户最长仍按旧定义授权 30 秒。
+// 权限定义变更后必须失效「权限解析缓存」（进程内 TTL 缓存，缓存的是解析结果且带
+// `status: active` 过滤）：不失效则被改定义的用户最长仍按旧定义授权 30 秒。
 const { invalidatePermissionCache } = require('../services/userPermissionService');
+const { RESERVED_WILDCARD_PERMISSION } = require('../utils/superAdmin'); // 保留通配的停用闸与 permissionService.savePermission 同一常量（各写字面量会漂移）
 
 /**
  * 获取权限列表
@@ -100,8 +100,7 @@ const UPDATABLE_PERMISSION_FIELDS = [
   'status',
 ];
 
-/** 权限树环路检测的深度上限（与原实现同值） */
-const MAX_PARENT_DEPTH = 32;
+const MAX_PARENT_DEPTH = 32; // 权限树环路检测的深度上限（与原实现同值）
 
 /** 按白名单把请求体里出现过的字段写入文档（未提供的字段保持原值） */
 const applyUpdatableFields = (permission, body) => {
@@ -186,21 +185,40 @@ const updatePermission = asyncHandler(async (req, res) => {
     return ApiResponse.codeError(res, 'PERMISSION_NOT_FOUND');
   }
 
-  // 内置超级通配 `*:*` 不可停用/改状态（与创建路径 permissionRoutes.js:41 的
-  // `.not().equals('*:*')` 同口径，纵深防御）。userPermissionService.getPermissions
-  // populate `match:{status:'active'}`——一旦把 `*:*` 置 inactive，全体超管解析时立刻失去
-  // `*:*`，而本接口只有持 permission:update 的超管能调 → 改完自己也没权限改回 = DB 级自锁死。
-  if (permission.code === '*:*' && status !== undefined) {
+  // 内置超级通配不可停用/改状态（与创建路径 permissionRoutes 的 `.not().equals('*:*')` 同口径）：
+  // getPermissions populate `match:{status:'active'}`——置 inactive 会让全体超管立刻失去 `*:*`，
+  // 而本接口只有超管能调 → 改完自己也没权限改回 = DB 级自锁死。
+  if (permission.code === RESERVED_WILDCARD_PERMISSION && status !== undefined) {
     return ApiResponse.codeError(res, 'VALIDATION_FAILED', {
       fieldErrors: [{ path: 'status', msg: '内置超级权限 *:* 不可停用或变更状态' }],
     });
   }
 
+  const previousParent = permission.parent; // 写前快照：applyParentChange 会就地改写 parent，补偿回滚需要改动前的值
   if (await applyParentChange(permission, parent, res)) return;
 
   applyUpdatableFields(permission, req.body);
 
   const updatedPerm = await permissionService.savePermission(permission);
+
+  // 写后复验：成环判据是「先查后写」，并发下两次 update 可双双过检查再双双落库成环；测试环境
+  // standalone 无事务（withTransaction 降级，见 utils/transaction.js）⇒ 提交点后按库现值重走链路，
+  // 发现成环即把 parent 原子回滚到写前快照并回注册码。
+  if (parent !== undefined) {
+    const saved = await permissionService.getAncestorForCycleCheck(updatedPerm._id);
+    const chain = saved?.parent
+      ? await checkParentChain(
+          await permissionService.getAncestorForCycleCheck(saved.parent),
+          saved._id
+        )
+      : 'OK';
+    if (chain === 'CYCLE') {
+      await permissionService.revertParentAfterCycle(permission._id, previousParent);
+      invalidatePermissionCache();
+      logger.warn(`权限父级写后复验发现并发成环，已补偿回滚：permissionId=${permission._id}`);
+      return ApiResponse.codeError(res, 'PARENT_PERMISSION_CYCLE');
+    }
+  }
 
   // status 变更直接改变解析结果；其余字段一并失效——
   // 这里刻意不做「哪些字段影响解析」的字段级判断：判断写错即静默失去防线，

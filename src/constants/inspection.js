@@ -1,3 +1,5 @@
+'use strict';
+
 /**
  * 巡检（Inspection）域的枚举单一事实来源
  *

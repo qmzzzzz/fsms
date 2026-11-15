@@ -56,10 +56,22 @@ const UNDOCUMENTED = [
   // ---- 运维/发现端点：不是业务 API，OpenAPI 面只覆盖业务接口 ----
   // 注意 GET /health 不在这张表里：它**在**文档中（openapi.json 的 /health.get 200），
   // 台账只收"实现有、文档无"，把已文档化的端点写进来会让 #3 变成永远红的噪声。
-  { key: 'GET /readyz', why: '就绪探针（app.js:448），200/503 按 Mongo+Redis+拓扑判定' },
-  { key: 'GET /metrics', why: 'Prometheus 拉取端点（app.js:509），METRICS_ENABLED=false 时不存在' },
-  { key: 'GET /api/metrics', why: '面板 JSON 快照（app.js:515），认证 + security:audit' },
-  { key: 'GET /api-docs.json', why: '文档自身的 JSON（app.js:553），仅 ENABLE_API_DOCS 时存在' },
+  {
+    key: 'GET /readyz',
+    why: '就绪探针（app.js:446），200/503 按 Mongo+Redis+拓扑判定（旧写 :448 指探针说明注释段；2026-11-15 dev 访问日志脱敏批后改指挂载本体 :459，同日密度裁剪批 app.js 注释压缩 −13 行后为 :446）',
+  },
+  {
+    key: 'GET /metrics',
+    why: 'Prometheus 拉取端点（app.js:496），METRICS_ENABLED=false 时不存在（原写 :509，2026-11-15 密度裁剪批 app.js 注释压缩后顺移）',
+  },
+  {
+    key: 'GET /api/metrics',
+    why: '面板 JSON 快照（app.js:502），认证 + security:audit（原写 :515，2026-11-15 密度裁剪批 app.js 注释压缩后顺移）',
+  },
+  {
+    key: 'GET /api-docs.json',
+    why: '文档自身的 JSON（app.js:546），仅 ENABLE_API_DOCS 时存在（2026-11-15 dev 访问日志脱敏批由 :553 顺移至 :559，同日密度裁剪批 app.js 注释压缩后为 :546）',
+  },
   // ---- 匿名发现/上报端点：路径由 RFC 9116、CSP report-uri、浏览器行为固定 ----
   { key: 'GET /.well-known/security.txt', why: 'RFC 9116 发现文件（wellKnownRoutes.js）' },
   { key: 'GET /security.txt', why: '同上，根路径兼容位置' },

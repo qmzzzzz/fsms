@@ -366,6 +366,24 @@ describe('authService gap B', () => {
         else process.env.SUPER_ADMIN_USERNAME = oldName;
       }
     });
+
+    test('USER_GONE - 角色快照重查时账户已被并发删除：fail-closed 拒发会话（审计 2026-11-14 B）', async () => {
+      // ② 段查到可用账户之后、issueLoginSession 的重查之前账户被删：populatedUser 为
+      // null 时旧代码 .roles 直接 TypeError ⇒ 登录 500。此刻口令已验证通过，绝不能崩、
+      // 也不能再签发任何令牌——outcome USER_GONE 由控制器转注册码 USER_NOT_FOUND_OR_DELETED。
+      const user = await makeUser('gone1');
+      const { issueLoginSession } = require('../../services/authService/session');
+      await User.deleteOne({ _id: user._id });
+      const result = await issueLoginSession(user, defaultCtx(), user.username);
+      expect(result.outcome).toBe('USER_GONE');
+      expect(result.token).toBeUndefined();
+      expect(result.refreshToken).toBeUndefined();
+      // 反向对照：账户仍在时同一段代码必须正常签发（证明上面不是"恒拒"的假绿）
+      const alive = await makeUser('gone2');
+      const okResult = await issueLoginSession(alive, defaultCtx(), alive.username);
+      expect(okResult.outcome).toBe('OK');
+      expect(okResult.token).toBeTruthy();
+    });
   });
 
   // ==================== refreshSession ====================
@@ -424,6 +442,19 @@ describe('authService gap B', () => {
           type: 'refresh',
           tokenVersion: user.tokenVersion ?? 0,
         },
+        getRefreshSecret(),
+        { expiresIn: '24h' }
+      );
+      const result = await authService.refreshSession(token, defaultCtx());
+      expect(result.outcome).toBe('INVALID');
+    });
+
+    test('INVALID - 载荷 userId 非法 ObjectId（服务层直接给可判定 outcome，不冒 CastError）', async () => {
+      // 审计 2026-11-14 C：本服务签发的 userId 恒为 _id 的 24 位 hex；签发面之外的形态
+      // 不是本服务铸造的血统，服务层直接按 INVALID 拒绝（注册码 REFRESH_TOKEN_INVALID
+      // → 401），不再依赖控制器的异常兜底网把 findById 的 CastError 归一成 401。
+      const token = jwt.sign(
+        { userId: 'not-a-valid-objectid', type: 'refresh', tokenVersion: 0, sid: 'sid-x' },
         getRefreshSecret(),
         { expiresIn: '24h' }
       );

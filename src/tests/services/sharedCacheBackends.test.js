@@ -301,20 +301,12 @@ describe('sharedCache Redis 路径（假 ioredis 驱动）', () => {
     }
     async eval(script, _numKeys, key, ...args) {
       this.guard();
-      // T-4：decrWithFloorZero 的回收脚本（DECR + 下界 0 + 保住原 TTL）。
-      // 必须放在 INCR 分支**之前**判断：两个脚本的文本形状相近，靠 `includes('INCR')`
-      // 区分时 DECR 脚本会掉进锁分支被 `store.set(key, args[1])` 写成 undefined，
-      // 于是"下界 0"和"TTL 不丢"这两条不变式会变成无人看守的假绿。
-      if (/redis\.call\(\s*['"]DECR['"]/.test(script)) {
-        const v = (Number(FakeRedis.store.get(key)) || 0) - 1;
-        if (v >= 0) {
-          FakeRedis.store.set(key, String(v));
-          return v;
-        }
-        // 下界分支：SET 0，且原 TTL 仍在时补回（脚本里是 PTTL → SET → PEXPIRE）
-        FakeRedis.store.set(key, '0');
-        return 0;
-      }
+      // T-4：decrWithFloorZero 的回收脚本（DECR + 下界 0 + 保住原 TTL）。必须放在 INCR
+      // 分支**之前**判断：两个脚本的文本形状相近，靠 `includes('INCR')` 区分时 DECR 脚本
+      // 会掉进锁分支被 `store.set(key, args[1])` 写成 undefined，于是"下界 0"和"TTL 不丢"
+      // 这两条不变式会变成无人看守的假绿。同序复演体抽到 evalDecrFloorZero（本方法分支
+      // 复杂度被它顶破棘轮 16>15）。与脚本同序：PTTL 先于 DECR 读。
+      if (/redis\.call\(\s*['"]DECR['"]/.test(script)) return this.evalDecrFloorZero(key);
       // L-07：incrWithTtl 的 Lua 脚本——在假客户端里按脚本语义复演
       if (script.includes('INCR')) {
         const v = (Number(FakeRedis.store.get(key)) || 0) + 1;
@@ -340,6 +332,29 @@ describe('sharedCache Redis 路径（假 ioredis 驱动）', () => {
         }
         return 1;
       }
+      return 0;
+    }
+    // T-4 同序复演体：与 DECR_FLOOR_ZERO_SCRIPT 逐步对应——PTTL 先于 DECR 读
+    // （DECR 造出的 -1 无 TTL，之后读不出"本来不存在"）；缺失/刚过期（pttl==-2）
+    // ⇒ 删残键不重建；存在 ⇒ SET 0 并按原 TTL 补回。
+    evalDecrFloorZero(key) {
+      const prePttl = !FakeRedis.store.has(key)
+        ? -2
+        : FakeRedis.ttls.has(key)
+          ? FakeRedis.ttls.get(key)
+          : -1;
+      const v = (Number(FakeRedis.store.get(key)) || 0) - 1;
+      if (v >= 0) {
+        FakeRedis.store.set(key, String(v));
+        return v;
+      }
+      if (prePttl === -2) {
+        FakeRedis.store.delete(key);
+        FakeRedis.ttls.delete(key);
+        return 0;
+      }
+      FakeRedis.store.set(key, '0');
+      if (prePttl > 0) FakeRedis.ttls.set(key, prePttl);
       return 0;
     }
     async quit() {
@@ -832,6 +847,23 @@ describe('sharedCache Redis 路径（假 ioredis 驱动）', () => {
       expect(decrScript).toMatch(/if\s+v\s*>=\s*0\s+then\s+return\s+v\s+end/);
       expect(decrScript).toMatch(/PTTL/);
       expect(decrScript).toMatch(/PEXPIRE/);
+      evalSpy.mockRestore();
+    });
+
+    test('DECR 回收：键缺失/刚过期 ⇒ 删除残键不重建（不得把计数复活成永久键，与内存后端同语义）', async () => {
+      await bootRedisMode();
+      const evalSpy = jest.spyOn(FakeRedis.instances[0], 'eval');
+      // 从未自增过的键直接回收：DECR 会造出无 TTL 的 -1——脚本必须删掉它而不是 SET 0 留存
+      expect(await cache.decrWithFloorZero('dc:absent')).toBe(0);
+      expect(FakeRedis.store.has('dc:absent')).toBe(false);
+      // 对照：真实计数器的下界路径不受影响（TTL 保留）
+      expect(await cache.incrWithTtl('dc:1', 60000)).toBe(1);
+      expect(await cache.decrWithFloorZero('dc:1')).toBe(0);
+      expect(FakeRedis.ttls.get('dc:1')).toBe(60000);
+      // 脚本文本钉住缺失分支：PTTL 先读 + pttl == -2 时 DEL（防删掉重建判据的回归）
+      const decrScript = evalSpy.mock.calls.map((c) => c[0]).find((s) => /DECR/.test(s));
+      expect(decrScript).toMatch(/local\s+pttl\s*=\s*redis\.call\(\s*['"]PTTL['"]/);
+      expect(decrScript).toMatch(/if\s+pttl\s*==\s*-2\s+then\s+redis\.call\(\s*['"]DEL['"]/);
       evalSpy.mockRestore();
     });
 

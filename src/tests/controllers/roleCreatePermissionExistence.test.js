@@ -178,4 +178,33 @@ describe('POST /api/roles 的权限 ID 存在性', () => {
     expect(errorCode(res)).toBe('CANNOT_GRANT_WILDCARD_PERMISSION');
     expect(await madeRole('WILD')).toBeNull();
   });
+
+  test('8 查重竞态收口：并发同码赢家先落库 ⇒ E11000 兜底转 409 ROLE_STATE_CONFLICT', async () => {
+    // findRoleByCode 与 Role.create 之间存在竞态窗口：并发同码的两个 create 都能通过
+    // 查重，兜底是 models/Role.js 的 unique 索引。这里用 spy 模拟窗口内的赢家——
+    // 控制器走到 service.createRole 之前让同码角色先落库（名字不同，专打 code 索引），
+    // 输家以 E11000 收尾：控制器必须转成 409，而不是把驱动错误漏给全局 errorHandler
+    // 变成无码 400「资源已存在」。
+    const roleService = require('../../services/roleService');
+    const original = roleService.createRole.bind(roleService);
+    const code = roleCode('RACE');
+    const spy = jest.spyOn(roleService, 'createRole').mockImplementation(async (fields) => {
+      await Role.create({
+        name: `${stamp}RACEWINNER`,
+        code: fields.code,
+        level: fields.level,
+        permissions: fields.permissions,
+      });
+      return original(fields);
+    });
+    try {
+      const res = await create(superToken, [], 'RACE');
+      expect(res.status).toBe(409);
+      expect(errorCode(res)).toBe('ROLE_STATE_CONFLICT');
+      // 库里只有赢家一份，输家没有被建出来（重试后会得到精确的 ROLE_CODE_TAKEN）
+      expect(await Role.countDocuments({ code })).toBe(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });

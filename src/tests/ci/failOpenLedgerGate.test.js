@@ -3,7 +3,8 @@
  *
  * ## 为什么需要它
  * 本仓有一条成文纪律在三个文件里被重复声明（`middleware/security/ipBlacklist.js:205`、
- * `middleware/rateLimitStore.js:53-56`、`services/websocketService/handshake.js:481-483`）：
+ * `middleware/rateLimitStore.js:22-27`（2026-11-14 审计修复批 makeDegradationSignal 抽到模块级，
+ * 纪律句由 :53-56 迁 :22-27）、`services/websocketService/handshake.js:481-483`）：
  * **fail-open 必须有显式可观测信号**。但纪律只在注释里——没有任何东西把
  * 「站点集合」与「每个站点的信号」钉在一起，于是第四处漏了：
  * `services/captchaService.js` 的上限判定被跳过时，唯一痕迹是 `sharedCache/index.js:322`

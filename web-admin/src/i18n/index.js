@@ -2,9 +2,17 @@ import { createI18n } from 'vue-i18n'
 import zhCN from './locales/zh-CN'
 import enUS from './locales/en-US'
 
+/**
+ * 支持的 locale 白名单（P3）。
+ * sessionStorage 里保存的值与运行期传入的值都不可信（可被手工改写/拼接），
+ * 非白名单值一律回落——否则 <html lang> 与词表查找都会落到未知 locale 上。
+ */
+export const SUPPORTED_LOCALES = ['zh-CN', 'en-US']
+
 const savedLocale = (() => {
   try {
-    return sessionStorage.getItem('locale')
+    const saved = sessionStorage.getItem('locale')
+    return SUPPORTED_LOCALES.includes(saved) ? saved : null
   } catch (_) {
     return null
   }
@@ -71,6 +79,12 @@ const i18n = createI18n({
 document.documentElement.setAttribute('lang', defaultLocale)
 
 export function setLocale(locale) {
+  // P3：白名单校验——未知 locale 不生效也不落盘（保持当前语言），留痕便于发现
+  // 调用方传错或被注入的值。语言选择器的取值集与 SUPPORTED_LOCALES 同源。
+  if (!SUPPORTED_LOCALES.includes(locale)) {
+    console.warn('[i18n] 忽略未支持的语言切换请求:', locale)
+    return
+  }
   i18n.global.locale.value = locale
   try {
     sessionStorage.setItem('locale', locale)

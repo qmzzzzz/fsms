@@ -287,7 +287,13 @@ function parseArgs(argv) {
     today: new Date().toISOString().slice(0, 10),
   };
   for (let i = 0; i < argv.length; i += 1) {
-    const [flag, inline] = argv[i].split('=');
+    // 只在**第一个** `=` 处切开：split('=') 会把值里后续的 `=` 也当分隔符，
+    // `--report=/tmp/a=b.json` 会被截成 `/tmp/a`（查不到文件 ⇒ 门禁以"基础设施错误"
+    // 名义退出 2，或者更糟：--today=2026-01-01=x 之类被静默截断）。取首段为开关名、
+    // 其余整段为值。
+    const eq = argv[i].indexOf('=');
+    const flag = eq === -1 ? argv[i] : argv[i].slice(0, eq);
+    const inline = eq === -1 ? undefined : argv[i].slice(eq + 1);
     const value = inline !== undefined ? inline : argv[++i];
     // 报错时要点名**用户写的那个开关**：`++i` 之后 argv[i] 已是下一个参数（或 undefined），
     // 用它拼消息会打出「未知参数：undefined」——一条读了也不知道该改哪里的错误。

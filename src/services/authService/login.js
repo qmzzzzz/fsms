@@ -72,7 +72,7 @@ const consumeDummyPasswordTime = async (candidate) => {
  *
  * @param {object} params { username, password, encPassword, mfaCode, captchaId, captchaText }
  * @param {object} ctx { ip, userAgent, method, path, fingerprint, req }
- * @returns {Promise<{outcome:'CAPTCHA_INVALID'|'ENC_INVALID'|'INVALID_CREDENTIALS'|'MFA_REQUIRED'|'MFA_ATTEMPTS_EXCEEDED'|'MFA_CODE_INVALID'|'OK'}>}
+ * @returns {Promise<{outcome:'CAPTCHA_INVALID'|'ENC_INVALID'|'INVALID_CREDENTIALS'|'MFA_REQUIRED'|'MFA_ATTEMPTS_EXCEEDED'|'MFA_CODE_INVALID'|'USER_GONE'|'OK'}>}
  */
 async function loginUser(params, ctx) {
   const { username } = params;

@@ -15,6 +15,7 @@
           v-model="password"
           type="password"
           show-password
+          maxlength="128"
           autocomplete="current-password"
           :placeholder="t('auth.currentPassword')"
           @keydown.enter.prevent="submit"
@@ -63,6 +64,7 @@ import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { encryptPassword } from '@/utils/loginCipher'
+import { encryptionErrorMessage } from '@/utils/encryptionError'
 
 /**
  * 通用二次验证弹层：收集口令 / MFA 码并加密后交给父组件。
@@ -118,13 +120,8 @@ const submit = async () => {
     // 加密失败必须阻断，不得静默降级为明文上行。
     encrypted = await encryptPassword(password.value, 'PASSWORD_CURRENT')
   } catch (e) {
-    ElMessage.error(
-      e?.code === 'PUBLIC_KEY_PIN_MISMATCH'
-        ? t('login.publicKeyPinMismatch')
-        : e?.code === 'INSECURE_CONTEXT'
-          ? t('login.insecureContext')
-          : t('login.encryptionFailed')
-    )
+    // 文案统一走共享 helper（P2 收敛）：指纹不符/非安全上下文/通用失败三分支
+    ElMessage.error(encryptionErrorMessage(t, e))
     return
   }
   // G2 统一口径：dev 非安全上下文返回 null 时阻断提交（明文回退轨已删）

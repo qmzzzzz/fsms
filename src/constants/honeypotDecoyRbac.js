@@ -66,7 +66,7 @@ const DECOY_ROLES = frozenRows(
     name: entry.name,
     description: ROLE_LEDGER[entry.code].description,
     status: 'active',
-    permissions: permissionScopeOf(ROLE_PERMISSION_MODULES[entry.code]), // 键集 = roleService.js:15 的列表投影 {name code type module}
+    permissions: permissionScopeOf(ROLE_PERMISSION_MODULES[entry.code]), // 键集 = roleService.js:16 的列表投影 {name code type module}
     level: ROLE_LEDGER[entry.code].level,
     isBuiltIn: false,
     createdAtOffsetMin: ROLE_LEDGER[entry.code].createdAtOffsetMin,

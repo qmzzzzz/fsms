@@ -10,7 +10,7 @@ const { asyncHandler } = require('../../middleware/errorHandler');
 const { getDataScope } = require('../../middleware/rbac');
 const { validatePasswordStrength, uniqueIdStrings } = require('../../utils/helpers');
 const { decryptLoginCredential } = require('../../utils/loginCipher');
-const { isSuperAdminRole } = require('../../utils/superAdmin');
+const { isSuperAdminRole, RESERVED_WILDCARD_PERMISSION } = require('../../utils/superAdmin');
 // A3：email 已 at-rest 加密 ⇒ 查重改走 HMAC 检索键（明文列随机 IV，相等性不成立）
 const { piiSearchKey } = require('../../utils/piiCrypto');
 const statsCache = require('../../services/statsCache');
@@ -94,7 +94,7 @@ const validateRolesForCreate = async (req, res, roles) => {
   }
 
   const operatorPermCodes = await userService.getPermissions(req.user.userId);
-  if (!operatorPermCodes.includes('*:*')) {
+  if (!operatorPermCodes.includes(RESERVED_WILDCARD_PERMISSION)) {
     const grantRoleDocs = await userService.findRolePermissionDocs(requestedRoles);
     const lacking = findUnoperableGrantCodes(operatorPermCodes, grantRoleDocs);
     if (lacking.length > 0) {

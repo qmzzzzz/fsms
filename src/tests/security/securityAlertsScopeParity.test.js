@@ -3,8 +3,8 @@
 /**
  * GET /api/security/alerts 与 GET /api/security/audit-logs 的可见范围必须同源
  *
- * 缺陷本体：两个端点挂的是**同一个权限码** `security:audit`（routes/securityRoutes.js:235
- * 与 :276），但只有 /audit-logs 走了 `applyAuditDataScope`（auditQueryService.js:217）。
+ * 缺陷本体：两个端点挂的是**同一个权限码** `security:audit`（routes/securityRoutes.js:387
+ * 即 /alerts、:438 即 /audit-logs），但只有 /audit-logs 走了 `applyAuditDataScope`（auditQueryService.js:217）。
  * `/alerts` 直接 `AuditLog.find({riskLevel:{$in:['high','critical']}})`，不带任何范围条件，
  * 并把 username/ip/path/body 原样返回。
  * 而 initData 的口径是"level 决定数据范围：≥9 全部 / ≥7 本部门"，SECURITY_ADMIN 是 **level 8**

@@ -294,7 +294,7 @@ beforeEach(() => {
     })
   )
   confirmBox.mockImplementation(() => Promise.resolve())
-  acquireWs.mockImplementation(() => ({ on: vi.fn(), off: vi.fn() }))
+  acquireWs.mockImplementation(() => ({ on: vi.fn(), off: vi.fn(), onGiveUp: vi.fn() }))
   pageEvents.length = 0
 })
 
@@ -1258,6 +1258,8 @@ describe('布局 · 权限热同步接线', () => {
     acquireWs.mockImplementationOnce(() => ({
       on: vi.fn((evt, fn) => handlers.set(evt, fn)),
       off: vi.fn((evt) => handlers.delete(evt)),
+      // P2-6：布局层还会注册全局 give-up 提示回调
+      onGiveUp: vi.fn(),
     }))
     const c = mountLayout()
     await flush(10)
@@ -1281,6 +1283,7 @@ describe('布局 · 权限热同步接线', () => {
     acquireWs.mockImplementationOnce(() => ({
       on: vi.fn((evt, fn) => handlers.set(evt, fn)),
       off: vi.fn(),
+      onGiveUp: vi.fn(),
     }))
     const c = mountLayout({ perms: ['*:*'] })
     await settleRouter(c.router)

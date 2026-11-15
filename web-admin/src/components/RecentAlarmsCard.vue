@@ -29,6 +29,7 @@
         <button
           type="button"
           class="glass-btn glass-btn--default glass-btn--sm"
+          :disabled="loading"
           @click="$emit('retry')"
         >
           {{ $t('common.retry') }}
@@ -64,6 +65,8 @@ defineProps({
   rows: { type: Array, default: () => [] },
   /** 最近一次加载/刷新是否失败（为 true 时显示错误或陈旧数据提示） */
   error: { type: Boolean, default: false },
+  /** P3：加载/重试在途时禁用重试按钮（连点会重复发同一路 GET） */
+  loading: { type: Boolean, default: false },
 })
 
 defineEmits(['retry'])

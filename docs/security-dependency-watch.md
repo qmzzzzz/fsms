@@ -20,7 +20,7 @@
 
 ## Express（L-3）
 
-- **现状**：已升级并固定在 `^5.2.1`；迁移决策与行为差异记录见
+- **现状**：已升级并固定在 `^5.3.0`；迁移决策与行为差异记录见
   `docs/adr/ADR-007-express5迁移评估与决策.md`。
 - **监控动作**：
   - 跟随 5.x 安全补丁：有新补丁发布时更新到最新补丁版本，并跑全量测试；
@@ -145,8 +145,9 @@ CI 的 `security-audit` 作业在 2026-10-09 登记时两处审计都只有 `npm
 
 ### 补的是什么缺口
 
-上面的 `npm audit` \ Dependabot \ CodeQL \ gitleaks \ install-script 门禁，**全部只回答
-一个问题**：「这个包有没有已知 CVE」。于是下面三类**全部漏检**：
+上面的 `npm audit` \ Dependabot \ gitleaks \ install-script 门禁，**全部只回答
+一个问题**：「这个包有没有已知 CVE」（CodeQL 不在这个清单里——它是代码语义分析器，
+不查包 CVE；分工见下文「现状：仓库已公开，分析器分工」）。于是下面三类**全部漏检**：
 
 - 包被投毒但未上 CVE（audit 查的是 advisory 库）；
 - 发布者账号被盗、推恶意版本（版本号合法、无 CVE）；
@@ -190,22 +191,24 @@ checkout，而 `.gitattributes` 对 `package-lock.json` 无规则。实测
   （`.github/workflows/ci.yml` 的 `Generate SBOM` + `Upload SBOM artifact`），
   请勿把「有了完整性锚」误当成「有了 SBOM」。
 
-## 私有仓 SAST 与修复时限（SLA）
+## 静态分析与修复时限（SLA）
 
-### 私有仓的静态分析缺口（2026-10-31 收口）
+### 缺口登记与收口（2026-10-31，历史记录）
 
-`.github/workflows/codeql.yml` 的第一层判据是 `github.event.repository.private == false`：本仓是私有仓，
-于是 CodeQL **从未运行过**——上面"供应链完整性锚"那段里点名的"CodeQL"这一环，在私有仓上其实是空的，
-人工评审是当时唯一的发现路径。
+收口当时的仓库形态是**私有仓**：`.github/workflows/codeql.yml` 的第一层判据是
+`github.event.repository.private == false`，私有仓上不成立 ⇒ CodeQL **从未运行过**——上面
+"供应链完整性锚"那段里点名的"CodeQL"这一环，在当时的私有仓上其实是空的，人工评审是
+当时唯一的发现路径。
 
 补法是一个不依赖 GHAS 的作业：`.github/workflows/sast.yml`（Semgrep OSS + 仓库自持规则包
 `.github/semgrep/rules.yml`）。
 
-- **不需要 GHAS / code scanning**：私有仓的 SARIF 交 `upload-sarif` 会被拒，故结果落成制品
+- **当时不需要 GHAS / code scanning**：私有仓的 SARIF 交 `upload-sarif` 会被拒，故结果落成制品
   `semgrep-sarif`，复核时下载，不进 Security 面板；
-- **私有源码不出 runner**：规则取自仓库内的规则包（不用 `--config auto`、不向 registry 拉规则），
-  并带 `--metrics=off`；容器镜像按 digest 钉死，同时登记在本仓的镜像面账
-  （`scripts/verify-image-digests.js` 的期望表）里逐字节对账；
+- **规则与遥测卫生**：规则取自仓库内的规则包（不用 `--config auto`、不向 registry 拉规则），
+  并带 `--metrics=off`。收口当时的说法是「私有源码不出 runner」——仓库转公开后源码保密性
+  的理由不再成立，但「规则随仓库版本化、扫描行为可复现」的理由仍然成立：容器镜像按 digest
+  钉死，同时登记在本仓的镜像面账（`scripts/verify-image-digests.js` 的期望表）里逐字节对账；
 - **命中即阻断**：扫描步骤带 `--error`，任一条 ERROR 级 finding 让作业非零退出；规则包先过
   `--validate`——规则写坏时的"扫 0 条规则后报绿"是这类门禁最坏的绿；
 - **规则本身也是被管对象**：规则条数 / 必备字段 / 排除面 / **当前树零命中**由
@@ -213,6 +216,27 @@ checkout，而 `.gitattributes` 对 `package-lock.json` 无规则。实测
   `continue-on-error` 或注释消化掉；每条规则还必须在自己的违反样例上命中，防止它退化成空转。
 - **能力边界（如实声明）**：这是规则级静态分析，不是数据流污点跟踪；它挡的是"这类写法再次出现"，
   不替代人工评审，也不声称等价于 GHAS 的查询集。
+
+### 现状：仓库已公开，分析器分工（2026-11-14 复核）
+
+仓库已转公开（`github.com/qmzzzzz/fsms`），上面的失效前提如实纠正；历史决策记录保留在
+上一小节，这里只登记「现在谁在跑、各管什么」：
+
+- **CodeQL（实际在跑）**：`codeql.yml` 的 `private == false` 判据在公开仓上成立——push
+  （main/develop）、PR 与每周一 03:00 UTC 定时三路触发，`javascript` 单语言矩阵；结果上传进
+  GitHub 的 Code Scanning（Security 面板）。它做的是**语义/数据流分析**，查询集由 GitHub
+  维护——这一环在私有仓时代是空的，现在补上了。
+- **Scorecard（实际在跑）**：`scorecard.yml` 评的是**仓库安全实践**（分支保护、依赖钉版与更新、
+  CI 测试、代码审查等十余项），不是代码逻辑；push main / 每周一 01:30 UTC 定时 /
+  branch_protection_rule 事件三路触发，`publish_results: true` 同步 OpenSSF 公共数据集，
+  SARIF 同时进 Code Scanning 与制品。私有仓时代它同样被 GHAS 前提挡住，现在在跑。
+- **Semgrep（sast.yml 本节作业）**：push main / PR / 每周一 04:00 UTC 定时 / 手动四路触发；
+  仓库自持的 7 条 ERROR 规则做**规则级不变量**扫描，`--error` 命中即阻断合并；结果落制品
+  `semgrep-sarif`（是否改走 code scanning 上传是一次行为变更，未随本批文档修正拍板）。
+- **分工边界**：三者互不替代——CodeQL 管「代码语义面」（上游查询集、宽覆盖、进面板）；
+  Scorecard 管「仓库 practices」（不打分单条代码）；Semgrep 管「本仓自定义的不变量」
+  （规则随仓库演进、命中即阻断）。依赖与秘钥面（`npm audit` / gitleaks /
+  `dependency-review.yml`）与这三者正交。
 
 ### 修复时限表（SLA）
 

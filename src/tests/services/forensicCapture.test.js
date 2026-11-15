@@ -13,6 +13,14 @@
  *   · FORENSIC_CAPTURE_ENABLED=true —— 默认态。
  */
 
+// 写入前快照原值（env 泄漏收口）：PER_IP_PER_MIN/SAMPLE_EVERY_N 被被测模块在加载期固化，
+// ENABLED 运行期现读；不还原的话同 worker 后续套件的采集配额被钉在本文件的测试档
+// （2 条/分、每 3 次采 1 条）——jest 的 require 缓存按文件隔离，process.env 不隔离。
+const PREV_FORENSIC_ENVS = {
+  FORENSIC_CAPTURE_ENABLED: process.env.FORENSIC_CAPTURE_ENABLED,
+  FORENSIC_PER_IP_PER_MIN: process.env.FORENSIC_PER_IP_PER_MIN,
+  FORENSIC_SAMPLE_EVERY_N: process.env.FORENSIC_SAMPLE_EVERY_N,
+};
 process.env.FORENSIC_CAPTURE_ENABLED = 'true';
 process.env.FORENSIC_PER_IP_PER_MIN = '2';
 process.env.FORENSIC_SAMPLE_EVERY_N = '3';
@@ -407,4 +415,13 @@ describe('recordHash：canonicalJSON 稳定、篡改必变', () => {
       '{"t":"2026-10-31T00:00:00.000Z"}'
     );
   });
+});
+
+// env 随套件归还（快照见文件头）：被测模块的 PER_IP_PER_MIN/SAMPLE_EVERY_N 已在
+// require 时固化，这里还原 env 不影响本文件；后续套件读到的是原值（通常为未设 ⇒ 生产默认档）。
+afterAll(() => {
+  for (const [key, prev] of Object.entries(PREV_FORENSIC_ENVS)) {
+    if (prev === undefined) delete process.env[key];
+    else process.env[key] = prev;
+  }
 });

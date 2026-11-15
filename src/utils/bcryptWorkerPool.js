@@ -2,19 +2,9 @@
 
 /**
  * bcrypt worker 线程池：hash / compare / genSalt 的同形异步门面
- *
- * bcryptjs 的异步 API 只是把同步计算切片让出事件循环，CPU 仍在主线程上；本模块把计算
- * 卸载到常驻 worker（数量 = min(CPU, 4)，`BCRYPT_WORKERS` 覆盖），主线程只做消息往返。
- *
- * 回退进程内 bcryptjs 的条件（保持测试与可用性语义）：
- * - 测试环境（NODE_ENV=test / JEST_WORKER_ID / VITEST）与
- *   `BCRYPT_WORKER_THREADS=0`：现有测试用 jest.mock('bcryptjs') 数调用次数
- *   （loginTimingParity 的时序侧信道判据），跨线程后 mock 不生效；
- * - worker 初始化/运行失败：登录可用性优先于性能。
- * 两种实现的 Promise 形态一致，调用方零语义改动。
- *
- * 关停：worker 全部 unref()，不阻止进程退出；关停期间的在途 compare 随线程
- * 销毁，与进程内实现的崩溃语义等价，index.js 的精细关停无需感知本池。
+ * bcryptjs 的异步 API 只是把同步计算切片让出事件循环，CPU 仍在主线程上；本模块把计算卸载到常驻 worker（数量 = min(CPU, 4)，`BCRYPT_WORKERS` 覆盖），主线程只做消息往返。
+ * 回退进程内 bcryptjs 的条件（保持测试与可用性语义）：测试环境（NODE_ENV=test / JEST_WORKER_ID / VITEST）与 `BCRYPT_WORKER_THREADS=0`：现有测试用 jest.mock('bcryptjs') 数调用次数（loginTimingParity 的时序侧信道判据），跨线程后 mock 不生效；worker 初始化/运行失败：登录可用性优先于性能。两种实现的 Promise 形态一致，调用方零语义改动。
+ * 关停：worker 全部 unref()，不阻止进程退出；关停期间的在途 compare 随线程销毁，与进程内实现的崩溃语义等价，index.js 的精细关停无需感知本池。
  */
 const os = require('os');
 const path = require('path');
@@ -112,8 +102,9 @@ const ensurePool = () => {
         logger.warn(`bcrypt worker 异常（回退进程内实现）：${error?.message ?? error}`);
         kill('error');
       });
+      // 退出（任意 code）都按 worker 死亡处理（审计 2026-11-14）：此前只处理 code!==0，code-0 退出（worker 内显式 exit(0)、或未来 worker 文件被改成事件循环可排空的形态——今天 parentPort 监听把循环钉住， spontaneous 排空不可达）会让 entry 原样留在池里：在飞任务永不 settle（登录请求挂死），pump 还会继续把新任务派给死槽位。统一走 kill：在飞/排队任务改进程内兜底，全灭则按既有口径置 initFailed 永久回退——补位重建线程被文件头既有决策明确否掉（「比反复重建线程池可预期」）。
       worker.on('exit', (code) => {
-        if (code !== 0) kill(`exit(${code})`);
+        kill(`exit(${code})`);
       });
 
       // 必须排在全部监听之后：给 MessagePort 加 message 监听会把端口重新 ref 住，

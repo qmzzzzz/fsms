@@ -11,22 +11,45 @@
  * 规范；对象键顺序无关，数组顺序仍参与比较。
  */
 
+'use strict';
+
 const path = require('path');
 const { isDeepStrictEqual } = require('util');
 
-const generated = JSON.parse(JSON.stringify(require('../src/docs/generate')));
-const committed = require('../src/docs/openapi.json');
-
-if (!isDeepStrictEqual(generated, committed)) {
-  console.error('OpenAPI 产物与生成器不一致。请运行 `npm run docs:generate` 后提交差异。');
-  console.error(`生成器：${path.relative(process.cwd(), require.resolve('../src/docs/generate'))}`);
-  console.error(
-    `产物：  ${path.relative(process.cwd(), require.resolve('../src/docs/openapi.json'))}`
-  );
-  process.exit(1);
+/**
+ * 判据（纯函数）：生成器输出与已提交产物是否一致。
+ * 抽出来的理由与其它 check-* 脚本一致——判据可被测试直接断言，
+ * CLI 壳只负责读盘、打印与退出码。
+ */
+function evaluateDrift(generated, committed) {
+  return isDeepStrictEqual(generated, committed);
 }
 
-console.log(
-  `OpenAPI 产物一致（${Object.keys(generated.paths).length} 个 path，` +
-    `${Object.values(generated.paths).reduce((n, p) => n + Object.keys(p).length, 0)} 个 operation）`
-);
+function main() {
+  const generated = JSON.parse(JSON.stringify(require('../src/docs/generate')));
+  const committed = require('../src/docs/openapi.json');
+
+  if (!evaluateDrift(generated, committed)) {
+    console.error('OpenAPI 产物与生成器不一致。请运行 `npm run docs:generate` 后提交差异。');
+    console.error(
+      `生成器：${path.relative(process.cwd(), require.resolve('../src/docs/generate'))}`
+    );
+    console.error(
+      `产物：  ${path.relative(process.cwd(), require.resolve('../src/docs/openapi.json'))}`
+    );
+    process.exit(1);
+  }
+
+  console.log(
+    `OpenAPI 产物一致（${Object.keys(generated.paths).length} 个 path，` +
+      `${Object.values(generated.paths).reduce((n, p) => n + Object.keys(p).length, 0)} 个 operation）`
+  );
+}
+
+// 只在被直接执行时运行：被 require（测试、其它判据复用方）时不得拉起生成器、
+// 不得 process.exit——与同族 check-* 脚本（check-audit-allowlist、check-clock-sync）同守卫。
+if (require.main === module) {
+  main();
+}
+
+module.exports = { evaluateDrift };

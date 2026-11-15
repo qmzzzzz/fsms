@@ -233,6 +233,7 @@ const userSessionSchema = new mongoose.Schema({
   revokeReason: {
     type: String,
     default: null,
+    maxlength: 64, // 吊销原因是固定词表（上方注释列出的 8 个码），不是自由文本；上限挡未来误把它当描述栏塞长文案
   },
 });
 

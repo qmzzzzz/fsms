@@ -300,6 +300,22 @@ function assertPlainDirName(name) {
  /** 解析命令行（与其它脚本同口径：未知参数报错而不是忽略） */
 const FLAGS = ['inbox', 'bundle-root', 'pubkey-file', 'allowlist', 'apply', 'dry-run', 'help'];
 
+/** 不取值的开关：`--apply=false` 必须真的得到 false，而不是被当真值吞掉（2026-11-14 审计） */
+const BOOLEAN_FLAGS = ['apply', 'dry-run', 'help'];
+
+/**
+ * 布尔开关的取值判据（纯函数）：不带值即 true；显式带值只接受 `true`/`false`
+ * 字面量——原实现 `if (name === 'apply') opts.apply = true` 把任何 `--apply=…`
+ * 的内联值都当真值吞掉，`--apply=false` 实际执行的是落位而不是演练。
+ */
+function booleanFlagValue(name, inlineValue) {
+  if (inlineValue === undefined || inlineValue === 'true') return true;
+  if (inlineValue === 'false') return false;
+  throw new Error(
+    `--${name} 是布尔开关：不带值，或显式写 --${name}=true / --${name}=false（收到：${JSON.stringify(inlineValue)}）`
+  );
+}
+
 function parseArgs(argv = []) {
   const opts = {
     apply: false,
@@ -313,7 +329,11 @@ function parseArgs(argv = []) {
   for (let i = 0; i < argv.length; i += 1) {
     const raw = argv[i];
     if (!raw.startsWith('--')) throw new Error(`无法识别的参数：${raw}`);
-    const [name, inlineValue] = raw.slice(2).split('=');
+    // 只在**第一个** `=` 处切开：split('=') 会把值里后续的 `=` 也当分隔符，
+    // `--inbox=/data/in=a=b` 会被截成 `/data/in`。
+    const eq = raw.indexOf('=');
+    const name = (eq === -1 ? raw : raw.slice(0, eq)).slice(2);
+    const inlineValue = eq === -1 ? undefined : raw.slice(eq + 1);
     if (!FLAGS.includes(name)) {
       throw new Error(`未知参数：--${name}（可用：${FLAGS.map((f) => `--${f}`).join(', ')}）`);
     }
@@ -326,10 +346,9 @@ function parseArgs(argv = []) {
       i += 1;
       return next;
     };
-    if (name === 'apply') opts.apply = true;
-    else if (name === 'dry-run') opts.dryRun = true;
-    else if (name === 'help') opts.help = true;
-    else if (name === 'inbox') opts.inbox = takeValue();
+    if (BOOLEAN_FLAGS.includes(name)) {
+      opts[name === 'dry-run' ? 'dryRun' : name] = booleanFlagValue(name, inlineValue);
+    } else if (name === 'inbox') opts.inbox = takeValue();
     else if (name === 'bundle-root') opts.bundleRoot = takeValue();
     else if (name === 'pubkey-file') opts.pubkeyFile = takeValue();
     else if (name === 'allowlist') opts.allowlist = takeValue();

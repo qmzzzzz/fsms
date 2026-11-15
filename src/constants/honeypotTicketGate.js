@@ -1,3 +1,5 @@
+'use strict';
+
 const { matchRoute, TRAP_HANDLING } = require('./honeypotRouteTable');
 
 const REAUTH_TICKET_REQUIRED_CODE = 'REAUTH_TICKET_REQUIRED'; // 与 middleware/security/reauthTicket.js 的缺票闸逐字同码：陷阱不可能持票（POST /api/security/reauth 是 deny403），「缺票」是这些路由上唯一可能的真实答案

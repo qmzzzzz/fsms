@@ -128,7 +128,7 @@ const guardRoleLevelTarget = async ({ req, res, role, level, authority }) => {
   if (level === undefined) return false;
   const operatorMaxLevel = await authority.maxLevel();
   const operatorPermCodes = await roleService.getOperatorPermissions(req.user.userId);
-  const isGlobalAdmin = operatorPermCodes.includes('*:*');
+  const isGlobalAdmin = operatorPermCodes.includes(RESERVED_WILDCARD_PERMISSION);
 
   if (!isGlobalAdmin && level > operatorMaxLevel) {
     ApiResponse.codeError(res, 'ROLE_LEVEL_ABOVE_SELF_FORBIDDEN');

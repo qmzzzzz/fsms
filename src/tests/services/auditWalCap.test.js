@@ -23,10 +23,17 @@ describe('审计 WAL 大小硬上限（R-6）', () => {
   let defaultWalPath;
   let auditBuffer;
   let wal;
+  // 注入前原值的快照（P3）：三个 env 都要随套件归还，见 afterAll
+  let prevWalPath;
+  let prevWalMaxBytes;
+  let prevWalStatInterval;
 
   beforeAll(() => {
     // AUDIT_WAL_PATH 在模块加载时求值，必须先于 require 设置；
     // getWalMaxBytes / getWalStatInterval 运行期读 env，注入小阈值
+    prevWalPath = process.env.AUDIT_WAL_PATH;
+    prevWalMaxBytes = process.env.AUDIT_WAL_MAX_BYTES;
+    prevWalStatInterval = process.env.AUDIT_WAL_STAT_INTERVAL;
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-wal-cap-'));
     process.env.AUDIT_WAL_PATH = path.join(tmpDir, 'test-audit.wal');
     defaultWalPath = process.env.AUDIT_WAL_PATH;
@@ -50,6 +57,15 @@ describe('审计 WAL 大小硬上限（R-6）', () => {
 
   afterAll(() => {
     auditBuffer.stop();
+    // 三个测试档 env 随套件归还（P3）：AUDIT_WAL_MAX_BYTES/STAT_INTERVAL 是运行期现读，
+    // 不还则同 worker 后续套件的 WAL 容量被钉在 200 字节、逐条抽查；AUDIT_WAL_PATH 不还
+    // 则指向本文件已删除的临时目录（auditBufferZombieDuplicate.test.js P2-9 同形态）
+    if (prevWalPath === undefined) delete process.env.AUDIT_WAL_PATH;
+    else process.env.AUDIT_WAL_PATH = prevWalPath;
+    if (prevWalMaxBytes === undefined) delete process.env.AUDIT_WAL_MAX_BYTES;
+    else process.env.AUDIT_WAL_MAX_BYTES = prevWalMaxBytes;
+    if (prevWalStatInterval === undefined) delete process.env.AUDIT_WAL_STAT_INTERVAL;
+    else process.env.AUDIT_WAL_STAT_INTERVAL = prevWalStatInterval;
     try {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     } catch (_) {

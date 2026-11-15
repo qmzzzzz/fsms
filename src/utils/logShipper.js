@@ -1,33 +1,19 @@
 /**
  * SIEM / 日志中心可选转发 transport
- *
- * 将 winston 日志缓冲后批量 HTTP POST 到外部日志收集端（SIEM/ELK/Loki 等）。
- * 默认关闭，仅在配置 LOG_SHIPPING_URL 时由 logger.js 挂载。
- *
+ * 将 winston 日志缓冲后批量 HTTP POST 到外部日志收集端（SIEM/ELK/Loki 等）。默认关闭，仅在配置 LOG_SHIPPING_URL 时由 logger.js 挂载。
  * 设计原则：
- * - 永不阻塞主日志：log() 立即 callback，行进内存缓冲，定时/满额批量发送
- * - 永不影响主流程：发送失败仅告警（节流），绝不抛出
- * - 内存保护：缓冲上限 BUFFER_CAP，超限丢弃最旧行（保留近期），并写入
- *   一条 __log_shipper_gap__ 标记行，使 SIEM 侧能看到「这里丢了 N 行」；
- *   标记行由本实例随机签发的身份字段认领，形状照抄的业务日志不算标记
+ * - 永不阻塞主日志：log() 立即 callback，行进内存缓冲，定时/满额批量发送；永不影响主流程：发送失败仅告警（节流），绝不抛出
+ * - 内存保护：缓冲上限 BUFFER_CAP，超限丢弃最旧行（保留近期），并写入一条 __log_shipper_gap__ 标记行，使 SIEM 侧能看到「这里丢了 N 行」；标记行由本实例随机签发的身份字段认领，形状照抄的业务日志不算标记
  * - 非可靠网络：单次 flush 失败将整批放回缓冲头部重试（保留未发送行）
- * - 串行发送：同一时刻只允许一个 flush 在途。定时 flush 与满额
- *   flush 若并发，两批各自 splice 出不同区段，失败方 unshift 回头部时会
- *   排到已成功发送的较新批之后 —— SIEM 收到的行序与产生顺序不一致，
- *   而日志行序正是事件重建与关联分析的基础
- *
+ * - 串行发送：同一时刻只允许一个 flush 在途。定时 flush 与满额 flush 若并发，两批各自 splice 出不同区段，失败方 unshift 回头部时会排到已成功发送的较新批之后 —— SIEM 收到的行序与产生顺序不一致，而日志行序正是事件重建与关联分析的基础
  * 环境变量：
- *   LOG_SHIPPING_URL          必填，目标 HTTP(S) 端点（拒绝内网/回环/链路本地
- *                             目标——云元数据端点是经典 SSRF 目标；见上文）
+ *   LOG_SHIPPING_URL          必填，目标 HTTP(S) 端点（拒绝内网/回环/链路本地目标——云元数据端点是经典 SSRF 目标；见上文）
  *   LOG_SHIPPING_TOKEN        可选，Bearer 鉴权
  *   LOG_SHIPPING_BATCH        满额条数，默认 100
  *   LOG_SHIPPING_INTERVAL_MS  定时毫秒，默认 5000
  *   LOG_SHIPPING_TIMEOUT_MS   单次请求超时，默认 5000
- *   LOG_SHIPPING_ALLOW_PRIVATE_HOSTS  可选，逗号分隔的主机名/IP/网段，
- *                             显式放行内网 SIEM 目标（默认一律拒绝私网目标）
- *   LOG_SHIPPING_ALLOW_INSECURE       可选，必须显式设为 true 才允许无令牌的
- *                             明文 http 目标；配置了 LOG_SHIPPING_TOKEN 时一律拒绝
- *                             http（Bearer 不得明文出站）
+ *   LOG_SHIPPING_ALLOW_PRIVATE_HOSTS  可选，逗号分隔的主机名/IP/网段，显式放行内网 SIEM 目标（默认一律拒绝私网目标）
+ *   LOG_SHIPPING_ALLOW_INSECURE       可选，必须显式设为 true 才允许无令牌的明文 http 目标；配置了 LOG_SHIPPING_TOKEN 时一律拒绝 http（Bearer 不得明文出站）
  */
 
 const TransportStream = require('winston-transport');
@@ -63,13 +49,7 @@ const GAP_AUTH_FIELD = '__log_shipper_gap_auth__';
 
 /**
  * 这条缓冲行是不是我们自己写的断档标记？
- *
- * 判据必须是"本实例签发的身份字段"，不能是文本形状。形状判据（`level==='error'` +
- * 前缀 + 正整数 `__log_shipper_gap__`）此前被注释说成"构造不出第二份"——**不成立**：
- * `log()` 把 winston 的 info 原样 `JSON.stringify` 进缓冲，业务侧一句
- * `logger.error('[logShipper] 缓冲区超过上限 …', { __log_shipper_gap__: 999 })`
- * 就造出一行合法形状的标记，裁剪时它被当标记摘除（不计入丢失）并把 999 带给 SIEM。
- * 现在伪造者要同时猜中一个每实例 128-bit 随机值；猜不中就是普通一行日志。
+ * 判据必须是"本实例签发的身份字段"，不能是文本形状。形状判据（`level==='error'` + 前缀 + 正整数 `__log_shipper_gap__`）此前被注释说成"构造不出第二份"——**不成立**：`log()` 把 winston 的 info 原样 `JSON.stringify` 进缓冲，业务侧一句 `logger.error('[logShipper] 缓冲区超过上限 …', { __log_shipper_gap__: 999 })` 就造出一行合法形状的标记，裁剪时它被当标记摘除（不计入丢失）并把 999 带给 SIEM。现在伪造者要同时猜中一个每实例 128-bit 随机值；猜不中就是普通一行日志。
  * @param {unknown} line
  * @param {string} gapAuth 本 transport 的实例身份（见构造函数）；空值一律不认
  * @returns {number|null} 标记自报的累计丢失行数；不是标记则 null
@@ -104,18 +84,11 @@ function makeGapLine(totalDropped, gapAuth) {
 
 /**
  * 解析出站目标并选定 http/https 客户端（纯判定，便于真值表断言）。
- *
- * 为什么不能写成 `parsed.protocol === 'https:' ? https : http`：
- * 那等价于"凡不是 https 就当 http 发"，于是**任何拼错的 scheme 都会静默降级成明文出站**，
- * 而且带着 Bearer 令牌。实测（WHATWG URL 对非特殊协议照样解析 host/port）：
- *   htps://siem.internal:9999/logs → protocol='htps:' host='siem.internal' port='9999'
- *     ⇒ 旧写法把整批日志 + `Authorization: Bearer …` 以明文 POST 给同一台主机的同一端口
+ * 为什么不能写成 `parsed.protocol === 'https:' ? https : http`：那等价于"凡不是 https 就当 http 发"，于是**任何拼错的 scheme 都会静默降级成明文出站**，而且带着 Bearer 令牌。实测（WHATWG URL 对非特殊协议照样解析 host/port）：
+ *   htps://siem.internal:9999/logs → protocol='htps:' host='siem.internal' port='9999' ⇒ 旧写法把整批日志 + `Authorization: Bearer …` 以明文 POST 给同一台主机的同一端口
  *   htp://169.254.169.254/latest/meta-data → host 保留 ⇒ 明文打到云元数据地址
  *   file:///var/log/app.log → host='' ⇒ Node 回落 localhost:80
- * 全程不报错、不告警（对端多半只是回 4xx，然后进入节流重试），
- * 运维看到的仍是"日志转发已启用 → htps://…"。
- * 同仓 `utils/httpPostJson.js` 对同一风险已有判例（"仅允许 http/https 协议"）
- * ——出站路径的松紧不该取决于哪个模块发起。
+ * 全程不报错、不告警（对端多半只是回 4xx，然后进入节流重试），运维看到的仍是"日志转发已启用 → htps://…"。同仓 `utils/httpPostJson.js` 对同一风险已有判例（"仅允许 http/https 协议"）——出站路径的松紧不该取决于哪个模块发起。
  */
 function resolveShippingTarget(rawUrl) {
   let parsed;
@@ -168,27 +141,11 @@ class HttpShipperTransport extends TransportStream {
 
   /**
    * 缓冲超限裁剪：丢最旧，并在缓冲头部维护**一条可累计的**断档标记
-   *
-   * 原实现只是 splice 掉最旧行，下游完全无法感知丢失——
-   * SIEM 上看到的是一段连续日志，中间少了 N 行且无任何痕迹，
-   * 事件重建时会得出错误结论（「这段时间没有异常请求」）。
-   *
-   * 为什么标记必须当累加器（判据见 `src/tests/observability/logShipperGapMarkerAccounting.test.js`）：
-   * 缓冲满顶后**每来一行都会再触发一次裁剪**，于是旧实现每次都把头部那条标记当成
-   * "最旧的一行日志" splice 掉，再写一条只报本轮 1 行的新标记，而本轮计数
-   * （`_droppedCount`）在函数末尾归零 ⇒ 标记之间互相吞噬、计数永不能跨事件累计。
-   * 实测：喂进 2×BUFFER_CAP 行时真实丢失 5001 行，缓冲里那条标记自报 2 行
-   * （且人读文案与机器字段还各说一个数）。SIEM 侧于是把"少了一万行"读成"少了两行"。
-   *
+   * 原实现只是 splice 掉最旧行，下游完全无法感知丢失——SIEM 上看到的是一段连续日志，中间少了 N 行且无任何痕迹，事件重建时会得出错误结论（「这段时间没有异常请求」）。
+   * 为什么标记必须当累加器（判据见 `src/tests/observability/logShipperGapMarkerAccounting.test.js`）：缓冲满顶后**每来一行都会再触发一次裁剪**，于是旧实现每次都把头部那条标记当成"最旧的一行日志" splice 掉，再写一条只报本轮 1 行的新标记，而本轮计数（`_droppedCount`）在函数末尾归零 ⇒ 标记之间互相吞噬、计数永不能跨事件累计。实测：喂进 2×BUFFER_CAP 行时真实丢失 5001 行，缓冲里那条标记自报 2 行（且人读文案与机器字段还各说一个数）。SIEM 侧于是把"少了一万行"读成"少了两行"。
    * 现在的三条不变量：
-   *   ① 头部若有尚未送达的标记，先摘出来、把它已报的数并入新标记；
-   *      标记占一格但它**不是**一行日志，不计入丢失行数；
-   *   ② 计数只随标记一起被送达：发送成功 ⇒ 标记离开缓冲，下轮从 0 起；
-   *      发送失败整批 unshift 回头部 ⇒ 标记连同它的累计继续留在缓冲里。
-   *      因此不需要额外的实例状态——标记行本身就是唯一事实源，
-   *      也就没有"字段与真实缓冲状态对不上"的可能。
-   *      （`gapAuth` 不算这里的"状态"：它是常量身份，只回答"这行是不是我写的"，
-   *      不参与计数，也不与缓冲内容对账。）
+   *   ① 头部若有尚未送达的标记，先摘出来、把它已报的数并入新标记；标记占一格但它**不是**一行日志，不计入丢失行数；
+   *   ② 计数只随标记一起被送达：发送成功 ⇒ 标记离开缓冲，下轮从 0 起；发送失败整批 unshift 回头部 ⇒ 标记连同它的累计继续留在缓冲里。因此不需要额外的实例状态——标记行本身就是唯一事实源，也就没有"字段与真实缓冲状态对不上"的可能。（`gapAuth` 不算这里的"状态"：它是常量身份，只回答"这行是不是我写的"，不参与计数，也不与缓冲内容对账。）
    *   ③ 人读文案与机器字段共用同一个数。
    * 内存上限不放宽：裁剪后长度仍严格 ≤ BUFFER_CAP（标记占的那一格由多丢一行真日志换来）。
    * @returns {void}
@@ -224,7 +181,27 @@ class HttpShipperTransport extends TransportStream {
   log(info, callback) {
     setImmediate(() => this.emit('logged', info));
     try {
-      this.buffer.push(typeof info === 'string' ? info : JSON.stringify(info));
+      let line;
+      try {
+        line = typeof info === 'string' ? info : JSON.stringify(info);
+      } catch (err) {
+        // 序列化失败（环形引用 / BigInt / toJSON 抛错）= 这一行**确定**进不了 SIEM。
+        // 此前落进外层 catch 静默丢弃、无任何计数——违背本文件「丢失必须可见」的
+        // 同一条纪律（_trimToCap 有断档标记，这里连计数都没有）。丢的行复用
+        // log_shipper_dropped_lines_total 计数（该 series 语义=「logger 与 SIEM 之间
+        // 丢失的行数」，成因由本地告警文案区分）；不新开 series：序列化失败应当是
+        // 代码缺陷级别的稀有事件，为它单开一条面板/规则属于过度布防。
+        runtimeMetrics.incLogShipperDroppedLines(1);
+        const now = Date.now();
+        if (now - this._warnedAt > 60000) {
+          this._warnedAt = now;
+          console.error(
+            `[logShipper] 一行日志 JSON.stringify 失败被丢弃（累计见 log_shipper_dropped_lines_total）：${(err && err.message) || err}`
+          );
+        }
+        line = null;
+      }
+      if (line !== null) this.buffer.push(line);
       // 缓冲保护：超限丢最旧并留断档标记
       this._trimToCap();
       if (this.buffer.length >= this.batchSize) {

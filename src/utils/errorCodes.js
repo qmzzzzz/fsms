@@ -37,34 +37,29 @@ const ERROR_CODES = {
   CAPTCHA_SERVICE_UNAVAILABLE: { status: 503, message: '验证码服务繁忙，请稍后重试' },
 
   // ================= 会话吊销 =================
-  // 登出时令牌吊销未能落库（fail-closed）
-  //
-  // 必须是失败响应而非「登出成功」：前端据此保留本地令牌并提示重试，
-  // 用户才知道旧令牌仍然有效、需要采取补救（改密码、联系管理员）。
-  // 若沿用原先的 fail-open（照常返回成功），被窃取的 access token 会在其
-  // 剩余有效期内持续可用，而用户已认为自己安全登出。
+  // 登出时令牌吊销未能落库（fail-closed）：必须是失败响应而非「登出成功」——前端
+  // 据此保留本地令牌并提示重试，用户才知道旧令牌仍然有效、需要采取补救（改密码、
+  // 联系管理员）。若沿用原先的 fail-open（照常返回成功），被窃取的 access token 会在
+  // 其剩余有效期内持续可用，而用户已认为自己安全登出。
   LOGOUT_REVOKE_FAILED: {
     status: 503,
     message: '登出未完成：令牌吊销服务暂不可用，请稍后重试（当前令牌仍然有效）',
   },
-  // 登出时出示了**不属于自己**的 refresh 令牌（F-100 剩的另一半）
-  //
-  // 为什么必须整次拒绝（403）而不是"跳过那条、照常登出"：
+  // 登出时出示了**不属于自己**的 refresh 令牌（F-100 剩的另一半）。为什么必须整次
+  // 拒绝（403）而不是"跳过那条、照常登出"：
   // ① 跳过 = 静默忽略一个**安全相关**的异常输入，调用方无从得知有人正拿着
   //    别人的 refresh 串打这个接口——那可能是令牌泄露的探针；
   // ② 旧实现会把它**直接吊销**：任何已认证用户只要拿到（或猜到）他人的
   //    refresh 串，就能在对方毫不知情的情况下终结其会话（会话 DoS），
   //    而登出接口自己还回 200「已登出」。
-  // 选 403 而非 400：这是"你出示了不该你出示的东西"，与越权同族。
-  // 整次失败意味着不清 cookie、不动会话表——部分成功会让"登出"这件事
-  // 处于说不清的状态，正是同门的 fail-open。
+  // 选 403 而非 400：这是"你出示了不该你出示的东西"，与越权同族。整次失败意味着
+  // 不清 cookie、不动会话表——部分成功会让"登出"处于说不清的状态，正是同门 fail-open。
   LOGOUT_REFRESH_FOREIGN: {
     status: 403,
     message: '登出未完成：请求中包含不属于当前账号的刷新令牌，已拒绝本次登出',
   },
 
   // 数据范围不可用（type:'none' / 部门档无部门 / self 档无 userId / 未知 type）
-  //
   // 为什么是 403 而不是 200 + 空集：空集让调用方**分不清「没有」与「不能看」**。
   // 前者是"这个部门今天确实没有报警"，后者是"你这个人不在这个部门可见范围里"——
   // 两者的后续动作完全相反（一个继续等数据，一个去找管理员开权限），而响应一模一样。
@@ -157,10 +152,7 @@ const ERROR_CODES = {
     status: 403,
     message: '不能重置同级或更高级别账户的口令',
   },
-  PASSWORD_RESET_FAILED: {
-    status: 500,
-    message: '口令重置失败，请重试或联系运维',
-  },
+  PASSWORD_RESET_FAILED: { status: 500, message: '口令重置失败，请重试或联系运维' },
 
   // ================= IP 名单校验 =================
   IP_REQUIRED: { status: 400, message: '请提供有效的 IP 地址' },
@@ -188,10 +180,7 @@ const ERROR_CODES = {
   },
 
   // ================= i18n 全量改造：业务与协议错误码 =================
-  DATE_PARAM_INVALID: {
-    status: 400,
-    message: '日期参数格式错误',
-  },
+  DATE_PARAM_INVALID: { status: 400, message: '日期参数格式错误' },
   DATE_RANGE_INVALID: {
     status: 400,
     message: '结束日期不能早于开始日期',
@@ -446,6 +435,13 @@ const ERROR_CODES = {
     status: 400,
     message: '父级权限设置会形成循环引用（该权限已是目标父级的祖先）',
   },
+  // 权限编码并发创建冲突（createPermission 判重与落库之间的窗口，由 code 唯一索引
+  // 以 E11000 兜底后归一）。与 ROLE_STATE_CONFLICT 同款口径：409 让客户端知道是
+  // 并发冲突，重试后会得到精确的 400「权限编码已存在」。
+  PERMISSION_STATE_CONFLICT: {
+    status: 409,
+    message: '权限编码已被其他操作创建，请刷新后重试',
+  },
   PERMISSION_TREE_DEPTH_ANOMALY: {
     status: 400,
     message: '权限树层级异常，请联系管理员核查父级引用',
@@ -577,10 +573,11 @@ const ERROR_CODES = {
     status: 404,
     message: '目标用户不存在',
   },
-  TARGET_USER_LACKS_ROLE: {
+  TARGET_USER_LACKS_ROLE: { status: 400, message: '目标用户未持有该角色，无法单独调整' },
+  TARGET_USER_NOT_CLONABLE: {
     status: 400,
-    message: '目标用户未持有该角色，无法单独调整',
-  },
+    message: '仅内置角色支持按用户克隆权限，请勿携带 targetUserId',
+  }, // /roles/:id/permissions 克隆分支只对内置角色成立：非内置角色携带 targetUserId 此前被静默丢弃、落到全局改写分支（意图与效果不一致）；400 而非 403：形状不匹配，非权限不足
   USER_ROLE_PERM_PEER_OR_HIGHER_FORBIDDEN: {
     status: 403,
     message: '无权变更同级或更高级别用户的角色权限',
@@ -945,10 +942,7 @@ const ERROR_CODES = {
     status: 500,
     message: '审计日志查询失败',
   },
-  AUDIT_LOG_NOT_FOUND: {
-    status: 404,
-    message: '审计日志不存在',
-  },
+  AUDIT_LOG_NOT_FOUND: { status: 404, message: '审计日志不存在' },
   FULL_RANGE_FORBIDDEN: {
     status: 403,
     message: '全网段名单仅超级管理员可配置或移除',

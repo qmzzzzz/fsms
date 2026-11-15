@@ -5,10 +5,8 @@ const DEFAULT_LIMIT = 200;
 const MAX_LIMIT = 1000;
 const DEFAULT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
-// 摘要投影。这里只许写 ForensicCapture 真实存在的路径：状态码在 response.status、
-// 触发原因在 trigger.reason 子文档里，模型没有顶层 status/reason/markedAt——
-// 曾投影过这三个幽灵字段，读侧拿到的恒 undefined，界面「触发说明/状态码」两列永远渲染 '-'。
-// 防复发闸在 tests/services/forensicTraceExport.test.js：逐条 path 对着 schema 验存在。
+// 摘要投影。这里只许写 ForensicCapture 真实存在的路径：状态码在 response.status、触发原因在 trigger.reason 子文档里，
+// 模型没有顶层 status/reason/markedAt——曾投影过这三个幽灵字段，读侧拿到的恒 undefined，界面「触发说明/状态码」两列永远渲染 '-'。防复发闸在 tests/services/forensicTraceExport.test.js：逐条 path 对着 schema 验存在。
 const SUMMARY_FIELDS = [
   'createdAt',
   'ip',
@@ -103,7 +101,10 @@ const liftSummaryRow = (row) => {
   return row;
 };
 
-/** 时间线：按时间正序返回，只出摘要字段。limit 截断时取**最近** N 条（界面与导出都承诺「最近」而不是「最早」），再翻回正序供按时间线阅读 */
+/** 时间线：按时间正序返回，只出摘要字段。limit 截断时取**最近** N 条（界面与导出都承诺「最近」而不是「最早」），再翻回正序供按时间线阅读。
+ * 截断判定用**探针式**（多取一条）：truncated = 实取 > cap。旧判据 `count >= cap` 把
+ * 「库里恰好 cap 条」误报成「还有更多」——恰好等于上限时并没有截断（> 与 >= 的边界）；
+ * 而只取 cap 条又无法区分「正好 cap 条」与「还有没看到的」，所以必须 cap+1 取数当探针。 */
 async function traceTimeline({
   model,
   limit,
@@ -114,17 +115,21 @@ async function traceTimeline({
   const since = keys.since || new Date(now.getTime() - windowMs);
   const until = keys.until || now;
   const cond = conditionOf({ ...keys, since, until });
-  if (!cond) return { ok: false, reason: 'no_criteria', records: [] };
+  if (!cond) return { ok: false, reason: 'no_criteria', records: [], truncated: false };
   state.queries += 1;
-  const records = await model
+  const cap = clampLimit(limit);
+  const fetched = await model
     .find(cond)
     .select(SUMMARY_FIELDS.join(' '))
     .sort({ createdAt: -1 })
-    .limit(clampLimit(limit))
+    .limit(cap + 1)
     .lean();
+  // 探针：实取比 cap 多 ⇒ 确有被截掉的行；恰好 cap 条 ⇒ 全量返回，不是截断
+  const truncated = fetched.length > cap;
+  const records = fetched.slice(0, cap);
   records.reverse();
   for (const r of records) liftSummaryRow(r);
-  return { ok: true, since, until, count: records.length, records };
+  return { ok: true, since, until, count: records.length, truncated, records };
 }
 
 /** 同一指纹落到过哪些网段 —— 这正是「他的 ip 池」的答案（以判据身份为锚，全窗口完整）。
@@ -175,23 +180,18 @@ async function actorPools({
 }
 
 /**
- * 非 身份键 判据（按 IP / 网段溯源）的「他的 ip 池」。
- *
- * actorPools 以判据身份为锚；本函数反过来以**库内观测到的指纹**为锚：把判据命中的
- * 记录按 {指纹, 网段} 分一次组，再归桶出 top N 指纹各自的网段池。按 IP 溯源是告警页
- * 最常见的入口，「同一设备指纹出现过的网段、按命中次数排序——换 IP 不换机器的直接
- * 证据」必须在这条路径上直接可见，而不是让运维从时间线里抄指纹再手动重查。
- * 明细在命中前 DERIVED_GROUP_CAP 组内取：极碎指纹（每段 1 次）可能漏段——这是取证
- * 辅助视图不是计量报表，页头 hint 已言明。无指纹的行归不了池，跳过（不造 unknown 桶
- * 冒充证据）。必须传 timeline 已解析的 since/until（traceActor 负责对齐），否则会退化
- * 成无上界聚合。
+ * 非 身份键 判据（按 IP / 网段溯源）的「他的 ip 池」。actorPools 以判据身份为锚；本函数反过来以**库内观测到的指纹**为锚：
+ * 把判据命中的记录按 {指纹, 网段} 分一次组，再归桶出 top N 指纹各自的网段池。按 IP 溯源是告警页最常见的入口，
+ * 「同一设备指纹出现过的网段、按命中次数排序——换 IP 不换机器的直接证据」必须在这条路径上直接可见，而不是让运维
+ * 从时间线里抄指纹再手动重查。明细在命中前 DERIVED_GROUP_CAP 组内取：极碎指纹（每段 1 次）可能漏段——这是取证辅助视图
+ * 不是计量报表，页头 hint 已言明。无指纹的行归不了池，跳过（不造 unknown 桶冒充证据）。必须传 timeline 已解析的
+ * since/until（traceActor 负责对齐），否则会退化成无上界聚合。
  */
 async function derivedPools({ model, since, until, ...keys } = {}) {
   const cond = conditionOf({ ...keys, since, until });
   if (!cond) return { ok: false, reason: 'no_criteria', pools: [] };
-  // 维度守卫（纵深防御）：conditionOf 认识的判据键一个都没有时（只剩时间窗），
-  // 聚合等于拿全窗口当「池」答出去——判据不可用必须在这里收手，与 actorPools 同口径。
-  // 当前 conditionOf 认 ip/ipSegment/指纹（/设备键），这行在判据面收窄时也兜底。
+  // 维度守卫（纵深防御）：conditionOf 认识的判据键一个都没有时（只剩时间窗），聚合等于拿全窗口当「池」答出去——判据不可用
+  // 必须在这里收手，与 actorPools 同口径。当前 conditionOf 认 ip/ipSegment/指纹（/设备键），这行在判据面收窄时也兜底。
   if (!cond.ip && !cond.ipSegment && !cond.fingerprint && !cond.deviceKey) {
     return { ok: false, reason: 'no_criteria', pools: [] };
   }
@@ -252,9 +252,8 @@ async function traceActor(opts = {}) {
   const triggers = {};
   const segments = {};
   for (const r of timeline.records) {
-    // trigger 在模型里是**子文档** { reason, markedAt }（models/ForensicCapture.js），不是字符串。
-    // 直接拿它当对象键会被 ToPropertyKey 折成 '[object Object]' ⇒ 分布恒为一条、界面还照渲。
-    // 取 reason；reason 缺失的归到显式的 unknownReasonOf 桶，不静默丢弃。
+    // trigger 在模型里是**子文档** { reason, markedAt }（models/ForensicCapture.js），不是字符串。直接拿它当对象键
+    // 会被 ToPropertyKey 折成 '[object Object]' ⇒ 分布恒为一条、界面还照渲。取 reason；reason 缺失的归到显式的 unknownReasonOf 桶，不静默丢弃。
     const key = reasonKeyOf(r.trigger);
     if (key) triggers[key] = (triggers[key] || 0) + 1;
     if (r.ipSegment) segments[r.ipSegment] = (segments[r.ipSegment] || 0) + 1;
@@ -271,7 +270,9 @@ async function traceActor(opts = {}) {
     since: timeline.since,
     until: timeline.until,
     count: timeline.count,
-    truncated: timeline.count >= clampLimit(opts.limit),
+    // truncated 由 traceTimeline 以探针（cap+1 取数）判定：实取 > cap 才是真截断。此处不得回退成
+    // `count >= clampLimit(opts.limit)`——恰好等于上限时会误报截断（count 是切片后的可见行数，永远 ≤ cap，那条判据只会恒真或恒假）。
+    truncated: timeline.truncated,
     timeline: timeline.records,
     triggers,
     segments,

@@ -35,7 +35,6 @@ const collectDuplicateCodes = (permissions) => {
 
 /**
  * 库里已存在的编码集合（**含软删除**）
- *
  * 软删除不释放 code 的唯一索引，所以已删除文档占用的编码同样不能再插入。
  * 不把它们查出来，insertMany 会以 11000 收尾，把"编码被已删除的权限占用"
  * 误报成驱动写入失败。
@@ -53,10 +52,8 @@ const withSession = (query, session) => (session ? query.session(session) : quer
 
 /**
  * 撤销软删除标记；失败时把完整文档写进日志供人工恢复。
- *
- * 只用于无事务（standalone）的补偿路径：文档始终留在库里，
- * 即使这里失败也不会丢数据，但必须让运维能从日志里拿到重建/恢复所需的全部字段。
- *
+ * 只用于无事务（standalone）的补偿路径：文档始终留在库里，即使这里失败也不会丢数据，
+ * 但必须让运维能从日志里拿到重建/恢复所需的全部字段。
  * @param {object} doc 被本次删除认领的权限文档
  * @param {{childrenCount:number, refCount:number}} reason 复核结果，便于定位冲突来源
  * @returns {Promise<boolean>} 是否恢复成功
@@ -124,7 +121,6 @@ const partitionCreatable = (permissions, existingCodes, validParentIds) => {
 
 /**
  * 批量落库：部分成功时保留已插入项、失败项转 skipped。
- *
  * 判定用「错误形状」而非 name：驱动实际抛出的类名是 MongoBulkWriteError
  * （node_modules/mongodb/lib/error.js 的 getter），原先写 'BulkWriteError'
  * 永不匹配 → 真发生重名冲突时整批 500，"已插入保留、失败项转 skipped"
@@ -173,8 +169,7 @@ class PermissionService {
 
   async createPermission(fields) {
     const { parent } = fields;
-    // 含软删除：编码被已删除权限占用时不能走到 create（唯一索引会抛 11000），
-    // 必须给出可理解的 400 而不是 500。
+    // 含软删除：编码被已删除权限占用时也不能走 create（唯一索引会抛 11000），须给可理解的 400。
     const existing = await Permission.findOne({ code: fields.code }).setOptions({
       includeDeleted: true,
     });
@@ -193,7 +188,20 @@ class PermissionService {
       }
     }
 
-    const permission = await Permission.create(fields);
+    // check-then-act 的并发窗口（审计 2026-11-14 E）：判重与落库之间另一个请求可能
+    // 已插入同码，输家撞 code 唯一索引抛 E11000 ⇒ 500。与 createRole 同款口径收口：
+    // 唯一索引兜底并发，11000 转 409 注册码（重试后得精确的 400「权限编码已存在」）。
+    // 禁事务方案：测试环境 mongod 为 standalone（globalSetup.js 的 MongoMemoryServer
+    // 未配 replSet），事务不可用；唯一索引兜底在两种拓扑下语义一致。
+    const permission = await Permission.create(fields).catch((err) => {
+      if (err?.code !== 11000) throw err;
+      throw new ApiError(
+        '权限编码已被其他操作创建，请刷新后重试',
+        409,
+        null,
+        'PERMISSION_STATE_CONFLICT'
+      );
+    });
     return this.getPermissionById(permission._id);
   }
 
@@ -233,6 +241,11 @@ class PermissionService {
     return this.getPermissionById(permission._id);
   }
 
+  async revertParentAfterCycle(permissionId, previousParent) {
+    // 成环补偿回滚（updatePermission 写后复验）：parent 定向单字段更新，不携带加载文档的其他字段
+    await Permission.updateOne({ _id: permissionId }, { $set: { parent: previousParent || null } });
+  }
+
   /**
    * 删除权限 —— 软删除，根治「先删后复核」的恢复失败窗口。
    *
@@ -248,7 +261,6 @@ class PermissionService {
    * 删除后的文档对默认查询不可见（模型层 pre(/^find/) / countDocuments 过滤器），
    * 角色 populate、权限树、授权判定都不会再看到它。code 的唯一索引仍被占用，
    * 内置权限由 initPermissions 在下次启动时自动恢复。
-   *
    * @param {string} id 权限 ID
    * @returns {Promise<boolean>} false = 文档不存在或已处于删除态
    */

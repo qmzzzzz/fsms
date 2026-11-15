@@ -16,9 +16,8 @@ const AuditLog = require('../../models/AuditLog');
 // 手写审计写入是这些操作的唯一留痕，静默吞错＝审计库零痕迹（且无可观测信号）
 const { onAuditWriteFailure } = require('../../utils/auditWriteFailure');
 const { normalizeEmailKey } = require('../../utils/emailKey');
-// A3：email 已 at-rest 加密，查重不能再比对明文列（随机 IV 下相等性不成立），
-// 统一走 HMAC 检索键 emailKey。piiSearchKey 的归一化口径（trim+lowercase）与
-// normalizeEmailKey 一致，两者在同一个查询里可互换——但语义不同，见 utils/emailKey.js。
+// A3：email 已 at-rest 加密，查重不能再比对明文列（随机 IV 下相等性不成立），统一走
+// HMAC 检索键 emailKey（piiSearchKey 归一化口径与 normalizeEmailKey 同为 trim+lowercase）。
 const { piiSearchKey } = require('../../utils/piiCrypto');
 // O-2 下沉引入：管理员锁定/解锁的层级与内置超管校验（纯工具模块，无循环依赖）
 const { getOperatorMaxLevel, maxRoleLevel } = require('../../utils/permissionHelper');
@@ -28,12 +27,11 @@ const sessionService = require('../sessionService');
 /**
  * 更新个人资料（业务层）
  *
- * 【H-01 修复】department 刻意不在自助可改字段内：
- * 它是数据范围的唯一来源（middleware/rbac.js:215 以 user.department 构造
- * department 型 dataScope，再经 constants/dataScopeFields.js 映射为各业务
- * 资源的过滤字段）。若允许用户自助修改，持有 level>=7 角色的账户只需一次
- * PUT /api/auth/profile 即可把 dataScope 指向任意部门，绕过部门隔离读取并
- * 导出该部门的设备/报警/巡检/用户数据。
+ * 【H-01 修复】department 刻意不在自助可改字段内：它是数据范围的唯一来源
+ * （middleware/rbac.js:215 以 user.department 构造 department 型 dataScope，再经
+ * constants/dataScopeFields.js 映射为各业务资源的过滤字段）。若允许用户自助修改，
+ * 持有 level>=7 角色的账户只需一次 PUT /api/auth/profile 即可把 dataScope 指向
+ * 任意部门，绕过部门隔离读取并导出该部门的设备/报警/巡检/用户数据。
  *
  * 反向证据：管理员改他人部门（PUT /api/users/:id）是有层级校验的，
  * 而自助入口原先无任何关卡——这一不对称说明原实现是疏漏而非设计。
@@ -49,14 +47,15 @@ const PROFILE_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /**
  * 资料入参格式校验（手机号 → 邮箱 → 头像，顺序即原实现顺序）。
- *
  * @returns {string|null} 拒绝时的 outcome，通过时 null
  */
 function validateProfileInput({ email, phone, avatar }, userId) {
   // 验证手机号格式（如果提供）
   if (phone && !PROFILE_PHONE_RE.test(phone)) return 'INVALID_PHONE';
-  // 验证邮箱格式（如果提供）
-  if (email && !PROFILE_EMAIL_RE.test(email)) return 'INVALID_EMAIL';
+  // 验证邮箱格式：字段出现（非 undefined）就必须过闸。原先的 truthy 判据让 ''/null
+  // 绕到 assignProfileFields（email !== undefined 即写入），save 撞 schema required
+  // 「邮箱不能为空」冒泡成 500；与路由链 isEmail 的 400 对齐（审计 2026-11-14 A）。
+  if (email !== undefined && !PROFILE_EMAIL_RE.test(email)) return 'INVALID_EMAIL';
   // 头像白名单校验：仅允许 http(s) URL、相对图片路径或 data:image 数据 URI（不含 svg，防存储型脚本注入）
   // D3 收口：非空头像只允许**该用户自己的**服务端 URL。外部 URL / data URI 一律拒绝——
   // 否则 data URI 可以绕过上传校验、加密与尺寸限制，把任意载荷塞进 User.avatar。
@@ -72,10 +71,9 @@ function validateProfileInput({ email, phone, avatar }, userId) {
  *
  * ① `normalizedEmail !== normalizeEmailKey(user.email)` 是**普通 JS 比对**（无 setter）：
  *    用户提交"自己邮箱的大写形态"时若不归一化就会判成"被他人占用"（实测过）。
- * ② 查重改走 **emailKey**（A3）：email 列已加密，明文相等性在随机 IV 的密文列上
- *    不成立。局部变量刻意叫 `normalizedEmail` 而**不叫** `emailKey`——后者现在是
- *    schema 上的 HMAC 字段名，同名不同义极易写出 `user.emailKey = <小写明文>`
- *    这种把明文写进检索键列的 bug（旧代码正是这个名字）。
+ * ② 查重改走 **emailKey**（A3）：明文相等性在加密列上不成立。局部变量刻意不叫
+ *    `emailKey`——那是 schema 上的 HMAC 字段名，同名不同义极易把明文写进检索键列
+ *    （旧代码正是这个名字）。
  */
 async function isEmailTakenByAnother(user, normalizedEmail) {
   if (!normalizedEmail || normalizedEmail === normalizeEmailKey(user.email)) return false;
@@ -124,10 +122,9 @@ async function updateUserProfile(userId, body) {
 
   // 头像清除（avatar === ''）必须与指针写入同一事务：只清指针不删记录的话，
   // 图片仍能通过 GET /api/avatars/:id 拉到（读端查的是 UserAvatar，不是 User.avatar）。
-  // isEmailTakenByAnother 判重与 save 之间存在窗口（并发改到同一邮箱）：后到者撞
-  // emailKey_1 唯一索引。原始 MongoError 冒泡成 500 与防枚举统一口径矛盾，归一到
-  // 与判重相同的 EMAIL_TAKEN 出口（审计 2026-11-02 B-F-3，判定谓词见
-  // utils/mongoDuplicateKey）。
+  // 判重与 save 之间存在窗口（并发改到同一邮箱）：后到者撞 emailKey_1 唯一索引，
+  // 原始 MongoError 冒泡成 500 与防枚举统一口径矛盾，归一到 EMAIL_TAKEN 出口
+  // （审计 2026-11-02 B-F-3，判定谓词见 utils/mongoDuplicateKey）。
   if (avatar === '') {
     // 冲突必须**中止事务**（头像清除 + 资料保存原子）：吞成返回值会让 withTransaction
     // 正常提交，落成「头像已删、邮箱未换」。故 save 的 11000 在事务内转标记错误抛出，
@@ -274,10 +271,10 @@ async function setUserLockStatus(userId, { locked, reason }, ctx) {
 
   applyLockStatePlan(user, planLockStateChange({ locked, reason }));
 
-  // 解锁会重新打开登录闸门：先吊销锁定前签发的全部令牌，再落库恢复。
-  // 否则锁定期间被窃取的 access/refresh 会在解锁瞬间重新生效——锁定本该
-  // 连同旧凭据一起作废，而此前只改 status，旧令牌在解锁后原样复活。
-  // fail-closed：吊销失败则不解锁（控制器回 503），账户保持锁定可安全重试。
+  // 解锁会重新打开登录闸门：先吊销锁定前签发的全部令牌，再落库恢复。否则锁定期间
+  // 被窃取的 access/refresh 会在解锁瞬间重新生效——锁定本该连同旧凭据一起作废，
+  // 而此前只改 status，旧令牌在解锁后原样复活。fail-closed：吊销失败则不解锁
+  // （控制器回 503），账户保持锁定可安全重试。
   if (!locked) {
     const { invalidateUserTokens } = require('../../middleware/tokenBlacklist');
     try {
@@ -293,14 +290,25 @@ async function setUserLockStatus(userId, { locked, reason }, ctx) {
 
   await user.save();
 
-  // 锁定账户同样要释放进行中的指派（与 updateUser 的停用路径、删号路径同一出口）。
-  // 锁定态下 arrive/resolve/start 都以"操作者 === 处理人/被指派人"为条件，
-  // 而锁定账户无法登录 ⇒ 工单没有出口。解锁后重新接单即可，释放本身不回滚。
-  // 放在 save 之后：写入失败时不得提前把指派清掉；重试同一请求仍会走到这里。
+  // 锁定账户同样要释放进行中的指派（与 updateUser 的停用路径、删号路径同一出口）：
+  // 锁定态下 arrive/resolve/start 都以"操作者 === 处理人/被指派人"为条件，锁定账户
+  // 无法登录 ⇒ 工单没有出口。释放不回滚、updateMany 幂等可重入；必须放在 save 之后
+  // （写入失败时不得提前把指派清掉）。
   if (locked) {
-    await require('../userService').releaseOpenAssignments([user._id], null, {
-      remark: '处理人账户已锁定，工单退回待指派池',
-    });
+    // 后半程异常隔离（审计 2026-11-14 A）：save 已成功 ⇒ 锁定主状态不可回滚，此后
+    // 任何收尾失败都不能把「已锁定」伪造成 500（会诱使重试再走一遍吊销链），也不得
+    // 跳过后续缓存失效与审计——只留 error 痕，与下方 revokeAllSessionsSafe 同 fail-soft 档。
+    try {
+      await require('../userService').releaseOpenAssignments([user._id], null, {
+        remark: '处理人账户已锁定，工单退回待指派池',
+      });
+    } catch (releaseErr) {
+      logger.error(`锁定已落库，但进行中指派释放失败（工单需人工退回）：${releaseErr.message}`, {
+        userId: String(user._id),
+        username: user.username,
+        operator: operatorUsername,
+      });
+    }
   }
 
   // 会话表与 tokenVersion 同步收敛：否则「登录会话」界面仍列出一批

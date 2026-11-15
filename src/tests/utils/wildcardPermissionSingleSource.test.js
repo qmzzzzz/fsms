@@ -49,8 +49,9 @@ const PROBE = 'zz:probe_not_granted';
 const UNRELATED = 'zz:some_other_perm';
 
 /**
- * 今天实测的字面量手抄分布：`src/` 下非测试目录（155 个 js）里，剥注释后
- * `'*:*'` 完整字面量的逐文件出现次数，合计 18 处 / 12 个文件。
+ * 字面量手抄分布的冻结账：`src/` 下非测试目录（155 个 js）里，剥注释后
+ * `'*:*'` 完整字面量的逐文件出现次数。2026-11-15 审计修复批后为 11 处 / 7 个文件
+ * （controllers 侧 5 个文件的 6 处已全部改引 RESERVED_WILDCARD_PERMISSION 常量）。
  *
  * 冻到**精确相等**而不是"每文件上限"：后者在扫描器自己坏掉时（walkJs 返回目录空集、
  * stripComments 误吞全文）会静默恒绿，前者会立刻红成 `Received: {}`。对端把某处改用
@@ -61,11 +62,6 @@ const UNRELATED = 'zz:some_other_perm';
  * 是**合法**的字面量：前者是定义本身，后者是真正落库的那条权限文档与其授予表。
  */
 const WILDCARD_LITERAL_CENSUS = {
-  'controllers/permissionController.js': 1,
-  'controllers/roleGuards.js': 1,
-  'controllers/userController/create.js': 1,
-  'controllers/userController/roles.js': 2,
-  'controllers/userController/update.js': 1,
   'middleware/rbac.js': 2,
   'routes/permissionRoutes.js': 2,
   'services/initData/permissionsBusiness.js': 1,
@@ -211,13 +207,12 @@ describe('全局通配权限编码与权威常量的一致性', () => {
     expect(routesCode.match(equalsRe) || []).toHaveLength(2);
     // 反向：换成别的值就找不到 ⇒ 常量改名后这条判据会红，而不是静默放行
     expect(routesCode.match(/\.equals\('zz:renamed_reserved'\)/g) || []).toHaveLength(0);
-    // 控制器侧的停用闸同理（'*' 权限停用会让全体超管失去权限）
+    // 控制器侧的停用闸同理（'*' 权限停用会让全体超管失去权限）。2026-11-15 起
+    // permissionController 改引常量（不再手抄字面量），这里断言常量比较形态仍在。
     const ctrlCode = stripComments(
       fs.readFileSync(path.join(SRC_ROOT, 'controllers', 'permissionController.js'), 'utf8')
     );
-    expect(
-      ctrlCode.match(new RegExp(`code === '${escapeRe(RESERVED_WILDCARD_PERMISSION)}'`, 'g')) || []
-    ).toHaveLength(1);
+    expect(ctrlCode.match(/code === RESERVED_WILDCARD_PERMISSION/g) || []).toHaveLength(1);
   });
 
   test('手抄分布冻结：src 生产代码里字面量的逐文件出现次数与实测一致', () => {

@@ -14,6 +14,9 @@ const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
 
 describe('index.js 必须真的驱动取证捕获的生命周期', () => {
   const src = read('src/index.js');
+  // 崩溃两臂的收尾链抽在 utils/crashFlush.js（index.js 贴体积棘轮 + 两臂逐字共享），
+  // 崩溃相关的接线判据读该模块；start/flushAndStop 仍在 index.js 关停段。
+  const crashFlushSrc = read('src/utils/crashFlush.js');
 
   test('require 了 forensicCapture 模块', () => {
     expect(src).toMatch(/require\('\.\/services\/forensicCapture'\)/);
@@ -30,7 +33,11 @@ describe('index.js 必须真的驱动取证捕获的生命周期', () => {
   });
 
   test('崩溃两臂（uncaughtException / unhandledRejection）都排空取证缓冲', () => {
-    const crashFlush = src.match(/\.then\(\(\) => forensicCapture\.flush\(\)\)/g) || [];
-    expect(crashFlush.length).toBe(2);
+    // 接线本体在 utils/crashFlush.js：flushAuditOnCrash 一处定义、两条崩溃臂共用，
+    // 所以这里判"模块里有这条 flush"，再判 index.js 两臂都调了 drainAndExit。
+    const crashFlush = crashFlushSrc.match(/\.then\(\(\) => forensicCapture\.flush\(\)\)/g) || [];
+    expect(crashFlush.length).toBe(1);
+    const arms = src.match(/drainAndExit\('(uncaughtException|unhandledRejection)'\)/g) || [];
+    expect(arms.length).toBe(2);
   });
 });

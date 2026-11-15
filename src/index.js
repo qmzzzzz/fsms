@@ -295,6 +295,35 @@ const gracefulShutdown = async (signal) => {
 };
 
 /**
+ * PROXY protocol 前置层装配（ADR-021）。返回值三态：null=未启用（listen/error 挂到
+ * 原 server——内层仍承载 WS、超时及 HTTP 连理清理）；false=「PROXY 头 + ENABLE_HTTPS」
+ * 组合违规，已记日志并经 exitAfterFlush 调度非零退出，调用方必须立即 return；其余=
+ * 已创建的前置 server（持有端口，PROXY 头在 HTTP 解析前还原 socket 地址）。
+ */
+const attachProxyFrontServer = (server) => {
+  if (!require('./config/proxyProtocol').resolveProxyProtocol().enabled) return null;
+  // 生产闸（config/proxyProtocol.js 的收集器）已拦「on + ENABLE_HTTPS」组合；这里再守一道是给
+  // 非生产环境（本地 dev 直接跑 index.js）兜底：那类环境 validateConfig 提前返回，没人拦组合
+  // —— 而 Node 的 TLSSocket 在句柄层读连接、看不到已被消费的 PROXY 头字节，后果是握手永久
+  // 悬挂（最难排查的静默故障形态）。宁可本地直接拒启，见 ADR-021「决定 ⑥」。
+  if (process.env.ENABLE_HTTPS === 'true') {
+    // 长文案常量在 config/proxyProtocol.js（index.js 的 max-lines 棘轮贴边，放不下）
+    logger.error(require('./config/proxyProtocol').HTTPS_COMBO_UNSUPPORTED_MESSAGE);
+    exitAfterFlush(1);
+    return false;
+  }
+  return require('./utils/proxyProtocol').createProxyProtocolFrontServer(server, {
+    trustedProxies: require('./config/trustedProxies').resolveTrustedProxies(),
+    onRejection: ({ peer, reason }) => {
+      // 拒绝留痕：台账 proxy_protocol_header_rejected（constants/failOpenSites.js）的
+      // 调用点，failOpenLedgerGate ① 按本文件扫描并与台账双向闭合
+      require('./utils/metrics').incSecurityAlert('proxy_protocol_header_rejected', 'high');
+      logger.warn(`PROXY protocol 头被拒绝并断开连接（peer=${peer}，原因=${reason}）`);
+    },
+  });
+};
+
+/**
  * 启动服务器
  */
 const startServer = async () => {
@@ -361,29 +390,9 @@ const startServer = async () => {
     server.headersTimeout = 85_000;
 
     // PROXY 头在 HTTP 解析前还原 socket 地址；协议与三态信任约束见 utils/proxyProtocol.js / ADR-021。
-    // listen/error 必须挂到实际持有端口的前置层；内层仍承载 WS、超时及 HTTP 连接清理。
     // 只信 TRUSTED_PROXY_CIDRS 名单内原始对端，名单非法时全部拒绝；拒绝须同时计数并记录原因。
-    if (require('./config/proxyProtocol').resolveProxyProtocol().enabled) {
-      // 生产闸（config/proxyProtocol.js 的收集器）已拦「on + ENABLE_HTTPS」组合；
-      // 这里再守一道是给非生产环境（本地 dev 直接跑 index.js）兜底：那类环境
-      // validateConfig 提前返回，没人拦组合 —— 而 Node 的 TLSSocket 在句柄层读
-      // 连接、看不到已被消费的 PROXY 头字节，后果是握手永久悬挂（最难排查的
-      // 静默故障形态）。宁可本地直接拒启，见 ADR-021「决定 ⑥」。
-      if (process.env.ENABLE_HTTPS === 'true') {
-        // 长文案常量在 config/proxyProtocol.js（index.js 的 max-lines 棘轮贴边，放不下）
-        logger.error(require('./config/proxyProtocol').HTTPS_COMBO_UNSUPPORTED_MESSAGE);
-        return exitAfterFlush(1);
-      }
-      frontServer = require('./utils/proxyProtocol').createProxyProtocolFrontServer(server, {
-        trustedProxies: require('./config/trustedProxies').resolveTrustedProxies(),
-        onRejection: ({ peer, reason }) => {
-          // 拒绝留痕：台账 proxy_protocol_header_rejected（constants/failOpenSites.js）的
-          // 调用点，failOpenLedgerGate ① 按本文件扫描并与台账双向闭合
-          require('./utils/metrics').incSecurityAlert('proxy_protocol_header_rejected', 'high');
-          logger.warn(`PROXY protocol 头被拒绝并断开连接（peer=${peer}，原因=${reason}）`);
-        },
-      });
-    }
+    frontServer = attachProxyFrontServer(server);
+    if (frontServer === false) return; // 组合违规：exitAfterFlush 已调度非零退出
     const listenServer = frontServer || server;
 
     // 监听错误兜底（如 EADDRINUSE 端口占用）：listen 的错误不会抛异常，
@@ -456,8 +465,16 @@ const startServer = async () => {
       // unref 不阻退出）。每轮轮转核对账窗口内的一个业务日，窗口=min(取证 TTL, manifest 保留期)
       forensicManifestReconcile.start();
       // 启动期哨兵用户名遮蔽对账（init 永不 reject；失败按"未检查"处理，
-      // 不影响名单匹配与登录路径，见 canaryWatch 文件头）
-      canaryWatch.init().catch(() => {});
+      // 不影响名单匹配与登录路径，见 canaryWatch 文件头）。此 catch 是契约外的
+      // 双保险层（canaryWatch.js:136-137）：真走到这里说明契约被破坏，必须留声——
+      // 静默吞掉会把"哨兵遮蔽对账失效"藏进无日志的静默降级（吞错必须留声纪律）。
+      canaryWatch
+        .init()
+        .catch((e) =>
+          logger.error(
+            `canaryWatch.init 意外拒绝（契约声明永不 reject，属双重保险层兜底）：${e && e.message ? e.message : e}`
+          )
+        );
       reminderScheduler = startReminderScheduler(24 * 60 * 60 * 1000);
 
       const secure = process.env.ENABLE_HTTPS === 'true';
@@ -493,15 +510,10 @@ const startServer = async () => {
 // F-186b：崩溃路径同样要排空 SIEM 转发缓冲——gracefulShutdown 里的那一步管不到这里，
 // 而按取证价值排序恰好是反的：进程崩掉那一刻的日志最需要进 SIEM，它们此时全压在
 // logShipper 的内存缓冲里（默认 100 行/批、串行发送）。
-// 预算硬顶 500ms：这两条链后面还要 setTimeout(1s) 才 exit，超出即放弃并如实报——
-// 绝不为"送日志"把一个已经崩溃的进程再拖长（helper 内的计时器已 unref）。
-// helper 永不 reject：崩溃链的 finally 之后没有 catch，一次 reject 就是新的
-// unhandledRejection（见 utils/loggerFlush.js 的 bestEffortDrain 注释）。
-const CRASH_DRAIN_BUDGET_MS = 500;
+// 收尾链（审计缓冲硬预算 flush + SIEM 排空 + 限时退出）在两条崩溃路径上逐字共享，
+// 且 index.js 贴着 300 行代码棘轮——抽到 utils/crashFlush.js（语义契约见其文件头）。
+const { drainAndExit } = require('./utils/crashFlush');
 
-// 进程即将退出前必须 flush 审计缓冲——内存里可能有上百条已确认
-// 响应给客户端、但尚未落库的审计记录，直接 exit 会让它们随进程消失
-// （WAL 能在下次启动重放，但重放依赖进程能正常再启动，不能作为唯一保障）。
 process.on('uncaughtException', (error) => {
   if (isDevelopmentLikeEnv()) {
     logger.error(`未捕获的异常：${error.message}`);
@@ -514,13 +526,8 @@ process.on('uncaughtException', (error) => {
   } catch (e) {
     /* ignore */
   }
-  // flush 失败不阻断退出：进程已处于不可信状态，尽力而为
-  Promise.resolve()
-    .then(() => auditBuffer.flush())
-    .then(() => forensicCapture.flush())
-    .catch((e) => logger.error(`退出前审计缓冲落库失败：${e && e.message ? e.message : e}`))
-    .then(() => bestEffortDrain({ allowMs: CRASH_DRAIN_BUDGET_MS, tag: 'uncaughtException' }))
-    .finally(() => setTimeout(() => process.exit(1), 1000));
+  // flush 失败不阻断退出：进程已处于不可信状态，尽力而为（drainAndExit 内部已兜）
+  drainAndExit('uncaughtException');
 });
 
 process.on('unhandledRejection', (reason, promise) => {
@@ -536,12 +543,7 @@ process.on('unhandledRejection', (reason, promise) => {
   } catch (e) {
     /* ignore */
   }
-  Promise.resolve()
-    .then(() => auditBuffer.flush())
-    .then(() => forensicCapture.flush())
-    .catch((e) => logger.error(`退出前审计缓冲落库失败：${e && e.message ? e.message : e}`))
-    .then(() => bestEffortDrain({ allowMs: CRASH_DRAIN_BUDGET_MS, tag: 'unhandledRejection' }))
-    .finally(() => setTimeout(() => process.exit(1), 1000));
+  drainAndExit('unhandledRejection');
 });
 
 startServer();

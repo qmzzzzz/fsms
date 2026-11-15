@@ -207,6 +207,23 @@ describe('deviceReminder 分支补齐', () => {
     expect(FireDevice.find.mock.calls.length).toBeGreaterThan(callsBefore);
   });
 
+  test('缓存键含扫描参数：7 天窗口的请求不得命中 30 天窗口的缓存（跨参数污染）', async () => {
+    await service.scanDeviceReminders(); // 默认 30 天窗口进缓存
+    const callsBefore = FireDevice.find.mock.calls.length;
+
+    const narrow = await service.getDeviceReminders({ expiringDays: 7 });
+    // 参数不同 ⇒ 必须重扫，且结果与请求参数同源（不得把 30 天缓存换壳返回）
+    expect(narrow.expiringDays).toBe(7);
+    expect(FireDevice.find.mock.calls.length).toBeGreaterThan(callsBefore);
+
+    // 回到默认参数：缓存已被 7 天扫描覆盖 ⇒ 默认请求同样重扫（两向都不互吃）
+    const callsBeforeDefault = FireDevice.find.mock.calls.length;
+    const backToDefault = await service.getDeviceReminders();
+    expect(backToDefault.expiringDays).toBe(30);
+    expect(backToDefault).not.toBe(narrow);
+    expect(FireDevice.find.mock.calls.length).toBeGreaterThan(callsBeforeDefault);
+  });
+
   // ===== scanDeviceReminders：并发互斥 =====
 
   test('并发互斥：带 scopeFilter 的调用直接跳过，绝不返回全库缓存（H-1，L34-37）', async () => {

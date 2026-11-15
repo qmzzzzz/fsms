@@ -57,7 +57,7 @@ const LIST_FIELD_KEYS = Object.freeze({
   inspections: Object.freeze({
     assignedTo: 'assignedTo[]._id', // 过滤参数是 ref id；装饰行值已是 populate 形状的子文档数组
     inspectionType: 'inspectionType',
-    'locations.building': 'locations[].building', // 真实搜索打的是 locations.building（InspectionService.js:127-128）
+    'locations.building': 'locations[].building', // 真实搜索打的是 locations.building（InspectionService.js:125-126）
     planStartTime: 'planStartTime',
     status: 'status',
     title: 'title',

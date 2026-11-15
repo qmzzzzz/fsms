@@ -676,6 +676,14 @@ describe('auditBuffer 分支补齐', () => {
       const count = await AuditLog.countDocuments({ username: 'testuser_nohash' });
       expect(count).toBe(1);
 
+      // 补齐标题承诺的「无哈希方式」：落库文档必须真的无哈希（F，2026-11-15——
+      // 原先只断落库条数，「无哈希」半句无断言）。handleHashFailure 把未串链的
+      // 文档降级为 hash/prevHash/hashVersion 全 null；hashFailure 标记由下一条
+      // 用例单独钉住，这里只钉「落的是无哈希形态」。
+      const landed = await AuditLog.findOne({ username: 'testuser_nohash' }).lean();
+      expect(landed.hash).toBeNull();
+      expect(landed.prevHash).toBeNull();
+
       chainSpy.mockRestore();
     });
 

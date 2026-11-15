@@ -42,6 +42,41 @@ describe('applySearchCondition：范围条件必须活到最后', () => {
     expect(q.$and).toHaveLength(3);
     expect(q.$and[0]).toEqual({ level: 'critical' });
   });
+
+  test('结构闸：缺 $or / 空臂 / 臂不是普通对象 ⇒ TypeError，查询不被改动', () => {
+    for (const bad of [
+      undefined,
+      null,
+      {},
+      { $or: 'x' },
+      { $or: [] },
+      { $or: ['x'] },
+      { $or: [null] },
+    ]) {
+      const q = { status: 'pending' };
+      expect(() => applySearchCondition(q, bad)).toThrow(TypeError);
+      // 半登记态不得出现：校验失败时既不落 $or 也不动 $and
+      expect(q.status).toBe('pending');
+      expect(q.$or).toBeUndefined();
+      expect(q.$and).toBeUndefined();
+    }
+  });
+
+  test('操作符注入旁路：搜索臂顶层 $where/$expr/$function 一律拒绝', () => {
+    for (const op of ['$where', '$expr', '$function']) {
+      const q = { $or: [{ handler: 'a' }] };
+      expect(() => applySearchCondition(q, { $or: [{ [op]: 'js here' }] })).toThrow(TypeError);
+      expect(q.$and).toBeUndefined(); // $and 合并分支同样不得收下坏臂
+    }
+  });
+
+  test('反向保护：合法值位操作符与嵌套 $or 不被结构闸误伤', () => {
+    const q = { status: 'pending' };
+    applySearchCondition(q, {
+      $or: [{ status: { $in: ['pending', 'acked'] } }, { $or: [{ description: /冒烟/ }] }],
+    });
+    expect(q.$or).toHaveLength(2);
+  });
 });
 
 describe('报警列表：被派单者看得见、局外人搜不到', () => {

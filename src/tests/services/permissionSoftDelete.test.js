@@ -102,6 +102,30 @@ describe('权限软删除（#7 先删后复核窗口根治）', () => {
     ).rejects.toMatchObject({ statusCode: 400, message: expect.stringContaining('已删除') });
   });
 
+  test('createPermission 并发窗口：判重被跳过时由唯一索引 E11000 兜底转 409（审计 2026-11-14 E）', async () => {
+    // 判重与落库之间存在窗口：另一请求在 findOne 之后插入同码，输家的 create 撞
+    // code 唯一索引抛 E11000 ⇒ 500。与 createRole 同款口径收口为 409 注册码
+    // PERMISSION_STATE_CONFLICT（重试后得精确的 400）。用一次性 findOne→null 复现窗口。
+    const perm = await makePerm('race');
+    await Permission.syncIndexes(); // autoIndex 后台建索引与写入竞态会让 E11000 变成偶发，先钉住索引在场
+    // 桩必须保持链形（调用方还要 .setOptions）：只把第一次判重的结果换成 null
+    const findOneSpy = jest
+      .spyOn(Permission, 'findOne')
+      .mockImplementationOnce(() => ({ setOptions: () => null }));
+    try {
+      await expect(
+        service.createPermission({
+          name: '并发重复编码',
+          code: perm.code,
+          type: 'api',
+          module: perm.module,
+        })
+      ).rejects.toMatchObject({ statusCode: 409, code: 'PERMISSION_STATE_CONFLICT' });
+    } finally {
+      findOneSpy.mockRestore();
+    }
+  });
+
   test('有子权限时拒绝删除，且父权限在 standalone 补偿后立刻恢复可见', async () => {
     const parent = await makePerm('parent');
     const child = await makePerm('child', { parent: parent._id });

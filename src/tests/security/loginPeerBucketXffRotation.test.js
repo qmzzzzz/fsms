@@ -16,9 +16,10 @@
  *      恰好有一个 login: 开头的 IP 桶；固定 XFF 单挂非对端桶时，只有 IP 桶在
  *      40 次内触顶（第 11 次）——它是被轮换绕开的那把尺，也是"轮换有效"前提的行为证明。
  *
- * 两条用例的顺序是刻意的：限流器是模块级内存态、同文件共享（supertest 的对端恒为回环），
- * 对端桶只允许被用例 1 消费；用例 2 的单桶探测用 getKey 判别键前缀后**绕开对端桶**，
- * 否则先跑的探测会在对端桶里留下计数，用例 1 的"第 301 次"就不再精确。
+ * 两条用例各自**自足**（P2-13：--randomize 打乱文件内用例顺序，任一顺序都必须成立）：
+ * 限流器是模块级内存态、同文件共享（supertest 的对端恒为回环）。用例 1 先清对端桶
+ * 再打满它；用例 2 显式构造对端桶的「已打满」态（全链 + 轮换 XFF 打 300 次失败尝试）
+ * 再做单桶探测——不再依赖声明顺序，根 afterAll 把桶随套件复位。
  *
  * 可证伪方向：
  *   · 删掉 loginPeerLimiter 或改回 clientIpForSecurityDecision 组键 ⇒ 用例 1 红
@@ -29,8 +30,11 @@
 
 const express = require('express');
 const request = require('supertest');
+const { ipKeyGenerator } = require('express-rate-limit');
 
 const authRouter = require('../../routes/authRoutes');
+// normalizeRateLimitIp 是 rateLimit.js 的「仅供测试」导出：与该文件 keyGenerator 同一把尺
+const { normalizeRateLimitIp } = require('../../middleware/rateLimit');
 
 /** 挂在真实路由上的限流中间件（express-rate-limit 的产物带 getKey/resetKey，校验器不带） */
 const mountedLimiters = (method, path) => {
@@ -63,12 +67,28 @@ const limiterApp = (limiters) => {
 const rotateIp = (i) => `198.51.${Math.floor(i / 250)}.${(i % 250) + 1}`;
 const fixedIp = (n) => `198.51.200.${n}`;
 
+/** 对端桶清零（--randomize 用例乱序的前提）：对端桶键由 socket 对端决定，supertest 恒为回环，
+ * 换不出新桶——所以唯一的顺序解耦手段是把回环桶清掉再开始。
+ * v8 的中间件只暴露 resetKey(key)（key 是字符串，不是 req；store 也不再挂在 limiter 上），
+ * 键模板取自 rateLimit.js 的 keyGenerator（login-peer: + ipKeyGenerator(normalizeRateLimitIp(peer))，
+ * 后两个助手就是生产在用的同一把尺，::ffff: 与纯 IPv4 已实测收敛同键）。
+ * 若键模板将来改动，用例 1 的「第 301 次才挡下」会以 first429=1 当场变红——复位丢失是响的，不是静默的。 */
+const LOOPBACK_PEER_KEY = `login-peer:${ipKeyGenerator(normalizeRateLimitIp('127.0.0.1'))}`;
+const resetPeerBucket = (mounted) => {
+  for (const limiter of mounted) {
+    if (typeof limiter.resetKey === 'function') limiter.resetKey(LOOPBACK_PEER_KEY);
+  }
+};
+
 describe('登录入口 socket 对端限流桶：XFF 轮换不得重置按来源的失败计数', () => {
   test(
     '全链 + 轮换 XFF：IP 桶全程不触顶，对端桶在第 301 次挡下（RateLimit-Limit=300）',
     async () => {
       const mounted = mountedLimiters('post', '/login');
       expect(mounted.length).toBeGreaterThanOrEqual(3);
+      // 自足前提（P2-13）：单桶探测那条用例会把对端桶灌满——乱序下它先跑时，
+      // 本用例若不清桶，第 1 次就 429，"第 301 次才挡下"测的就不是本档场景。
+      resetPeerBucket(mounted);
       const app = limiterApp(mounted);
 
       let last = null;
@@ -94,6 +114,26 @@ describe('登录入口 socket 对端限流桶：XFF 轮换不得重置按来源�
     '单桶探测：固定 XFF 下 IP 桶第 11 次触顶；对端桶被挡住之后不再放行',
     async () => {
       const mounted = mountedLimiters('post', '/login');
+      // 自足前提（P2-13）：对端桶必须处于「已打满且不再放行」态。原写法依赖首条用例
+      // 先把它打满，--randomize 反序时对端桶是空的 ⇒ 单挂它 40 次全过，governors 缺一条
+      // 而翻红（约 50% 概率）。显式构造桶状态：走全链 + 每请求轮换 XFF 打 300 次失败尝试
+      // ——对端恒为回环、每个 XFF 值只落 1 次（IP 桶不触顶）、账号桶按 username 计数
+      // 且 fill 前缀独占 ⇒ 恰好只有对端桶被灌满，与首条用例打满后的形态一致。
+      const fullChain = limiterApp(mountedLimiters('post', '/login'));
+      for (let i = 1; i <= 300; i += 1) {
+        await request(fullChain)
+          .post('/login')
+          .set('X-Forwarded-For', rotateIp(i))
+          .send({ username: `peerfill${i}`, password: 'solo' });
+      }
+      // 前提自证：灌满之后，多一发必须由对端桶挡下（limit=300）。
+      // 缺了这段，fill 没灌满时下面的 governors 会少一条，红因就不是本档要测的事。
+      const probed = await request(fullChain)
+        .post('/login')
+        .set('X-Forwarded-For', rotateIp(301))
+        .send({ username: 'peerfill-probe', password: 'solo' });
+      expect(probed.status).toBe(429);
+      expect(probed.headers['ratelimit-limit']).toBe('300');
       const governors = [];
       for (let n = 0; n < mounted.length; n += 1) {
         const app = limiterApp([mounted[n]]);
@@ -120,4 +160,10 @@ describe('登录入口 socket 对端限流桶：XFF 轮换不得重置按来源�
     },
     60 * 1000
   );
+});
+
+// 根收尾（P2-13）：对端桶随套件复位。乱序下最后跑的用例（无论哪条）都会留下接近满格的
+// 对端桶，留给同文件后续新增用例就是一条顺序耦合——在 root 钩子里清零（键口径见 resetPeerBucket）。
+afterAll(() => {
+  resetPeerBucket(mountedLimiters('post', '/login'));
 });

@@ -76,6 +76,7 @@ const ipBlacklistSchema = new mongoose.Schema({
   // 关联的用户名（如暴力破解攻击的目标账户）
   targetUsername: {
     type: String,
+    maxlength: 30, // 与 User.username 同口径（快照的来源是登录尝试的账号名）；blockIP 走 findOneAndUpdate 默认不跑校验，本闸只兜 create/save 直写
   },
   // 到期时间（用于 TTL 索引自动清理；白名单一般为 null 即永久）
   expiresAt: {

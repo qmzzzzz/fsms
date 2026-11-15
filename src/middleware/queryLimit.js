@@ -1,17 +1,16 @@
 /**
  * 查询参数长度限制中间件
  *
- * 背景：列表页搜索框（用户名/设备名/关键字等）对应的 GET query 参数
- * 未做长度校验，前端粘贴超长文本后会原样进入 MongoDB 正则/前缀查询，
- * 造成数据库负载放大（可被用于资源耗尽）。
+ * 背景：列表页搜索框（用户名/设备名/关键字等）对应的 GET query 参数未做长度校验，前端粘贴超长文本后会原样进入 MongoDB 正则/前缀查询，造成数据库负载放大（可被用于资源耗尽）。
  *
  * 策略：全局拦截所有字符串型 query 参数，超过上限直接返回 400，
  * 上限取业务查询场景的最大合理值（allowedIPs 之类的长文本走 body，不受影响）。
  */
 
 const logger = require('../utils/logger');
-// 日志里的 URL 必须过 redactUrlQuery（与 app.js:376 morgan 的 safe-url、
-// errorHandler.js:109/116 同一口径）：本中间件恰好在"参数可疑"的路径上打日志，
+// 日志里的 URL 必须过 redactUrlQuery（与 app.js:371 morgan 的 safe-url、
+// errorHandler.js:109/116 同一口径；原写 :376，2026-11-15 密度裁剪批 app.js 注释压缩后顺移）：
+// 本中间件恰好在"参数可疑"的路径上打日志，
 // 未打码就会把 ?accessToken=... 这类凭据原样落盘。
 const { redactUrlQuery } = require('../utils/helpers');
 

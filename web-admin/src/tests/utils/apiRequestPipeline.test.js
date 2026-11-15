@@ -869,6 +869,29 @@ describe('响应形状校验（verifyResponseShape）', () => {
     expect(driftCount()).toBe(1)
   })
 
+  test('路径匹配按段边界收敛：/auth/me 不命中 /auth/metrics 之类的更长路径（P3）', async () => {
+    // 防退化：裸 includes 没有边界概念 → 新增任何以 /auth/me 开头的端点
+    // （如 /auth/metrics）都会被套上 AuthMe schema，每次请求报假漂移
+    const { apiClient } = await loadAll()
+    // /auth/metrics 返回通用包络形状：若仍被 /auth/me 的专用 schema 校验就会报漂移
+    apiClient.defaults.adapter = (config) =>
+      Promise.resolve(jsonOk(config, { success: true, data: { metric: 1 } }))
+    await apiClient.get('/auth/metrics')
+    expect(driftCount()).toBe(0)
+
+    // 边界规则不得误伤正常命中：/auth/me 仍走专用 schema（坏形状必须报警）
+    apiClient.defaults.adapter = (config) =>
+      Promise.resolve(jsonOk(config, { success: true, data: { user: { username: 42 } } }))
+    await apiClient.get('/auth/me')
+    expect(driftCount()).toBe(1)
+
+    // 段边界后缀（/）也算命中：/auth/me/summary 被专用 schema 校验（坏形状报漂移）
+    apiClient.defaults.adapter = (config) =>
+      Promise.resolve(jsonOk(config, { success: true, data: { user: { username: 42 } } }))
+    await apiClient.get('/auth/me/summary')
+    expect(driftCount()).toBe(2)
+  })
+
   test('/auth/sessions GET 用列表 schema；DELETE 不误用（method 约束）', async () => {
     // 防退化：去掉 method 约束 → 每次踢除设备（DELETE 返回 { sid }）都误报一次漂移
     const { apiClient } = await loadAll()

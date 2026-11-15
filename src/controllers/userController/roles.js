@@ -10,7 +10,10 @@ const logger = require('../../utils/logger');
 const { asyncHandler } = require('../../middleware/errorHandler');
 const { assertRecordInScope } = require('../../middleware/rbac');
 const { uniqueIdStrings } = require('../../utils/helpers');
-const { checkSuperAdminMembership } = require('../../utils/superAdmin');
+const {
+  checkSuperAdminMembership,
+  RESERVED_WILDCARD_PERMISSION,
+} = require('../../utils/superAdmin');
 const statsCache = require('../../services/statsCache');
 const { invalidateUserCache } = require('../../middleware/auth');
 const userService = require('../../services/userService');
@@ -55,7 +58,7 @@ const rejectInvalidRoleRequest = (req, res) => {
  * @returns {boolean} true 表示已写出拒绝响应
  */
 const rejectUnoperableGrants = async (res, req, operatorPermCodes, validRoles, user) => {
-  if (operatorPermCodes.includes('*:*')) return false;
+  if (operatorPermCodes.includes(RESERVED_WILDCARD_PERMISSION)) return false;
   // 只校验「新增的」权限：目标用户已持有的权限不属于本次授予行为，
   // 否则操作者无法对权限比自己多的用户做任何角色调整（含收权）。
   // 判定本身与建号路径共用同一个实现（findUnoperableGrantCodes），
@@ -214,7 +217,7 @@ const assignRoles = asyncHandler(async (req, res) => {
   // ===== 后端复审 B-2：同级角色归属包含校验（判据与理由见 rejectForeignPeerRoles）=====
   // 建号轨（validateRolesForCreate 第 5 道）调用的是同一个实现，两条轨不会再各走各的尺子。
   if (
-    !operatorPermCodes.includes('*:*') &&
+    !operatorPermCodes.includes(RESERVED_WILDCARD_PERMISSION) &&
     rejectForeignPeerRoles(res, req, validRoles, operatorMaxLevel, `target=${user.username}`)
   ) {
     return;

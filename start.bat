@@ -14,6 +14,9 @@ REM      选前者：UTF-8 是当前 Windows 的默认方向，且不劣化调�
 REM   2. 清理端口时校验进程映像名，只结束 node.exe。原实现按端口无条件
 REM      taskkill，会误杀占用 3000/3001 的任何进程（Docker 端口转发、
 REM      其他项目的 dev server、甚至系统服务）。
+REM   3. 后端/前端均以 start /B 启动（不新开窗口，输出与启动日志同窗混排）；
+REM      排障提示据此统一为「看本窗口上方 / 另开 cmd 单跑 dev-*.cmd」，
+REM      与启动方式一致——原先提示「查看控制台窗口」，但 /B 下根本没有那个窗口。
 REM ============================================================
 chcp 65001 >nul
 setlocal
@@ -71,7 +74,9 @@ if not errorlevel 1 goto backend_ready
 set /a BACKEND_TRIES+=1
 if %BACKEND_TRIES% geq 15 (
     echo [错误] 后端启动失败（30 秒内未通过健康检查）
-    echo        请查看后端控制台窗口定位原因（端口占用 / 密钥未配置 / 数据库连不上等）
+    echo        后端由 start /B 启动，不单独开控制台窗口——报错就打在本窗口上方
+    echo        （与启动日志混排；常见原因：端口占用 / 密钥未配置 / 数据库连不上）。
+    echo        需要干净的排查视图时，另开一个 cmd 窗口运行 dev-backend.cmd。
     pause
     exit /b 1
 )
@@ -111,7 +116,8 @@ if not errorlevel 1 goto frontend_ready
 set /a FRONTEND_TRIES+=1
 if %FRONTEND_TRIES% geq 30 (
     echo [错误] 前端启动失败（60 秒内未开始监听 3001 端口）
-    echo        请查看前端控制台窗口定位原因
+    echo        前端由 start /B 启动，不单独开控制台窗口——报错就打在本窗口上方。
+    echo        需要干净的排查视图时，另开一个 cmd 窗口运行 web-admin\dev-vite.cmd。
     pause
     exit /b 1
 )

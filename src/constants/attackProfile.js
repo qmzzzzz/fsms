@@ -18,7 +18,7 @@ const ATTACK_CATEGORIES = Object.freeze({
   PATH_SCANNING: 'path_scanning',
   RATE_LIMIT_ABUSE: 'rate_limit_abuse',
   SUSPICIOUS_ACTIVITY: 'suspicious_activity',
-});
+}); // 分类法①（IP 画像读面）：同一批 AuditLog action 的另一套分类——「攻击告警查询」读面在 constants/attackEvents.js（ATTACK_EVENT_TYPES/ATTACK_EVENT_ACTION_MAP），两套按读面各自归组，改任一侧时到对方文件核对映射
 
 const VERDICTS = Object.freeze({
   NO_DATA: 'no_data',

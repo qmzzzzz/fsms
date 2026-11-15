@@ -26,9 +26,7 @@ const dashboardCache = new Map();
 const DASHBOARD_CACHE_TTL_MS = 30 * 1000;
 const DASHBOARD_CACHE_MAX_ENTRIES = 500;
 
-// 评价报告低危项（与结论对齐）：模块加载即 setInterval——
-// 纯 import 该模块（脚本/单测/Tree-shaking 场景）也会常驻一个定时器。
-// 改为首次真正使用缓存时惰性启动，一次性句柄保证只启一个。
+// 评价报告低危项（与结论对齐）：模块加载即 setInterval——纯 import 该模块（脚本/单测/Tree-shaking 场景）也会常驻一个定时器。改为首次真正使用缓存时惰性启动，一次性句柄保证只启一个。
 let dashboardCacheTimer = null;
 const ensureDashboardCacheSweeper = () => {
   if (dashboardCacheTimer) return;
@@ -68,8 +66,7 @@ const EMPTY_DASHBOARD = {
 };
 
 const collectDashboardFacets = async (filters, now, startOfDay, endOfDay) => {
-  // 三条聚合互不依赖：串行执行会把冷启动延迟叠加成三倍（缓存未命中的首屏）。
-  // 统一挂 maxTimeMS，避免某一条退化到全表扫描时无限占用连接池。
+  // 三条聚合互不依赖：串行执行会把冷启动延迟叠加成三倍（缓存未命中的首屏）。统一挂 maxTimeMS，避免某一条退化到全表扫描时无限占用连接池。
   const [[deviceFacet], [alarmFacet], [inspectionFacet]] = await Promise.all([
     FireDevice.aggregate(
       [
@@ -80,9 +77,7 @@ const collectDashboardFacets = async (filters, now, startOfDay, endOfDay) => {
             online: [{ $match: { status: 'normal' } }, { $count: 'n' }],
             fault: [{ $match: { status: { $in: ['fault', 'warning'] } } }, { $count: 'n' }],
             needMaintenance: [
-              // 口径与 stats/reminders/报表同源（含 scrapped 排除）：
-              // 这里原先写 `status: {$ne:'maintenance'}`，于是同一台报废设备
-              // 在仪表盘"待维护"里计数、在提醒清单里却不出现，同一响应自相矛盾。
+              // 口径与 stats/reminders/报表同源（含 scrapped 排除）：这里原先写 `status: {$ne:'maintenance'}`，于是同一台报废设备在仪表盘"待维护"里计数、在提醒清单里却不出现，同一响应自相矛盾。
               { $match: deviceAlertFilters(now).needMaintenance },
               { $count: 'n' },
             ],
@@ -199,6 +194,12 @@ const buildDashboardData = (deviceFacet, alarmFacet, inspectionFacet) => ({
   },
 });
 
+/** 出栈必拷贝：缓存里的 data 是同键多个请求共享的单一对象，调用方一旦改写返回体（响应编排层追加字段、中间件装饰），
+ * 污染会随对象存活整个 TTL 并扩散到所有同键命中。只拷贝这棵三层统计树（数字 + ≤10 元素的 byType/byLevel 数组），
+ * JSON 往返成本可忽略；data 全部由 facet 计数与字面量数组构成（无 Date/Buffer/类实例），JSON 语义下是**精确**拷贝
+ * 而非"够用"——这也是不用通用深拷贝工具的原因：缓存里不落不可克隆字段是本服务的既定形状。 */
+const cloneDashboardData = (data) => JSON.parse(JSON.stringify(data));
+
 const getDashboardData = async (userId) => {
   const dataScope = await getDataScope(userId);
   const now = new Date();
@@ -216,7 +217,7 @@ const getDashboardData = async (userId) => {
   const cacheKey = getDashboardCacheKey(userId, filters);
   const cached = dashboardCache.get(cacheKey);
   if (cached && cached.expireAt > Date.now()) {
-    return { data: cached.data, message: '获取仪表盘统计成功（缓存命中）' };
+    return { data: cloneDashboardData(cached.data), message: '获取仪表盘统计成功（缓存命中）' };
   }
 
   const { deviceFacet, alarmFacet, inspectionFacet } = await collectDashboardFacets(
@@ -230,7 +231,8 @@ const getDashboardData = async (userId) => {
   enforceDashboardCacheLimit();
   ensureDashboardCacheSweeper();
   dashboardCache.set(cacheKey, { data, expireAt: Date.now() + DASHBOARD_CACHE_TTL_MS });
-  return { data, message: '获取仪表盘统计成功' };
+  // 首算路径同样交出拷贝：data 已被上一步收进缓存，返回原引用等于把缓存体暴露给调用方
+  return { data: cloneDashboardData(data), message: '获取仪表盘统计成功' };
 };
 
 module.exports = {

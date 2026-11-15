@@ -3,36 +3,6 @@
  */
 
 /**
- * HTML 实体转义，防止存储型 XSS 文本字段入库前必须转义，避免未来 HTML 消费方直接执行脚本
- */
-function escapeHtml(str) {
-  if (typeof str !== 'string') return str;
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#x27;');
-}
-
-/**
- * 头像字段白名单校验（统一入口，供个人资料/管理员更新用户复用）允许：http(s) URL、/ 开头的相对图片路径、data:image 数据 URI（不含 svg，防存储型脚本注入）
- *
- * 相对路径分支必须拒绝协议相对地址（evil.com/x.png）。原字符类 [\w\-./] 包含 /，导致 //evil.com/x.png 整体命中"站内路径"，浏览器按当前协议解析后会向第三方域发起请求（头像 URL 可用于
- * 去匿名化追踪查看者 IP/时区）。(?!\/) 保证 / 后不再跟 /。
- * @param {string} avatar 待校验的头像值
- * @returns {boolean} 是否合法
- */
-const isValidAvatar = (avatar) => {
-  if (typeof avatar !== 'string' || avatar.length > 2048) return false;
-  return (
-    /^https?:\/\/\S+$/i.test(avatar) ||
-    /^\/(?!\/)[\w\-./]*\.(png|jpe?g|gif|webp)$/i.test(avatar) ||
-    /^data:image\/(png|jpe?g|gif|webp);base64,[A-Za-z0-9+/]+=*$/i.test(avatar)
-  );
-};
-
-/**
  * 转义正则表达式中的特殊字符，防止 ReDoS 和无效 regex
  * @param {string} str 需要转义的字符串
  * @returns {string} 转义后的字符串
@@ -124,9 +94,11 @@ const PASSWORD_MAX_LENGTH = 64;
 
 /**
  * 密码强度规则（企业级统一策略）至少 12 位，且包含大写字母、小写字母、数字、特殊字符（L-1，2026-09-02：按 OWASP/NIST 建议自 8 位提升至 12 位；存量用户不受影响—— 本校验仅在设置/修改密码时触发，登录比对不走此函数）
+ * 长度判据用 [\s\S] 而非 .：`.` 不匹配行终止符（\n/\r/\u2028/\u2029），含换行的口令会被拆成两段
+ * 短于 12 的运行而误报「长度不足」（拒绝方向是保守的，但报错文案与真实长度不符，且用户无法自证）。
  */
 const PASSWORD_RULES = [
-  { regex: /.{12,}/, message: '密码长度至少 12 位' },
+  { regex: /[\s\S]{12,}/, message: '密码长度至少 12 位' },
   { regex: /[A-Z]/, message: '密码必须包含大写字母' },
   { regex: /[a-z]/, message: '密码必须包含小写字母' },
   { regex: /[0-9]/, message: '密码必须包含数字' },
@@ -572,8 +544,6 @@ module.exports = {
   validateEnum,
   validatePasswordStrength,
   isBreachedPassword,
-  escapeHtml,
-  isValidAvatar,
   PASSWORD_RULES,
   PASSWORD_SPECIAL_REGEX,
   PASSWORD_MAX_BYTES,

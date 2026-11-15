@@ -31,7 +31,10 @@ jobs:
     # "Private repositories are supported if they have GitHub Advanced Security"）；
     # 缺 GHAS 时 Maintained 检查的 GraphQL ListCommits 直接报 "Resource not accessible
     # by integration"（2026-11-03 CI 实证；10-29 / 11-02 两次同样红，非代码引入）。
-    # 与 codeql.yml 同一口径：仅在公开仓运行；仓库转公开或开通 GHAS 后删掉 private 项即可恢复。
+    # 【2026-11-14 现状】仓库已转公开 ⇒ 判据成立，本工作流在 push main、每周一
+    # 01:30 UTC 定时与 branch_protection_rule 事件上实际运行，publish_results 生效。
+    # 与 codeql.yml 同一口径保留这行 if：仓库若再转私有就自动停跑，避免回到
+    # 每周必红的空烧形态。
     if: github.event.repository.private == false && github.event.repository.default_branch == github.ref_name
     permissions:
       # 上传 SARIF 到 Code Scanning 面板
@@ -50,13 +53,15 @@ jobs:
           # 凭据持久化等于多开一份不必要的外泄面（官方示例同样如此设置）。
           persist-credentials: false
 
-      # 用 v2.4.4 而不是 v2.4.0：v2.4.0 的 action.yaml 指向
+      # 实钉 v2.5.0（digest fa7117db…，见 uses 行；2026-09-18 实钉的 v2.4.4 后升级）。
+      # 历史选型依据（为什么不用 v2.4.0）：v2.4.0 的 action.yaml 指向
       # docker://gcr.io/openssf/scorecard-action:v2.4.0，而上游自 v2.4.1 起把
       # 镜像迁到 GHCR（v2.4.1 release note："The underlying container for the
-      # action is now hosted on GitHub Container Registry"）。
-      # 实测（2026-09-18）：ghcr.io 上 v2.4.0 的 manifest 返回 404、
-      # v2.4.4 返回 200。gcr.io 在本机网络不可达，无法验证旧镜像是否仍可拉取，
-      # 因此选可验证的 v2.4.4（同属 v2 大版本，输入契约一致）。
+      # action is now hosted on GitHub Container Registry"）。实测（2026-09-18）：
+      # ghcr.io 上 v2.4.0 的 manifest 返回 404、v2.4.4 返回 200；gcr.io 在本机网络
+      # 不可达，无法验证旧镜像是否仍可拉取 ⇒ 选可验证的 GHCR 镜像。v2.5.0 同属
+      # v2 大版本、同为 GHCR 托管，输入契约（results_file / results_format /
+      # publish_results）一致。
       - name: Run analysis
         uses: ossf/scorecard-action@fa7117db83c52d787ae5a89f350999701505d78e # v2.5.0
         with:

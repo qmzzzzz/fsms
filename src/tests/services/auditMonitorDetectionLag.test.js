@@ -189,10 +189,13 @@ describe('auditMonitor MTTD 记账', () => {
       webhook: process.env.SECURITY_ALERT_WEBHOOK,
       min: process.env.SECURITY_ALERT_MIN_LEVEL,
       allow: process.env.SECURITY_ALERT_WEBHOOK_ALLOWLIST,
+      secret: process.env.SECURITY_ALERT_WEBHOOK_SECRET,
     };
     process.env.SECURITY_ALERT_WEBHOOK = 'https://hooks.example.invalid/hook';
     process.env.SECURITY_ALERT_MIN_LEVEL = 'low';
     process.env.SECURITY_ALERT_WEBHOOK_ALLOWLIST = 'hooks.example.invalid';
+    // 缺签名密钥已 fail-closed（不投递）：本用例测透传，须给密钥
+    process.env.SECURITY_ALERT_WEBHOOK_SECRET = 'whsec-lag-probe';
     postJson.mockResolvedValue({ ok: true, status: 200 });
     // 投递前解析并校验域名地址（DNS 钉扎）；单测不出网
     const dnsLookup = jest
@@ -222,6 +225,7 @@ describe('auditMonitor MTTD 记账', () => {
         SECURITY_ALERT_WEBHOOK: saved.webhook,
         SECURITY_ALERT_MIN_LEVEL: saved.min,
         SECURITY_ALERT_WEBHOOK_ALLOWLIST: saved.allow,
+        SECURITY_ALERT_WEBHOOK_SECRET: saved.secret,
       })) {
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;

@@ -34,6 +34,12 @@ beforeEach(() => {
   delete process.env.IP_POOL_BAN_ALLOW_AUTO;
 });
 
+afterEach(() => {
+  // env 泄漏收口：「显式开启」那条用例会把开关写回 env——开关在生产侧已移除、
+  // 没有任何读者，但乱序下它是最后一条跑的话，env 就带着 'true' 泄漏给同 worker 的后续套件
+  delete process.env.IP_POOL_BAN_ALLOW_AUTO;
+});
+
 describe('护栏：这些情况一律拒绝封禁', () => {
   test('全网段 /0 ⇒ 拒绝（封了会把管理员自己挡在外面，无法再登录解除）', async () => {
     jest.spyOn(ipListService, 'findCoveringEntries').mockResolvedValue([]);

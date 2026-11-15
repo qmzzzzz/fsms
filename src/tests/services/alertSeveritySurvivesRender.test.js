@@ -9,7 +9,10 @@
  *    meta 里连这个键都不剩。
  * 后果：webhook 关掉 / 被级别过滤 / 被白名单拒掉时，**文件日志是唯一的取证通道**，
  * 而 ELK 上 `SECURITY_ALERT AND level:critical` 这类规则永远不会命中；
- * 更要紧的是 `low` 与 `medium` 都映射到 `info`（`securityAlertDelivery.js:185`），
+ * 更要紧的是 `low` 与 `medium` 都映射到 `info`（`securityAlertDelivery.js:193`；原写 :185，
+ * 2026-11-15 审计收敛批（webhook 缺密钥 fail-closed：deliveryRefusalReason 抽函数 +20 行、
+ * metrics require 注释 +2 行、signedHeaders 注释 +2 行）后 logMethod 上方净 +24 行至 :209，
+ * 同日密度裁剪批（本文件注释压缩 −16 行）后迁 :193），
  * 落盘之后**字面上不可区分**。
  *
  * 修法：告警等级另立键名 `alertLevel`，分派级别仍按原逻辑走 winston 的 `level`。

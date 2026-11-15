@@ -311,4 +311,29 @@ describe('闸门拦下的登录尝试落库留痕（审计二-3 取 B）', () =>
       alertSpy.mockRestore();
     }
   });
+
+  test('⑧ 同键短窗去重：同用户名+同拦下层+同出示形态 60s 内只落一条（审计 2026-11-14 J）', async () => {
+    // 与 services/loginRateLimitAudit 同判据：被拦下的尝试每个请求都写一行的话，
+    // 攻击流量等于把审计库打爆。窗口内只留一条（证明的是「发生过」）；键带上出示
+    // 形态——「没带验证码」与「带错验证码」是两个信号，各自独立去重。
+    const base = {
+      ip: '198.51.100.7',
+      userAgent: 'ua',
+      fingerprint: 'fp',
+      trigger: CAPTCHA_TRIGGERS.CHALLENGE,
+    };
+    const username = `${TAG}dedupe`;
+    await recordCaptchaRejected({ ...base, username });
+    await recordCaptchaRejected({ ...base, username });
+    await recordCaptchaRejected({ ...base, username });
+    expect(await AuditLog.countDocuments({ action: CAPTCHA_REJECTED_ACTION, username })).toBe(1);
+    // 出示形态不同 = 不同信号：带错验证码的尝试仍要留痕
+    await recordCaptchaRejected({ ...base, username, captchaSubmitted: true });
+    expect(await AuditLog.countDocuments({ action: CAPTCHA_REJECTED_ACTION, username })).toBe(2);
+    // 反向对照：换一个用户名（新键）立刻能落（证明去重不是"全局只写一条"）
+    await recordCaptchaRejected({ ...base, username: `${TAG}dedupe2` });
+    expect(
+      await AuditLog.countDocuments({ action: CAPTCHA_REJECTED_ACTION, username: `${TAG}dedupe2` })
+    ).toBe(1);
+  });
 });

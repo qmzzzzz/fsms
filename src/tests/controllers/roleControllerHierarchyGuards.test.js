@@ -14,9 +14,11 @@
  *   - [部分有效] **零验证**：33 条安全语义断言里没有一条查 `AuditLog` 是否落 `role_created`/`permission_assigned` ⇒ 权限模型被改但审计无痕仍全绿（deliverables/七维代码健康度深度审计-2026-09-18.md）
  *     变异实测更正（2026-09-20，`deliverables/AGENT工作总账与待办-2026-09-21.md` §6 方法）：
  *       ① 措辞失实——`role_created`/`permission_assigned` 在**整个源码里不存在**（真实动作是
- *          `role_create`/`role_permissions`/`permission_batch` 等，constants/audit.js:60-67），
+ *          `role_create`/`role_permissions`/`permission_batch` 等，constants/audit.js:62-69），
  *          且本控制器**没有任何 `AuditLog.create`**，角色/权限审计**全部**由全局中间件派生
- *          （utils/auditMeta.js:157 → middleware/security.js:962；挂载 src/app.js:398）。
+ *          （utils/auditMeta.js:157 → middleware/security.js:962；挂载 src/app.js:405——
+ *          旧写 :398，其后已提交批次在挂载行上方累计 +14 行、2026-11-15 dev 访问日志
+ *          脱敏批再 +6 行至 :418，同日密度裁剪批 app.js 注释压缩 −13 行后为 :405）。
  *          锚点更正（2026-10-15）：本括号内三个锚点此前**全部指错位置**——`auditMeta.js:85-103`
  *          是 ACTION_SEGMENT_RE/foldRegisteredAction 的注释区（派生定义在 `:152`）、
  *          `security.js` 的旧值 `:648`（经内容保持式迁移为 `:666` → `:743`）落在
@@ -653,6 +655,9 @@ describe('roleController 覆盖率补齐', () => {
 
   test('对照：下级角色 + targetUserId 不得被误判成同级（守卫不能变成"带参数就拒"）', async () => {
     // 去掉这条对照，"只要 targetUserId 存在就 403"这种把旁路焊死成误杀的改法也能全绿。
+    // 行为变更（审计 I 项）：非内置角色 + targetUserId 由静默丢弃改为 400
+    // TARGET_USER_NOT_CLONABLE——可证伪点不变：拒的必须是请求形状闸（400 + 该注册码），
+    // 而不是同级闸（403 ROLE_PERM_PEER_OR_HIGHER_FORBIDDEN，"带参数就拒"的误杀形态）。
     const lowerRole = await Role.create({
       name: '下级_RCG',
       code: `PEERLOW_RCG_${stamp.toUpperCase()}`,
@@ -665,9 +670,8 @@ describe('roleController 覆盖率补齐', () => {
       .put(`/api/roles/${lowerRole._id}/permissions`)
       .send({ permissions: [String(peerBefore.permissions[0])], targetUserId: midUserId });
     try {
-      expect(res.status).toBe(200);
-      const after = await Role.findById(lowerRole._id).lean();
-      expect(after.permissions.map(String)).toEqual([String(peerBefore.permissions[0])]);
+      expect(res.status).toBe(400);
+      expect(res.body.errors.errorCode).toBe('TARGET_USER_NOT_CLONABLE');
     } finally {
       await Role.findByIdAndDelete(lowerRole._id).catch(() => {});
     }
@@ -692,25 +696,25 @@ describe('roleController 覆盖率补齐', () => {
 
   // ===================== assignPermissions: clone mode (lines 412-502) =====================
 
-  test('assignPermissions: clone mode — non-built-in role + targetUserId → global mode (not clone)', async () => {
-    // Clone mode 只对内置角色生效；自定义角色带 targetUserId 时必须退回「全局改权限」
-    // （rolePermissionController 的 `if (input.targetUserId && role.isBuiltIn)` 为假）。
-    // 原用例只断 200 —— 而「误走了克隆」同样返回 200（克隆分支也是成功路径），
-    // 断言等于没测。现按三条可证伪的后果断言：
-    //   ① 权限确实写到了该自定义角色上；
+  test('assignPermissions: clone mode — non-built-in role + targetUserId → 400（静默退回全局改写已收口）', async () => {
+    // 行为变更（审计 I 项）：clone mode 只对内置角色生效；自定义角色带 targetUserId 此前
+    // 被静默丢弃后照常「全局改权限」——客户端以为只影响一个用户，实际改写整个角色权限表。
+    // 现改为显式 400 TARGET_USER_NOT_CLONABLE。原用例的三条可证伪断言保留其仍然成立的部分：
     //   ② 没有凭空多出一个克隆角色；
-    //   ③ 响应里没有克隆专属字段（clonedRole / clonedCode）。
+    //   ③ 响应里没有克隆专属字段（clonedRole / clonedCode）；
+    //   ④ 目标角色自身权限未被改写（旧断言 ① 在新契约下反转：整体拒绝、不落库）。
     const Role = require('../../models/Role');
 
     const before = await Role.countDocuments({});
     const res = await authed(superToken)
       .put(`/api/roles/${customRoleId}/permissions`)
       .send({ permissions: [permReadId], targetUserId: superUserId });
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(400);
+    expect(res.body.errors.errorCode).toBe('TARGET_USER_NOT_CLONABLE');
 
-    // ① 目标角色自身被改（global 模式语义）
+    // ④ 目标角色未被改写
     const after = await Role.findById(customRoleId).lean();
-    expect(after.permissions.map(String)).toContain(String(permReadId));
+    expect(after.permissions.map(String)).not.toContain(String(permReadId));
 
     // ② 未新增角色（克隆会 createRole）
     expect(await Role.countDocuments({})).toBe(before);

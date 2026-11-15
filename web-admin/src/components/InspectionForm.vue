@@ -407,6 +407,12 @@ const addCheckItem = () => {
   form.checkItems.push({ __uid: ++uidSeq, name: '', standard: '', required: true })
 }
 
+// 注（2026-11-15 核实）：审计建议的「远程搜索加防抖」不属实——el-select 对
+// remote 场景自带内部防抖（select.mjs debounce prop，默认 300ms，remote 为真
+// 才启用），remote-method 经 debouncedOnInputChange 调用，逐字符直发并不存在；
+// 慢响应覆盖新结果的竞态已由上方 useLatestRequest 门票兜底。再加一层防抖只会
+// 把感知延迟叠成 600ms，故不采纳。
+
 // 删除检查项目
 const removeCheckItem = (index) => {
   if (form.checkItems.length > 1) {
@@ -505,7 +511,9 @@ const handleSubmit = async () => {
         inspectionType: form.inspectionType,
         devices: form.devices,
         locations: [],
-        checkItems: form.checkItems,
+        // P3：__uid 是前端行级 diff/渲染用的合成键，不属后端契约——提交前剥离，
+        // 否则随载荷上行（后端按未知字段处理或原样存回，下轮编辑再被当真数据展开）
+        checkItems: form.checkItems.map(({ __uid: _uid, ...item }) => item),
         assignedTo: form.assignedTo,
         planStartTime: form.planStartTime
           ? parseLocalDateTime(form.planStartTime).toISOString()

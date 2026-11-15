@@ -8,6 +8,7 @@
 
 const {
   DEFAULT_MAX_OFFSET_MS,
+  parseMaxOffsetMs,
   parseNtpSynchronized,
   parseTimesyncOffsetMs,
   parseChronyTracking,
@@ -47,5 +48,19 @@ describe('时钟同步前置检查：解析器', () => {
 
   test('默认阈值是明确的 1000ms，且允许部署单收紧', () => {
     expect(DEFAULT_MAX_OFFSET_MS).toBe(1000);
+  });
+
+  test('CLOCK_MAX_OFFSET_MS 严格解析：尾随垃圾不静默按前缀取值（2026-11-14 审计）', () => {
+    // Number.parseInt('30abc') 静默得 30：阈值被环境变量里的一个手误悄悄改变
+    expect(parseMaxOffsetMs('30abc')).toBeNull();
+    expect(parseMaxOffsetMs('500 ')).toBeNull();
+    expect(parseMaxOffsetMs(' 500')).toBeNull();
+    expect(parseMaxOffsetMs('0x20')).toBeNull();
+    expect(parseMaxOffsetMs('-5')).toBeNull();
+    expect(parseMaxOffsetMs('12.5')).toBeNull();
+    // 合法形态照常解析；未配置/空串 ⇒ null（调用方取默认）
+    expect(parseMaxOffsetMs('500')).toBe(500);
+    expect(parseMaxOffsetMs(undefined)).toBeNull();
+    expect(parseMaxOffsetMs('')).toBeNull();
   });
 });

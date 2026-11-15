@@ -430,9 +430,21 @@ describe('RBAC 控制器全覆盖（批次 A）', () => {
       });
     expect(badBatch.status).toBe(400);
 
+    // 合法批量删除：目标必须真的可删。原实现错把 superUser（SUPER_ADMIN）当目标，
+    // 而批量接口对超管目标整批拒绝（CANNOT_DELETE_SUPER_ADMIN），断言无从写起，
+    // 只留下 void goodBatch 死变量——标题「合法 → 200」因此零覆盖（N，2026-11-15 修复）。
+    // 自包含前置：独立创建可删目标（无角色 ⇒ 层级低于操作者，非超管）。
+    const batchVictim = await User.create({
+      username: `rauser${stamp}b`,
+      email: `rauser${stamp}b@example.com`,
+      password: PASSWORD,
+    });
     const goodBatch = await authed()
       .delete('/api/users/batch')
-      .send({ ids: [String(superUser._id)] });
-    void goodBatch;
+      .send({ ids: [String(batchVictim._id)] });
+    expect(goodBatch.status).toBe(200);
+    // 200 也要核对落库效果：批量删除与单个删除同为匿名化，用户不再可识别
+    const afterBatch = await User.findById(batchVictim._id);
+    expect(afterBatch.anonymizedAt).toBeTruthy();
   });
 });

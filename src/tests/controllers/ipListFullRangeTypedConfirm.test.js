@@ -256,7 +256,6 @@ describe('全网段写入：超管打字确认 + 放行留痕', () => {
       reason: '全网段确认-加白成功路径',
       typedConfirm: FULL_RANGE,
     });
-    if (res.status !== 200) console.log('WHITE500', JSON.stringify(res.body));
     expect(res.status).toBe(200);
     const audit = await findAllowAudit(FULL_RANGE);
     expect({ riskLevel: audit.riskLevel, body: audit.body }).toEqual({

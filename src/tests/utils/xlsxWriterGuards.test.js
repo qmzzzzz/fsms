@@ -86,4 +86,23 @@ describe('xlsxWriter 三处口径闸（E8）', () => {
     expect(() => wb.sheet.addRow(['只有一格'])).not.toThrow(); // 数组形态（脚注/水印行）
     expect(() => wb.sheet.addRow('字符串行')).toThrow(TypeError);
   });
+
+  test('④ XML 1.0 非法控制字符剔除含 U+007F 与 C1 控制区（合法空白 \\t\\n\\r 保留）', () => {
+    const wb = createWorkbook({ sheetName: 's', columns: COLUMNS });
+    wb.sheet.addRow({
+      deviceCode: 'A\u0007B\u007FC\u0084D\u009FE',
+      location: '东\u001F楼',
+    });
+    const sst = readPart(wb.toBuffer(), 'xl/sharedStrings.xml').toString('utf8');
+    // C0（除 09/0A/0D）、DEL、C1 全部剔除（本正则的目标就是控制字符，
+    // no-control-regex 在此为误报，需压线豁免）
+    expect(sst).not.toMatch(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/); // eslint-disable-line no-control-regex -- 断言目标即控制字符
+    expect(sst).toContain('ABCDE');
+    expect(sst).toContain('东楼');
+    // 对照组：XML 1.0 合法的三个空白不得被误删（删了会把多行文本压成一行）
+    const wbTab = createWorkbook({ sheetName: 's', columns: COLUMNS });
+    wbTab.sheet.addRow({ deviceCode: '行一\n行二\t列\r尾', location: '' });
+    const sstTab = readPart(wbTab.toBuffer(), 'xl/sharedStrings.xml').toString('utf8');
+    expect(sstTab).toContain('行一\n行二\t列\r尾');
+  });
 });

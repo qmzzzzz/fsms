@@ -99,4 +99,42 @@ describe('锁定账户释放开放指派', () => {
     const targetAfter = await User.findById(target._id).select('status');
     expect(targetAfter.status).toBe('locked');
   });
+
+  test('锁定已落库后释放指派失败：不冒泡成 500，锁定状态保留（后半程异常隔离，审计 2026-11-14 A）', async () => {
+    // save 成功 ⇒ 主状态不可回滚：releaseOpenAssignments 抛错旧实现会让整个请求 500，
+    // 把「已锁定」伪造成失败，还连带跳过后续缓存失效与审计。隔离后只留 error 痕。
+    const userService = require('../../services/userService');
+    const unlock = await authService.setUserLockStatus(
+      target._id,
+      { locked: false },
+      {
+        operatorId: operator._id,
+        operatorUsername: operator.username,
+        ip: '127.0.0.1',
+        userAgent: 'jest',
+      }
+    );
+    expect(unlock.outcome).toBe('OK');
+    const spy = jest
+      .spyOn(userService, 'releaseOpenAssignments')
+      .mockRejectedValueOnce(new Error('release db down'));
+    try {
+      const result = await authService.setUserLockStatus(
+        target._id,
+        { locked: true, reason: '隔离用例' },
+        {
+          operatorId: operator._id,
+          operatorUsername: operator.username,
+          ip: '127.0.0.1',
+          userAgent: 'jest',
+        }
+      );
+      expect(result.outcome).toBe('OK');
+      expect(spy).toHaveBeenCalledTimes(1);
+    } finally {
+      spy.mockRestore();
+    }
+    const targetAfter = await User.findById(target._id).select('status');
+    expect(targetAfter.status).toBe('locked');
+  });
 });

@@ -18,8 +18,7 @@ const { applyDataScopeToQuery } = require('../middleware/rbac');
 const { DATA_SCOPE_FIELDS } = require('../constants/dataScopeFields');
 // 审核结论取值与模型 enum、路由 isIn、OpenAPI 同源（F-150）：闸门与白名单各写一遍时，
 // 单侧加一个值就会出现"路由放行、这里 400"或反向的静默落库
-// 开工/提交/审核三处准入共用巡检域档位表（与 F-137/F-149/F-150 同族：闸门与白名单各写一遍，
-// 单侧加值即放行不落库）。可开始/可提交是「开放档位」的两个互补切片，加一档终态时派生式会漂移。
+// 开工/提交/审核三处准入共用巡检域档位表（与 F-137/F-149/F-150 同族：闸门与白名单各写一遍，单侧加值即放行不落库）。可开始/可提交是「开放档位」的两个互补切片，加一档终态时派生式会漂移。
 const {
   INSPECTION_REVIEW_RESULTS,
   INSPECTION_OPEN_STATUSES,
@@ -38,7 +37,6 @@ const { readPositiveNumberEnv } = require('../utils/envNumber');
  * （`status: {$in:['pending','overdue']}` 放行，`markOverdueInspections` 每轮又把
  * `in_progress` 打回 `overdue`）⇒ 同一个数组无上限增长，而它随详情接口整段返回、
  * 还会 populate executionLog.userId（每条都要再一次 ref 解析）。
- *
  * 封顶取尾部 N 条，同时用 `executionLogCount` 记"总共发生过多少次"：
  * `count > length` 即"有留痕被截断"⇒ 截断这件事可数、不静默
  * （与 xlsx 导出的 X-Export-Truncated 同一口径：宁可声明，不可假装完整）。
@@ -303,6 +301,8 @@ class InspectionService {
     // in_progress 巡检在 planEndTime 过后改写成 overdue，作业人员填到一半回来提交就撞 409，
     // 结果与发现项永久丢失。原子性不受影响——提交成功后 status 变 completed，
     // 重复提交仍匹配不到，"防并发重复提交"这条原始意图完整保留。
+    // runValidators：$set 里的 result enum / remark / findings 子文档校验在 update 路径
+    // 默认不生效（与 updateInspection、AlarmService 同判据，审计 2026-11-14 K）——路由层的 isIn/长度闸仍在，这里补的是直调服务层时的最后防线。
     const updated = await Inspection.findOneAndUpdate(
       {
         _id: inspection._id,
@@ -319,7 +319,7 @@ class InspectionService {
           location: typeof location === 'string' ? { text: location } : location || undefined,
         }),
       },
-      { new: true }
+      { new: true, runValidators: true }
     ).populate(INSPECTION_POPULATE);
     if (!updated) {
       throw ApiError.conflict('巡检未开始、已完成或您不是被指派人');

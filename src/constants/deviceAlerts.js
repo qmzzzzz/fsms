@@ -1,3 +1,5 @@
+'use strict';
+
 /**
  * 设备提醒档的唯一口径声明（与 dataScopeFields.js 同级：两者都是"口径"而非逻辑）。
  *
@@ -24,10 +26,12 @@
  * 所以各档之和可以直接与 total 对齐做一致性断言。
  */
 
+const { DEVICE_STATUS } = require('../utils/constants'); // 设备状态取值的单一来源：本文件此前把 scrapped/maintenance 各抄一份字面量，改值时这里不会跟着动
+
 /** 报废即生命周期终点：不进到期/待维护任何一档 */
-const SCRAPPED = 'scrapped';
+const SCRAPPED = DEVICE_STATUS.SCRAPPED;
 /** 维护中的设备正在做，不重复催 */
-const IN_MAINTENANCE = 'maintenance';
+const IN_MAINTENANCE = DEVICE_STATUS.MAINTENANCE;
 
 const ALERT_EXCLUDED_STATUS = Object.freeze([SCRAPPED]);
 const MAINTENANCE_EXCLUDED_STATUS = Object.freeze([IN_MAINTENANCE, SCRAPPED]);

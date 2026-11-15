@@ -1,12 +1,8 @@
 'use strict';
 
 /**
- * 可选的多进程入口：CLUSTER_WORKERS>1 时 primary fork N 个 worker，否则透传单进程。
- * 前提是已外置 Redis——审计哈希链写序、限流计数、权限缓存失效假定单进程
- * （见 constants/runtime.js），detectMultiProcess 会告警、/readyz 会不就绪。
- * 多副本部署（K8s replicas / compose 实例数）优于本文件；PM2 cluster 等效。
- * worker 异常退出由 primary 补 fork；SIGTERM/SIGINT 先停 fork 再转发，
- * worker 的 gracefulShutdown 负责排空，primary 以 CLUSTER_SHUTDOWN_GRACE_MS 兜底。
+ * 可选的多进程入口：CLUSTER_WORKERS>1 时 primary fork N 个 worker，否则透传单进程。前提是已外置 Redis——审计哈希链写序、限流计数、权限缓存失效假定单进程（见 constants/runtime.js），detectMultiProcess 会告警、/readyz 会不就绪。多副本部署（K8s replicas / compose 实例数）优于本文件；PM2 cluster 等效。
+ * worker 异常退出由 primary 补 fork；SIGTERM/SIGINT 先停 fork 再转发，worker 的 gracefulShutdown 负责排空，primary 以 CLUSTER_SHUTDOWN_GRACE_MS 兜底。
  */
 
 const cluster = require('cluster');
@@ -36,7 +32,21 @@ if (workerCount === 1) {
     cluster.fork();
   }
 
+  // 崩溃循环退避：worker 活过 CRASH_STABLE_MS 视为稳定，连发计数清零；短命连发按指数退避补 fork（1s 起步、封顶 30s）。没有这一层时，一段必崩的启动代码或坏配置会把 fork/die 打成全速空转（每秒数次的进程创建 + 日志风暴），而退避只是把同样的"持续补 fork"契约放慢——永不清零重试次数，也不放弃。
+  const CRASH_STABLE_MS = 10000;
+  const BACKOFF_BASE_MS = 1000;
+  const BACKOFF_MAX_MS = 30000;
+  let crashStreak = 0;
+  const forkedAt = new Map(); // worker.id → fork 时刻（算存活时长用）
+
+  cluster.on('fork', (worker) => {
+    forkedAt.set(worker.id, Date.now());
+  });
+
   cluster.on('exit', (worker, code, signal) => {
+    // 退避判定只看存活时长：活过稳定窗说明是偶发崩溃（清零）；短命退出计连发。先算 uptime 再清 Map——顺序反了就永远查不到 fork 时刻，退避整个失效。
+    const forkTime = forkedAt.get(worker.id);
+    forkedAt.delete(worker.id);
     if (shuttingDown) return;
     const label = `worker#${worker.id}(pid=${worker.process.pid})`;
     if (signal) {
@@ -44,7 +54,21 @@ if (workerCount === 1) {
     } else {
       console.error(`[cluster] ${label} 以退出码 ${code} 退出，将补 fork`);
     }
-    cluster.fork();
+    const uptime = Number.isFinite(forkTime) ? Date.now() - forkTime : CRASH_STABLE_MS;
+    crashStreak = uptime >= CRASH_STABLE_MS ? 0 : crashStreak + 1;
+    const delayMs = Math.min(BACKOFF_BASE_MS * 2 ** (crashStreak - 1), BACKOFF_MAX_MS);
+    if (delayMs <= 0) {
+      cluster.fork();
+      return;
+    }
+    console.error(
+      `[cluster] 短命连发 ×${crashStreak}（存活 ${uptime}ms < 稳定窗 ${CRASH_STABLE_MS}ms），` +
+        `${delayMs}ms 后补 fork`
+    );
+    setTimeout(() => {
+      // 等待期间可能收到关停信号——不检查的话退避定时器会逆着 shutdown 再 fork 一个
+      if (!shuttingDown) cluster.fork();
+    }, delayMs);
   });
 
   const shutdown = (signal) => {
@@ -56,10 +80,7 @@ if (workerCount === 1) {
     for (const worker of Object.values(cluster.workers)) {
       worker.kill(signal);
     }
-    // primary 自身不等 worker 排空完成（worker 的 gracefulShutdown 各自决定退出时机；
-    // 等全部退出再退 primary 会把总关停时间拖成最慢 worker 的尾巴，且容器编排器
-    // 的宽限期只看进程树是否结束）。留一个兜底定时器，防止个别 worker 卡死时
-    // primary 永久驻留。
+    // primary 自身不等 worker 排空完成（worker 的 gracefulShutdown 各自决定退出时机；等全部退出再退 primary 会把总关停时间拖成最慢 worker 的尾巴，且容器编排器的宽限期只看进程树是否结束）。留一个兜底定时器，防止个别 worker 卡死时 primary 永久驻留。
     const graceMs = parseInt(process.env.CLUSTER_SHUTDOWN_GRACE_MS, 10);
     setTimeout(
       () => process.exit(0),

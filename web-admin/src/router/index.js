@@ -224,8 +224,10 @@ router.beforeEach(async (to, from, next) => {
   // 前端守卫提前收敛，避免用户点一圈菜单全是 403。
   const mustChangePassword = authStore.currentUser?.mustChangePassword === true
 
-  // 已登录用户访问登录页 -> 跳首页（强制改密账户先去改密）
-  if (to.name === 'login' && authenticated) {
+  // 已登录用户访问登录/注册页 -> 跳首页（强制改密账户先去改密）。
+  // P3：/register 此前漏拦——已登录用户仍可打开注册页再建一个账号，
+  // 与 /login「已登录即跳走」的口径不一致
+  if ((to.name === 'login' || to.name === 'register') && authenticated) {
     next(mustChangePassword ? '/profile' : '/dashboard')
     return
   }

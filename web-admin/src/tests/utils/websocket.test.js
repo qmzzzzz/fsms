@@ -176,6 +176,14 @@ describe('websocket.js（P1-27）', () => {
     sock.io.emit('reconnect_failed')
     expect(svc.reconnectExhausted).toBe(true)
     expect(giveUp).toHaveBeenCalledTimes(1)
+    // P2-6：耗尽后通道不可自愈，必须上报降级（与 auth-error 同口径），不能只依赖
+    // 「恰好有人注册了 onGiveUp」才可观测
+    expect(reportDegradation).toHaveBeenCalledTimes(1)
+    expect(reportDegradation.mock.calls[0][0]).toContain('重连次数耗尽')
+    expect(reportDegradation.mock.calls[0][1]).toMatchObject({
+      reason: 'reconnect-exhausted',
+      url: 'http://ws.example',
+    })
 
     // 再次 connect 会清除耗尽标记（新一轮连接开始）
     svc.connect()
@@ -377,11 +385,14 @@ describe('websocket.js（P1-27）', () => {
    * 修前这里是「未连接时静默丢弃」——调用方拿不到任何区分，断线窗口里丢掉的
    * join-room 不会自愈（重连后房间不会自动重建，表现为"连着却收不到推送"）。
    * 现在三件事一起断言，缺一条都等于把"静默"换个说法：
-   *   ① 未连接返回 false 且不 emit（不假装发了）；
-   *   ② 已连接返回 true 且 emit 一次（不假装没发）；
+   *   ① 未就绪返回 false 且不 emit（不假装发了）；
+   *   ② 已连接且已鉴权返回 true 并 emit 一次（不假装没发）；
    *   ③ 丢弃计入 droppedSends 并触发一次降级上报（丢弃在监控里可见）。
+   * P2-7（2026-11-15）：「未就绪」从「未连接」扩大为「未连接或未完成握手鉴权」——
+   * 传输层连通 ≠ 服务端 authenticateSocket 链路结束，握手窗口内发出的业务事件
+   * 会被服务端以「请先完成认证」拒绝且不会重试。
    */
-  test('send：未连接返回 false 并计入丢弃，已连接返回 true 并 emit', async () => {
+  test('send：未就绪（未连接/未鉴权）返回 false 并计入丢弃，就绪后返回 true 并 emit', async () => {
     const sock = new FakeSocket()
     ioMock.mockReturnValue(sock)
     const { WebSocketService } = await loadModule()
@@ -395,12 +406,19 @@ describe('websocket.js（P1-27）', () => {
     expect(reportDegradation).toHaveBeenCalledTimes(1)
     expect(reportDegradation.mock.calls[0][1]).toMatchObject({ event: 'join-room', dropped: 1 })
 
+    // P2-7：传输层已连通但 authenticated 还没到——握手窗口内不得发出业务事件
     svc.connect()
     sock.connected = true
+    sock.fire('connect')
+    expect(svc.send('join-room', 'alarms')).toBe(false)
+    expect(sock.emitted).toHaveLength(0)
+    expect(svc.droppedSends).toBe(2)
+
+    sock.fire('authenticated')
     expect(svc.send('join-room', 'alarms')).toBe(true)
     expect(sock.emitted).toEqual([['join-room', 'alarms']])
     // 发送成功不增加丢弃计数（否则"发出去的"和"丢掉的"会被混成一个数）
-    expect(svc.droppedSends).toBe(1)
+    expect(svc.droppedSends).toBe(2)
   })
 
   test('send：丢弃上报按 10s 节流，但 droppedSends 照常累计', async () => {

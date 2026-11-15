@@ -4,9 +4,7 @@
  * 粘滞层（2026-11-04 渗透测试后补）：仅有失败计数窗时，闸门随窗口滑动解除——429 冷却一结束、
  * 失败行一出窗，口令校验就恢复，攻击者按「3 次猜测 + 等窗口」可持续枚举（实测攻破记录在案）。
  * 故判据再加一条：判据窗内只要存在本闸拦下的痕迹（login_captcha_rejected 行，6 小时粘滞窗、
- * 以最近一次成功登录为清零点），挑战持续生效。粘滞只要求验证码**不锁定账户**：账户主人过一次
- * 人机验证并成功登录即清零，攻击者刷不出比「要求验证码」更强的拒绝效果——可用性 DoS 的边界
- * 与首版决策一致。
+ * 以最近一次成功登录为清零点），挑战持续生效。粘滞只要求验证码**不锁定账户**：账户主人过一次人机验证并成功登录即清零，攻击者刷不出比「要求验证码」更强的拒绝效果。
  */
 const AuditLog = require('../models/AuditLog');
 const loginGuard = require('../config/loginGuard');
@@ -20,7 +18,7 @@ const CHALLENGE_WINDOW_MS = loginGuard.challengeWindowMs;
 /** 粘滞窗：闸门拦下的尝试在此窗口内持续要求挑战（比失败计数窗长两个量级，见文件头粘滞层说明） */
 const CHALLENGE_STICKY_WINDOW_MS = loginGuard.challengeStickyMs;
 /** 与 securityAlert.checkBruteForce 统计同一批失败动作，避免两处口径分叉；闸门自身拦下的尝试写 login_captcha_rejected，刻意不进本清单——否则「被拦下」会变成新的失败计数，闸门自己把自己焊死 */
-// 'ip_range_denied'（2026-11-03，P2-7）：IP 范围拒绝同样是失败尝试，不计数则被拒 IP 可无限探测而不推进挑战闸。行由 assertAccountUsable 写入，字段与 login_failed 同形。
+// 'ip_range_denied'（2026-11-03，P2-7）：IP 范围拒绝同样是失败尝试，不计数则被拒 IP 可无限探测。行由 assertAccountUsable 写入，字段与 login_failed 同形。
 const FAILURE_ACTIONS = ['login_failed', 'auth_failed', 'ip_range_denied', 'login_rate_limited']; // 429 同样是失败尝试（只推进挑战闸，不计 lockUntil）
 const CAPTCHA_REJECTED_ACTION = 'login_captcha_rejected'; // 留痕专用动作：与 FAILURE_ACTIONS 分账，写它不推进挑战/爆破任何一方的计数
 const CAPTCHA_TRIGGERS = Object.freeze({
@@ -32,8 +30,7 @@ const CAPTCHA_TRIGGERS = Object.freeze({
  *
  * 两条判据共用同一个「最近一次成功登录」清零点：成功登录证明账户主人通过了人机验证，
  * 此前的挑战证据全部作废（否则粘滞会跟到下一次登录之后，把一次性事件变成常态摩擦）。
- * 失败计数沿用原语义——计数起点 = max(15 分钟窗起点, 最近成功时间)；把成功查询从
- * 「窗口内」放宽为「不限窗」后该式与原实现逐值等价（窗口内的成功本就是两者取大）。
+ * 失败计数沿用原语义——计数起点 = max(15 分钟窗起点, 最近成功时间)；把成功查询放宽为「不限窗」后该式与原实现逐值等价（窗口内的成功本就是两者取大）。
  */
 const isChallengeRequired = async (username) => {
   if (typeof username !== 'string' || !username.trim()) return false;
@@ -41,9 +38,8 @@ const isChallengeRequired = async (username) => {
   const stickyStart = new Date(Date.now() - CHALLENGE_STICKY_WINDOW_MS);
   try {
     // 查询键与写入侧同一把尺（审计 2026-11-02 B-F-2）：审计行的 username 经
-    // model set 钩子清洗，filter 不应用 setter——请求方在用户名前后附加空白/控制字符时原文键恒查 0 行，挑战判据永远不触发（挑战闸恰好是最该对
-    // 撞库变体生效的一层）。cleanAuditUsername 与 constants/audit.js 的写入
-    // 钩子同源，对同一输入产出与落库行相同的键。
+    // model set 钩子清洗，filter 不应用 setter——请求方在用户名前后附加空白/控制字符时
+    // 原文键恒查 0 行，挑战判据永远不触发。cleanAuditUsername 与 constants/audit.js 的写入钩子同源，对同一输入产出与落库行相同的键。
     const usernameKey = cleanAuditUsername(username);
     const collation = AuditLog.AUDIT_USERNAME_COLLATION;
     const lastSuccess = await AuditLog.findOne({
@@ -64,8 +60,7 @@ const isChallengeRequired = async (username) => {
     }).collation(collation);
     if (failures >= CHALLENGE_AFTER_FAILURES) return true;
     // 粘滞判据：失败计数窗滑走后，闸门拦下的痕迹（login_captcha_rejected）仍在粘滞窗内
-    // 就持续要求挑战。阈值取 1：能出现一条被拦行，就证明挑战曾对同一用户名生效且被无验证码
-    // 的一方规避——这正是要钉住的枚举节奏。行数只增不减（闸门自己不写失败行，无自锁回路）。
+    // 就持续要求挑战。阈值取 1：能出现一条被拦行，就证明挑战曾对同一用户名生效且被无验证码的一方规避。行数只增不减（闸门自己不写失败行，无自锁回路）。
     const stickySince = successTs && successTs > stickyStart ? successTs : stickyStart;
     const gateBlocked = await AuditLog.countDocuments({
       username: usernameKey,
@@ -85,6 +80,19 @@ const REJECT_REASONS = Object.freeze([
   'unspecified',
 ]);
 const reasonOf = (trigger) => (REJECT_REASONS.includes(trigger) ? trigger : 'unspecified');
+// 同键短窗去重（审计 2026-11-14 J，与 services/loginRateLimitAudit 同判据）：被拦下的
+// 尝试每个请求都写一行的话，攻击流量等于把审计库打爆。同键 60s 只记一条；键带上
+// 拦下层与出示形态——同一用户名「没带验证码」与「带错验证码」是两个信号，各自独立去重。
+// 代价与兄弟模块一致：窗口内只留一条，证明的是「发生过」而不是「发生了几次」。
+const REJECT_DEDUPE_TTL_MS = 60 * 1000;
+const REJECT_DEDUPE_MAX_KEYS = 512;
+const recentRejects = new Map();
+
+const rejectDedupeKeyOf = (reason, username, captchaSubmitted) =>
+  `${reason}:${String(username).trim().toLowerCase().slice(0, 64)}:${
+    captchaSubmitted ? 'submitted' : 'absent'
+  }`;
+
 /** 闸门拦下时落一条失败审计（审计二-3「失败尝试落库留痕」）：写失败走 onAuditWriteFailure（error 日志 + audit_write_failed/high）且永不 reject、同步抛（模型未就绪/CastError）同样就地吞下——调用方在登录路径上，一个异常就把 400 变成 500。`reason` 是自由文本字段、schema 侧无清洗，而本函数是导出件 ⇒ 只写闭集（`captcha_switch` / `challenge_required` / `unspecified`）里的值，调用方传什么都不会原样落库 */
 const recordCaptchaRejected = async ({
   username,
@@ -96,6 +104,17 @@ const recordCaptchaRejected = async ({
 }) => {
   if (typeof username !== 'string' || !username.trim()) return null;
   const reason = reasonOf(trigger);
+  const now = Date.now();
+  const dedupeKey = rejectDedupeKeyOf(reason, username, captchaSubmitted);
+  const last = recentRejects.get(dedupeKey);
+  if (last !== undefined && now - last < REJECT_DEDUPE_TTL_MS) return null;
+  recentRejects.set(dedupeKey, now);
+  // 键数上限（按插入顺序丢最旧）：判据窗是长驻 Map，不设上界就是内存泄漏面
+  while (recentRejects.size > REJECT_DEDUPE_MAX_KEYS) {
+    const oldest = recentRejects.keys().next();
+    if (oldest.done) break;
+    recentRejects.delete(oldest.value);
+  }
   try {
     return await AuditLog.create({
       action: CAPTCHA_REJECTED_ACTION,

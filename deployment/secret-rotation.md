@@ -32,12 +32,15 @@ tmpfs 删掉，三者是这条链的组成部分（契约见
 本手册里的 `node scripts/…` 与 `./scripts/….sh` 一律在**宿主机**执行，原因有两条，
 两条都不可绕过：
 
-- 运行镜像里**没有**这些脚本。`Dockerfile:122-124` 只 `COPY` 了
-  `scripts/destructiveGuard.js` 一个文件进镜像——其余 `scripts/` 里是带 `--apply`
-  的破坏性运维脚本，故意不进镜像（容器被攻破时拿不到灭迹工具）。
+- 运行镜像里**没有**这些脚本。Dockerfile 的 builder/runtime 两个阶段按**单文件白名单**
+  `COPY`，`scripts/` 里只有 `scripts/destructiveGuard.js` 与 `scripts/hotUpgradePolicy.js`
+  两个文件进镜像（运行期 require 需要，Dockerfile 各行有注释说明）——其余 `scripts/` 里
+  是带 `--apply` 的破坏性运维脚本，故意不进镜像（容器被攻破时拿不到灭迹工具）。
   所以「用 `docker compose exec` 把 `verify-audit-chain.js` 塞进 app 容器里跑」**不是**替代写法，
   那条路径只会得到 `Cannot find module`。
-- compose 的 `app` 服务只挂了 `app-logs` 一个卷（`docker-compose.yml:136-137`），
+- compose 的 `app` 服务只挂两个卷：`app-logs` 命名卷（`/app/logs`）与升级队列的
+  bind mount（`${UPGRADE_QUEUE_HOST_DIR:-/var/lib/fsms/upgrade}` → 容器内
+  `/var/lib/fsms/upgrade`，仅此一个目录，见 app 服务的 volumes 段）——
   宿主机上的 `scripts/` 没有映射进容器，也没有可写入口可以把脚本"送进去"
   （`docker compose cp` 进去的东西在容器重建时消失，且绕过了上一条的安全意图）。
 
@@ -46,7 +49,8 @@ tmpfs 删掉，三者是这条链的组成部分（契约见
 `src/config/secrets.js` 的回填只在进程启动时读 `process.env`，
 不会有人替你在宿主机上 export。忘记前缀的后果不是报错难懂，是**看起来在收尾、
 其实什么都没验**：`verify-audit-chain.js` 缺 `HMAC_SECRET` 时按设计退出 2
-（"校验不完整，不得当作链是好的"，见该脚本头注释第 19-24 行），
+（"校验不完整，不得当作链是好的"，见 `scripts/verify-audit-chain.js` 头注释
+「退出码」一段；行号会漂移，这里只给符号位），
 而本手册要求的是退出码 0。
 
 各步骤需要点名的密钥（按脚本实际读取的 `process.env` 项列出，不多给）：
@@ -201,7 +205,7 @@ ALLOWED_SOURCE_DB=<库名> MONGODB_URI_FILE=./secrets/mongodb_uri \
 #### 第 5 点：审计链签名检查点
 
 `services/auditChainCheckpoint.js` 用 `HMAC_SECRET` 给「某一时刻的链尾 + 记录数」
-签名（`hmacSecretOf`，见该文件第 41 行起），用于补上链内校验的两类盲区：
+签名（`hmacSecretOf`，见 `src/services/auditChainCheckpoint.js`），用于补上链内校验的两类盲区：
 已知锚点后插枝、尾部截断。
 
 换钥后**旧检查点全部验签失败**：
@@ -382,8 +386,9 @@ JSON 无法解析、集合为空或含空 kid/secret、任一密钥弱于 32 字
 - [ ] `docker compose config` 输出与 CI 日志中不再出现任何密钥明文
 - [ ] 配置自校验通过——**在容器里跑**，不要在宿主机跑：
       `docker compose exec -T app npm run validate`
-      （`npm run validate` = `node src/config/validate.js`，`src/` 与 `package.json` 都在镜像里，
-      见 `Dockerfile:117,125`；而 compose 只往容器里注入 `*_FILE`，
+      （`npm run validate` = `node src/config/validate.js`，`src/` 与 `package.json` 都在镜像里
+      （Dockerfile runtime 阶段对 `src/`、`package*.json` 的 `COPY --from=builder` 各行）；
+      而 compose 只往容器里注入 `*_FILE`，
       宿主机上这些变量根本是空的——在宿主机跑这条会得到"缺密钥"的红，
       那是没喂配置，不是轮换出错。宿主机侧要跑就得逐条点名 `*_FILE=./secrets/<name>`。）
 - [ ] 抽查日志无「MFA 种子解密失败」「hmac 失配」告警

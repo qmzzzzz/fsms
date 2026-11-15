@@ -100,6 +100,8 @@ const fireDeviceSchema = new mongoose.Schema(
     checkCycle: {
       type: Number,
       default: 30, // 默认 30 天检查周期
+      min: [1, '检查周期至少 1 天'], // 模型级边界（对齐 deviceRoutes 校验的 1-365）：pre('save') 拿它推 nextCheckDate，0/负数会把排期钉在 lastCheckDate 当天或过去，提醒扫描的 needMaintenance 档立刻误报
+      max: [365, '检查周期最多 365 天'], // 上限挡绕过路由的直写（initData/修复脚本）录成无意义的超长周期
     },
     maintenanceRecord: [
       {

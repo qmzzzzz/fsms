@@ -138,7 +138,7 @@ const DECOY_INSPECTIONS = frozenRows([
     checkItems: [{ name: '消火栓遮挡', standard: '栓前 1m 内不得堆放', required: true }],
     assignedTo: [{ _id: 'hp-u3', username: 'wangfang', realName: '王芳' }],
     createdBy: 'hp-u1',
-    planStartTimeOffsetMin: 60 * 24 * 3, // 已过 planEndTime：调度器把开放计划改成 overdue（constants/inspection.js:28）
+    planStartTimeOffsetMin: 60 * 24 * 3, // 已过 planEndTime：调度器把开放计划改成 overdue（constants/inspection.js:30）
     planEndTimeOffsetMin: 60 * 2,
     status: 'overdue',
     remark: '超期未执行',

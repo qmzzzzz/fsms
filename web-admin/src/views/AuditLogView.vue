@@ -1229,6 +1229,9 @@ const loadAlerts = async () => {
 // 链完整性核验：结论分 success / warning / error 三档，
 // 判绿依据后端的 canAttestIntact（扫全+无断+各层真跑过），不能只看 intact。
 const verifyChain = async () => {
+  // 同步重入锁：核验是后端扫链的重操作，:disabled 只挡下一次渲染后的点击，
+  // 挡不住同 tick 的双触发（连点/键盘），并发两轮纯属浪费且结论框弹两个
+  if (verifying.value) return
   verifying.value = true
   try {
     const res = await api.security.verifyAuditChain({
@@ -1330,6 +1333,8 @@ const extractBlobErrorMessage = async (data, fallback) => {
 }
 
 const exportLogs = async () => {
+  // 同步重入锁：导出是重操作（后端全量导出+文件下载），同 tick 双触发会并发两轮下载
+  if (exporting.value) return
   exporting.value = true
   try {
     const params = {
@@ -1394,6 +1399,9 @@ const exportLogs = async () => {
 const forensicExporting = ref(false)
 
 const exportForensic = async () => {
+  // 同步重入锁：按钮 :disabled 与 reauth 提交路径（:tag==='forensic'）都能触发本函数，
+  // 同 tick 双触发会并发两轮取证导出（还各烧一次 reauth 票据）
+  if (forensicExporting.value) return
   forensicExporting.value = true
   try {
     const response = await api.security.exportAuditLogs(buildFilterParams())

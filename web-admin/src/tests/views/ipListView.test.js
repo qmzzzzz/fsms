@@ -696,7 +696,13 @@ describe('IpListView 新增名单条目', () => {
       durationHours: 24,
     })
     await waitFor(() => ElMessage.success.mock.calls.length === 1, { message: '成功提示' })
-    expect(ElMessage.success).toHaveBeenCalledWith('已将 10.9.9.9 黑名单')
+    // P3：security.added 已是完整插值句（原「已将」是残缺句）
+    expect(ElMessage.success).toHaveBeenCalledWith(
+      i18n.global.t('security.added', {
+        ip: '10.9.9.9',
+        list: i18n.global.t('security.blacklist'),
+      })
+    )
     await waitFor(() => listParams().page === 1 && listCalls().length >= 3, {
       message: '回第 1 页重载',
     })
@@ -814,7 +820,12 @@ describe('IpListView 新增名单条目', () => {
       reason: 'trusted_source',
       durationHours: 0,
     })
-    expect(ElMessage.success).toHaveBeenCalledWith('已将 10.7.7.7 白名单')
+    expect(ElMessage.success).toHaveBeenCalledWith(
+      i18n.global.t('security.added', {
+        ip: '10.7.7.7',
+        list: i18n.global.t('security.whitelist'),
+      })
+    )
   })
 
   test('同一 tick 连点「加入黑名单」三次：只发一个 POST（重入锁）', async () => {

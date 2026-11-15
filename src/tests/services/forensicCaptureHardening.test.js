@@ -6,6 +6,12 @@
  * 只断言"函数被调用过"的用例在本文件一律不收——实现改坏时它们仍然是绿的。
  */
 
+// 写入前快照原值（env 泄漏收口）：FORENSIC_WAL_PATH 由 lifecycle 的 startup() 运行期现读，
+// 不还原的话同 worker 后续套件拿到的是空串 ⇒ 取证 WAL 被静默关掉
+const PREV_FORENSIC_ENVS = {
+  FORENSIC_CAPTURE_ENABLED: process.env.FORENSIC_CAPTURE_ENABLED,
+  FORENSIC_WAL_PATH: process.env.FORENSIC_WAL_PATH,
+};
 process.env.FORENSIC_CAPTURE_ENABLED = 'true';
 process.env.FORENSIC_WAL_PATH = '';
 
@@ -349,4 +355,9 @@ describe('P1-7：recordHash 落库后可复算', () => {
 afterAll(async () => {
   const mongoose = require('mongoose');
   if (mongoose.connection.readyState !== 0) await mongoose.connection.close();
+  // env 随套件归还（快照见文件头）：WAL_PATH 空串不还的话，后续套件的取证 WAL 被静默关掉
+  for (const [key, prev] of Object.entries(PREV_FORENSIC_ENVS)) {
+    if (prev === undefined) delete process.env[key];
+    else process.env[key] = prev;
+  }
 });

@@ -254,9 +254,12 @@
     >
       <el-form ref="formRef" :model="dialog.form" :rules="dialogRules" label-width="100px">
         <el-form-item :label="$t('device.deviceCode')" prop="deviceCode">
+          <!-- P3（口径对齐）：deviceRoutes 已把 deviceCode 收紧为必填（notEmpty + max50），
+               服务端从未实现「留空自动生成」——旧占位文案会诱导用户留空吃 400。
+               占位改为必填提示，并补镜像 required 校验（编辑态输入框禁用且必有回填值）。 -->
           <el-input
             v-model="dialog.form.deviceCode"
-            :placeholder="$t('messages.autoGenerate')"
+            :placeholder="$t('device.deviceCodeRequiredHint')"
             maxlength="50"
             :disabled="dialog.isEdit"
           />
@@ -410,7 +413,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, computed, h } from 'vue'
+import { ref, reactive, onMounted, onUnmounted, computed, h } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 
@@ -529,6 +532,9 @@ const dialog = reactive({
 
 // 表单校验规则：随语言切换动态重建（消息文案跟随 i18n）
 const dialogRules = computed(() => ({
+  // P3：镜像后端 deviceRoutes 的必填口径——旧文案宣称「留空自动生成」而服务端
+  // 从未实现，留空只会得到一次 400
+  deviceCode: [{ required: true, message: t('device.deviceCodeRequiredHint'), trigger: 'blur' }],
   deviceName: [{ required: true, message: t('device.deviceName'), trigger: 'blur' }],
   deviceType: [{ required: true, message: t('messages.selectRequired'), trigger: 'change' }],
   installDate: [
@@ -1005,6 +1011,14 @@ const refreshAllDebounced = () => {
   clearTimeout(refreshAllTimer)
   refreshAllTimer = setTimeout(refreshAll, 800)
 }
+// P3：防抖定时器随卸载清理。离开页面后到期的 setTimeout 仍会触发 refreshAll，
+// 对着已卸载的组件再打 3 个 GET（useLatestRequest 只守卫响应写回，拦不住请求发出）
+onUnmounted(() => {
+  if (refreshAllTimer) {
+    clearTimeout(refreshAllTimer)
+    refreshAllTimer = null
+  }
+})
 
 // 设备状态迁移（含报废）由后端推送到 'device-alert' 房间；收到即刷新三块。
 // 此前该房间没有任何前端订阅，别人改了设备状态，本页要手动刷新才能看到。

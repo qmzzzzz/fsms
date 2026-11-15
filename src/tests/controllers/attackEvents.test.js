@@ -338,10 +338,13 @@ describe('GET /api/security/attack-events 攻击告警查询', () => {
     expect(windowed.body.data[0].ip).toBe(OLD_IP);
   });
 
-  test('参数矛盾回 400 文案而不是静默空集或 500', async () => {
+  test('参数矛盾回 400 注册码而不是回显 error.message、静默空集或 500', async () => {
     const conflict = await getList({ attackType: 'probe', action: 'login_failed' });
     expect(conflict.status).toBe(400);
-    expect(conflict.body.message).toContain('恒空');
+    // 400 出口不再回显 error.message（意外异常的消息可能携带内部细节），
+    // 统一走注册表 VALIDATION_FAILED，文案归前端 i18n
+    expect(conflict.body.errors.errorCode).toBe('VALIDATION_FAILED');
+    expect(conflict.body.message).not.toContain('恒空');
 
     const reversed = await getList({ startDate: '2026-11-03', endDate: '2026-11-01' });
     expect(reversed.status).toBe(400);

@@ -135,18 +135,23 @@ describe('LoginView 口令加密轨（FE-H1）', () => {
   test('加密抛错：阻断提交（不发请求）+ 提示重试，绝不静默明文上行', async () => {
     encryptPassword.mockRejectedValue(new Error('webcrypto broken'))
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    const c = await open()
-    await fill(c, 'alice', 'Str0ng-Pass')
-    click(submitBtn(c))
-    await waitFor(() => ElMessage.error.mock.calls.length >= 1, { message: '加密失败提示' })
-    expect(login).not.toHaveBeenCalled()
-    expect(ElMessage.error).toHaveBeenCalledTimes(1)
-    expect(ElMessage.success).not.toHaveBeenCalled()
-    // 用户仍停在登录页（等足导航窗口），且密码框内容仍在（可重试）
-    await flush(20)
-    expect(c.router.currentRoute.value.path).toBe('/login')
-    expect(warn).toHaveBeenCalled()
-    warn.mockRestore()
+    // S（2026-11-15）：mockRestore 原先只在成功路径末尾——中间任一断言抛错
+    // （如 waitFor 超时）就会把 console.warn 替身泄漏给同文件后续用例，改 finally。
+    try {
+      const c = await open()
+      await fill(c, 'alice', 'Str0ng-Pass')
+      click(submitBtn(c))
+      await waitFor(() => ElMessage.error.mock.calls.length >= 1, { message: '加密失败提示' })
+      expect(login).not.toHaveBeenCalled()
+      expect(ElMessage.error).toHaveBeenCalledTimes(1)
+      expect(ElMessage.success).not.toHaveBeenCalled()
+      // 用户仍停在登录页（等足导航窗口），且密码框内容仍在（可重试）
+      await flush(20)
+      expect(c.router.currentRoute.value.path).toBe('/login')
+      expect(warn).toHaveBeenCalled()
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   test('校验失败后重入锁必须释放：修正输入后仍可成功提交（不得被永久锁死）', async () => {

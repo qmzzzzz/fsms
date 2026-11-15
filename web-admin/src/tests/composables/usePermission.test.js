@@ -20,7 +20,9 @@ describe('usePermission', () => {
     expect(hasPerm('device:read')).toBe(true) // 精确
     expect(hasPerm('user:delete')).toBe(true) // 模块通配
     expect(hasPerm('device:create')).toBe(false)
-    expect(hasPerm('')).toBe(true) // 可选权限语义
+    // 空权限码 fail-closed（2026-11-14 审计修复：原「可选权限语义」放行空串属 fail-open；
+    // 所有生产调用方已在调用前短路空码，单源本身对空码一律拒绝）
+    expect(hasPerm('')).toBe(false)
   })
 
   test('hasAllPerms / hasAnyPerm 组合判断', () => {

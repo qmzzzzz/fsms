@@ -75,24 +75,32 @@ describe('currentUsername 的取值臂', () => {
 });
 
 describe('hardenPath 的提示渲染', () => {
-  test('含空格的路径在失败提示里被加引号（可直接粘贴）', () => {
-    if (!isWindows) return;
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fsms acl space '));
-    try {
-      execFileSync.__setImpl(() => {
-        throw new Error('注入的 icacls 失败');
-      });
-      const logs = [];
-      const result = hardenPath(dir, { isDir: true, recursive: true, log: (m) => logs.push(m) });
-      expect(result.ok).toBe(false);
-      expect(result.detail).toBe('注入的 icacls 失败');
-      const hint = logs.find((m) => m.includes('请手动执行'));
-      expect(hint).toContain('icacls "' + dir + '"');
-      expect(hint).toContain('/reset');
-      expect(hint).toContain('/inheritance:r');
-    } finally {
-      execFileSync.__setImpl(null);
-      fs.rmSync(dir, { recursive: true, force: true });
+  // P（2026-11-15）：icacls 提示渲染只在 Windows 分支可达，原写法
+  // `if (!isWindows) return` 在非 Windows 上是静默绿通过（违背仓库纪律
+  // 「不静默 return」）——改为显式 test.skip：意图可见、不计绿。
+  const itOnWindows = isWindows ? test : test.skip;
+  itOnWindows(
+    isWindows
+      ? '含空格的路径在失败提示里被加引号（可直接粘贴）'
+      : '含空格的路径在失败提示里被加引号 — SKIPPED：非 Windows 无 icacls，分支不可达',
+    () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fsms acl space '));
+      try {
+        execFileSync.__setImpl(() => {
+          throw new Error('注入的 icacls 失败');
+        });
+        const logs = [];
+        const result = hardenPath(dir, { isDir: true, recursive: true, log: (m) => logs.push(m) });
+        expect(result.ok).toBe(false);
+        expect(result.detail).toBe('注入的 icacls 失败');
+        const hint = logs.find((m) => m.includes('请手动执行'));
+        expect(hint).toContain('icacls "' + dir + '"');
+        expect(hint).toContain('/reset');
+        expect(hint).toContain('/inheritance:r');
+      } finally {
+        execFileSync.__setImpl(null);
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
     }
-  });
+  );
 });

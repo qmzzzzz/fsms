@@ -331,7 +331,7 @@ const removeIPEntry = asyncHandler(async (req, res) => {
         coveredFamilies,
         operator: req.user.username,
       });
-      ipListService.recordPrivilegeEscalation({
+      await ipListService.recordPrivilegeEscalation({
         action: 'privilege_escalation',
         category: 'security',
         userId: req.user.userId,

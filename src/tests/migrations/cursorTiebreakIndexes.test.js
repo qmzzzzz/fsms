@@ -140,6 +140,9 @@ describe('游标平局裁决复合索引：迁移与声明对账', () => {
         // 未捕获的 NamespaceNotFound 会让整条 `migrate-mongo up` 停在半途
         await expect(migration.up(fresh.db)).resolves.toBeUndefined();
       } finally {
+        // up() 已经把集合/索引建出来了：库随连接一起丢弃（与本文件 beforeAll 里
+        // ISOLATED_DB 的 afterAll 口径一致——执行侧不往共享 mongod 留任何库）
+        await fresh.db.dropDatabase().catch(() => {});
         await fresh.close();
       }
     });

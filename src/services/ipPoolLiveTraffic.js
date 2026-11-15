@@ -4,18 +4,14 @@ const AuditLog = require('../models/AuditLog');
 const { ipMatchesEntry } = require('../utils/ipUtils');
 const { cidrOf } = require('./ipPoolCluster');
 
-/** 只看「人真的在用系统」的方法：GET 是浏览/查看（审计中间件默认全量记），写操作更是铁证。HEAD/OPTIONS 不算——探测脚本也会发。 */
 const ACTIVITY_METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'];
 
-/** 默认 15 分钟：足够长到能看见「刚才还有人在这栋楼里干活」，又短到不会因为一台三天前在线过的设备永久挡住封禁 */
 const DEFAULT_LOOKBACK_MS = 15 * 60 * 1000;
 
-/** 候选上限：捞满即视为还有没看到的行，只能保守说有活动（见 segmentHasLiveTraffic） */
 const CANDIDATE_LIMIT = 200;
 
 const state = { checks: 0, refused: 0, lastError: null };
 
-/** 把 IP 收敛到网段键：与聚类同一口径（复用 cidrOf，不另立一套切分算法） */
 const segmentOfIp = (ip) => {
   if (!ip || typeof ip !== 'string') return null;
   const parts = ip.split('.');
@@ -25,8 +21,7 @@ const segmentOfIp = (ip) => {
   return null;
 };
 
-// 取行漏斗只管「别把整张表捞进来」，判据由 ipMatchesEntry 出（本仓库唯一的 CIDR 包含判断）。
-// 唯一硬要求是**超集**：窄一格就漏行，答 live:false 放行封禁（fail-open）；宽了只是多挡封禁。
+// 取行漏斗只管「别把整张表捞进来」，判据由 ipMatchesEntry 出（本仓库唯一的 CIDR 包含判断）。唯一硬要求是**超集**：窄一格就漏行，答 live:false 放行封禁（fail-open）；宽了只是多挡封禁。
 const decGroup = (lo, hi) => {
   const out = [];
   const t1 = Math.floor(lo / 10);
@@ -111,10 +106,15 @@ async function segmentHasLiveTraffic({
   const isV6 = base.includes(':');
   const funnel = new RegExp(isV6 ? v6Funnel(bits, base) : v4Funnel(bits, base), isV6 ? 'i' : '');
   try {
+    // 取行必须落在**已索引**的时间字段上：timestamp 语义=事件时间（schema default Date.now，TTL 留存索引 {timestamp:-1} 与复合 {timestamp:-1,_id:-1}
+    // 都建在它上面）；此前用 createdAt（mongoose timestamps 字段，零索引）+ 非前缀锚定的 ip 正则，优化器无界可用 ⇒ 审计集合全扫（留存 180–3650 天）。
+    // 改成 timestamp $gte + 按索引序 {timestamp:-1} 排序后，扫描范围收敛到 lookback 窗口并随 limit 早停。ip 正则保持宽漏斗不改前缀锚定/$in：
+    // 前缀锚定会丢映射写法族（::ffff:a.b.c.d、0:…:0:ffff:a.b.c.d——零组个数不设上限，$in 无法枚举），窄一格就是漏行 ⇒ live:false 放行封禁（fail-open）；
+    // regex 在这里只是窗口内的残差过滤，不再是全扫的驱动条件。
     const found = await (model || AuditLog)
-      .find({ createdAt: { $gte: since }, ip: funnel, method: { $in: ACTIVITY_METHODS } })
-      .select({ ip: 1, method: 1, createdAt: 1, action: 1 })
-      .sort({ createdAt: -1 })
+      .find({ timestamp: { $gte: since }, ip: funnel, method: { $in: ACTIVITY_METHODS } })
+      .select({ ip: 1, method: 1, timestamp: 1, action: 1 })
+      .sort({ timestamp: -1 })
       .limit(CANDIDATE_LIMIT)
       .lean();
     const rows = Array.isArray(found) ? found : [];
@@ -130,7 +130,7 @@ async function segmentHasLiveTraffic({
       scanned: rows.length,
       sample: inSegment
         .slice(0, 5)
-        .map((r) => ({ ip: r.ip, method: r.method, at: r.createdAt, action: r.action })),
+        .map((r) => ({ ip: r.ip, method: r.method, at: r.timestamp, action: r.action })),
       reason: null,
     };
   } catch (e) {
@@ -149,10 +149,10 @@ const resetLiveTrafficState = () => {
 };
 
 module.exports = {
-  ACTIVITY_METHODS,
-  CANDIDATE_LIMIT,
-  DEFAULT_LOOKBACK_MS,
-  segmentOfIp,
+  ACTIVITY_METHODS, // 只看「人真的在用系统」的方法：GET 是浏览/查看（审计中间件默认全量记），写操作更是铁证。HEAD/OPTIONS 不算——探测脚本也会发。
+  CANDIDATE_LIMIT, // 候选上限：捞满即视为还有没看到的行，只能保守说有活动（见 segmentHasLiveTraffic）
+  DEFAULT_LOOKBACK_MS, // 默认 15 分钟：足够长到能看见「刚才还有人在这栋楼里干活」，又短到不会因为一台三天前在线过的设备永久挡住封禁
+  segmentOfIp, // 把 IP 收敛到网段键：与聚类同一口径（复用 cidrOf，不另立一套切分算法）
   segmentHasLiveTraffic,
   getLiveTrafficStats,
   resetLiveTrafficState,

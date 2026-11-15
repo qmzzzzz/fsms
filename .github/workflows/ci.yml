@@ -173,6 +173,13 @@ jobs:
       - name: Check source encoding (UTF-8 / mojibake fingerprints)
         run: npm run check:utf8
 
+      # CHANGELOG 结构门禁（P1-1，2026-11-14）：CHANGELOG.md 曾发生「未发布+1.0.0」
+      # 单元 4 次自我拼接的腐化（10729 行），文件头标题以残片嵌进拼接缝句中——
+      # 文档腐化不惊动任何构建/测试，本步把结构判据（标题唯一、[未发布] 恰 1 次、
+      # 节头按版本键唯一）钉成红灯。判据测试：src/tests/docs/changelogStructureGate.test.js。
+      - name: Check CHANGELOG structure (unique headers, no duplicate sections)
+        run: npm run check:changelog
+
       # 合规门禁：append-only 钩子是否还挂着、审计导出边界是否还在、
       # WAL 兜底有没有被摘掉。此前只被 `npm run security:audit` 引用，
       # 而 security-audit job 只跑 npm audit ⇒ 这些检查从未真正被自动兑现。

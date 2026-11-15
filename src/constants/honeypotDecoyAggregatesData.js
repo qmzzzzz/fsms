@@ -165,15 +165,11 @@ const AGGREGATE_ENDPOINTS = Object.freeze([
 
 const MODULE_NAMES = Object.freeze({
   system: '系统管理',
-  user: '用户管理',
-  role: '角色管理',
-  permission: '权限管理',
   device: '设备管理',
   alarm: '报警管理',
   inspection: '巡检管理',
   report: '报表统计',
-  security: '安全管理',
-});
+}); // 只登记合成权限目录（honeypotDecoySelf.DECOY_PERMISSION_CATALOG）出现过的模块：user/role/permission/security 四键在目录里不存在、读了也读不到（真实控制器的九模块全表住 roleController 的 MODULE_NAMES），属于审计 2026-11-14 指出的死键，已删
 
 const DEVICE_EXPIRY_FIELDS = Object.freeze([
   'deviceCode',

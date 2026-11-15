@@ -34,6 +34,23 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=full
 ProtectHome=yes
+
+# ===== 最小权限（2026-11-14 审计收口：不得以 root 跑无特权脚本）=====
+# 本脚本只读 .env 注入的连接串、写业务库的授权集合、打印到 journal——没有任何
+# 特权需求，但本文件原先没有 User=，systemd 默认以 root 运行整段 oneshot。
+# 收口用 DynamicUser：每次运行分配一个即弃的系统 UID（不落 /etc/passwd，停止即
+# 回收），比预建专用账号少一份要维护的属主/权限台账；EnvironmentFile 由 systemd
+# 管理器以 root 读取后注入进程，.env 本身无需为该临时用户放权。
+# 兼容性：DynamicUser 需要 systemd 232+（Ubuntu 16.04+/Debian 9+/RHEL 8+，部署机均满足）。
+DynamicUser=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# 仓库（scripts/、secrets/ 之外的任何文件）不得被本服务改写：/opt/fsms 只读挂载。
+# winston 的文件日志改落到 StateDirectory（systemd 预建、属主即本次临时 UID），
+# 经 LOG_DIR 注入（src/utils/logPaths.js 的单一声明），不与仓库内 logs/ 混写。
+ReadOnlyPaths=/opt/fsms
+StateDirectory=fsms-review
+Environment=LOG_DIR=/var/lib/fsms-review/logs
 # 不重启：下一轮 timer 自然重试，重启风暴只会刷屏 journal
 Restart=no
 

@@ -42,6 +42,12 @@ const request = require('supertest');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const { MongoMemoryServer } = require('mongodb-memory-server');
+// 与三个 harness（e2e-smoke / load-test / production-drill）同一条隔离纪律：
+// 本探针 require 到 src/models → src/config（index.js 在 require 期 hydrate *_FILE），
+// 宿主残留的 `*_FILE` 指针或 .env 明文密钥会把探针的一次性密钥覆写成真实值，
+// 把探针进程接回真实 Redis / 告警 webhook / 观测面。守卫必须在设一次性值**之前**跑
+// （先赋值再调守卫会被擦掉，见 devSecretIsolation 头注释的顺序不变量）。
+const { isolateDisposableSecrets } = require('../devSecretIsolation');
 
 /**
  * 两个**单违规**场景。`http` 是前置对照的期望（状态码 + 错误码），
@@ -353,6 +359,9 @@ async function runScenario(ctx, scenario) {
 // 环境设置放进 main()：模块级赋值会让"只 require 判据做单测"的调用方被污染
 // （jest 同一 worker 里 process.env 是共享的，探针写死 JWT_SECRET 会影响后续套件）。
 async function main() {
+  // 先隔离宿主残留密钥（.env / export 的 *_FILE 与明文值），再种一次性值——
+  // 顺序反过来会被守卫擦掉（devSecretIsolation 的顺序不变量）。
+  isolateDisposableSecrets({ scriptName: 'ws-session-bypass' });
   process.env.NODE_ENV = 'test';
   process.env.JWT_SECRET = 'x'.repeat(48);
   process.env.JWT_REFRESH_SECRET = 'y'.repeat(48);

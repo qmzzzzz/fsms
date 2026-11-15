@@ -246,6 +246,7 @@ import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index.mjs'
 import { api } from '@/utils/api'
 import { encryptPassword } from '@/utils/loginCipher'
+import { encryptionErrorMessage } from '@/utils/encryptionError'
 import { enterSubmit } from '@/utils/enterSubmit'
 import QRCode from 'qrcode'
 
@@ -315,17 +316,11 @@ const toggleDisableMode = () => {
   mfa.disableCode = ''
 }
 
-/** 口令加密失败时的可执行文案（与 ChangePasswordCard 同口径） */
-const encryptionErrorMessage = (e) => {
-  if (e?.code === 'PUBLIC_KEY_PIN_MISMATCH') return t('login.publicKeyPinMismatch')
-  if (e?.code === 'INSECURE_CONTEXT') return t('login.insecureContext')
-  return t('login.encryptionFailed')
-}
-
 /**
  * 构造当前口令凭据：只走密文轨。加密失败（含 dev 非安全上下文返回 null）一律
  * 抛给调用方阻断提交，不得静默明文上行——G2 统一口径：明文回退轨已删，
  * null 按生产同款 INSECURE_CONTEXT 语义抛出，调用方 catch 统一提示。
+ * 文案统一走 @/utils/encryptionError（P2 收敛，不再本组件私有一份三元链）。
  */
 const buildPasswordCredential = async (password) => {
   const enc = await encryptPassword(password, 'PASSWORD_CURRENT')
@@ -356,7 +351,7 @@ const enrollMfa = async () => {
       credential = await buildPasswordCredential(mfa.enrollPassword)
     } catch (e) {
       console.warn('[loginCipher] MFA 登记口令加密失败，已阻断提交：', e?.message)
-      ElMessage.error(encryptionErrorMessage(e))
+      ElMessage.error(encryptionErrorMessage(t, e))
       return
     }
     const { data: resp } = await api.auth.mfaEnroll(credential)
@@ -433,7 +428,7 @@ const enableMfa = async () => {
       credential = await buildPasswordCredential(mfa.enrollPassword)
     } catch (e) {
       console.warn('[loginCipher] MFA 开启口令加密失败，已阻断提交：', e?.message)
-      ElMessage.error(encryptionErrorMessage(e))
+      ElMessage.error(encryptionErrorMessage(t, e))
       return
     }
     const { data: resp } = await api.auth.mfaEnable({

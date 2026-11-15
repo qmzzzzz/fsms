@@ -1596,6 +1596,11 @@ const handleReject = async (row) => {
       cancelButtonText: t('common.cancel'),
       inputType: 'textarea',
       inputPlaceholder: t('privilegeGrant.reasonPlaceholder'),
+      // P3：镜像后端上限（permissionRoutes.grantReasonValidation：reason optional + max 200）。
+      // ElMessageBox.prompt 不支持原生 maxlength，沿用 AlarmView.handleResult 的
+      // validator 镜像法：超限拦在本地，不发注定 400 的请求；空值放行与后端 optional 同口径
+      inputValidator: (value) =>
+        !value || value.trim().length <= 200 || t('privilegeGrant.reasonTooLong'),
     }
   ).catch(() => null)
   if (!reason || reason.action !== 'confirm') return

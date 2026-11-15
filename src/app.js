@@ -8,6 +8,8 @@ const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
 const compression = require('compression');
+// dev 访问日志格式（'dev' 预设的脱敏替身，见 utils/accessLogDevFormat 文件头）
+const { devSafeFormat } = require('./utils/accessLogDevFormat');
 
 const config = require('./config');
 const { isDevelopmentLikeEnv } = require('./config/envSemantics');
@@ -90,9 +92,7 @@ const {
 const sentryInitialized = initSentry();
 
 /**
- * CORS 白名单求值。抽成独立函数是为了让开发兜底的 `[...DEV_CORS_ORIGINS]` 分支可被直接
- * 调用验证：src/tests/setup.js 固定注入 `CORS_ORIGIN=DEFAULT_CORS_ORIGIN`，既有断言走的
- * 都是显式配置分支，而兜底分支不跑 = 判据不成立。
+ * CORS 白名单求值。抽成独立函数是为了让开发兜底的 `[...DEV_CORS_ORIGINS]` 分支可被直接调用验证：src/tests/setup.js 固定注入 `CORS_ORIGIN=DEFAULT_CORS_ORIGIN`，既有断言走的都是显式配置分支，而兜底分支不跑 = 判据不成立。
  *
  * @param {{corsOrigin?: string, nodeEnv?: string}} cfg 环境配置（默认读真实 config）
  * @returns {string[]} 允许的来源列表；空数组表示不回应任何 Origin
@@ -104,31 +104,24 @@ function resolveCorsOrigins(cfg = config) {
         .map((origin) => origin.trim())
         .filter(Boolean)
     : [];
-  // parsed 为空（未配或配了 `", "` 这类全是空项的值）时的回落方向：
-  // 仅 development 允许本地兜底，staging/production 必须显式配置，
-  // 防止误部署后把本地开发源放进线上白名单。
+  // parsed 为空（未配或配了 `", "` 这类全是空项的值）时的回落方向：仅 development 允许本地兜底，staging/production 必须显式配置，防止误部署后把本地开发源放进线上白名单。
   if (parsed.length > 0) return parsed;
   return isDevelopmentLikeEnv(cfg.nodeEnv) ? [...DEV_CORS_ORIGINS] : [];
 }
 
 /**
  * 可信代理策略注入与告警（F-01，2026-10-16 审计 P1）
- *
- * 抽成独立函数而不是写在 createApp 里，理由与 createApp 已有的体积告警直接相关：
- * `max-lines-per-function` 对 createApp 长期报 warn（棘轮基线锁死不增），把这段
- * 连注释带长告警文案塞进去会让它继续膨胀。抽出后 createApp 只留一行调用。
+ * 抽成独立函数而不是写在 createApp 里，理由与 createApp 已有的体积告警直接相关：`max-lines-per-function` 对 createApp 长期报 warn（棘轮基线锁死不增），把这段连注释带长告警文案塞进去会让它继续膨胀。抽出后 createApp 只留一行调用。
  *
  * @param {import('express').Express} app
  * @param {{hops: number}} trustProxyHops resolveTrustProxyHops 的归一结果
  */
 function applyTrustedProxyPolicy(app, trustProxyHops) {
-  // 判据位由 utils/ipUtils.isClientIpIdentityTrustworthy 读取；注入点紧跟 trust proxy，
-  // 因为两者回答的是同一个问题的两半（信不信代理头 / 信哪个对端写的代理头）。
+  // 判据位由 utils/ipUtils.isClientIpIdentityTrustworthy 读取；注入点紧跟 trust proxy，因为两者回答的是同一个问题的两半（信不信代理头 / 信哪个对端写的代理头）。
   const proxies = trustedProxies.resolveTrustedProxies();
   app.set('trusted proxy cidrs', proxies);
   if (proxies.errors.length > 0) {
-    // 显式配错必须出声：判据侧已 fail-closed（整份名单作废、谁都不信），但若只静默
-    // fail-closed，运维看到的症状是「反代后面所有请求都被判成不可信」，无从归因到这里。
+    // 显式配错必须出声：判据侧已 fail-closed（整份名单作废、谁都不信），但若只静默 fail-closed，运维看到的症状是「反代后面所有请求都被判成不可信」，无从归因到这里。
     logger.error(
       'TRUSTED_PROXY_CIDRS 配置非法，可信代理判定已 fail-closed（谁都不信）：\n' +
         proxies.errors.map((e) => `  - ${e}`).join('\n')
@@ -136,11 +129,7 @@ function applyTrustedProxyPolicy(app, trustProxyHops) {
     return;
   }
   if (trustProxyHops.hops > 0 && !proxies.configured) {
-    // 降级提示位：启用代理头信任却未声明代理网段 ⇒ 判据回落到「对端属回环即可信」
-    // （2026-11-03 收窄，渗透测试 i760 #25：私网对端写 XFF 曾实测绕过 IP 黑名单）。
-    // 此后反代不在本机的部署若不配名单，XFF 一律不可信——req.ip 恒为代理地址，
-    // 全站共享一个限流桶、封禁/审计 IP 全失真。M-2：生产环境按 `error` 打印、其余
-    // `warn`（不阻断启动）。
+    // 降级提示位：启用代理头信任却未声明代理网段 ⇒ 判据回落到「对端属回环即可信」（2026-11-03 收窄，渗透测试 i760 #25：私网对端写 XFF 曾实测绕过 IP 黑名单）。此后反代不在本机的部署若不配名单，XFF 一律不可信——req.ip 恒为代理地址，全站共享一个限流桶、封禁/审计 IP 全失真。M-2：生产环境按 `error` 打印、其余 `warn`（不阻断启动）。
     (require('./config/validate').requiresProductionSemantics() ? logger.error : logger.warn)(
       `已启用 trust proxy（TRUST_PROXY_HOPS=${trustProxyHops.hops}）但未配置 ` +
         'TRUSTED_PROXY_CIDRS：X-Forwarded-For 的可信判据只认「回环对端」（本机反代），' +
@@ -368,11 +357,15 @@ function installSecurityMiddlewareChain(app, corsOrigin) {
     '":safe-referrer" ":user-agent"';
   // 只有交互式开发别名用 morgan 的可读输出；test/ci 保持结构化流，
   // 使脱敏与请求上下文的断言和生产走同一条 logger 路径。
+  // dev 分支同样不得输出原始 query：'dev' 预设直接拼 req.originalUrl（含 query），
+  // 本地调试 URL 里的令牌/口令会原样进终端与 dev 日志文件——格式器收口在
+  // utils/accessLogDevFormat（dev 版式复刻 + :safe-url 打码，理由见该文件头）。
+  // 生产/CI 分支一字不动。
   const envName = String(config.nodeEnv || '')
     .trim()
     .toLowerCase();
   if (isDevelopmentLikeEnv() && envName !== 'test' && envName !== 'ci') {
-    app.use(morgan('dev'));
+    app.use(morgan(devSafeFormat));
   } else {
     app.use(
       morgan(COMBINED_SAFE_FORMAT, {

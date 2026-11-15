@@ -54,6 +54,15 @@ node scripts/audit-probes/ws-session-bypass.cjs; echo "exit=$?"
 
 探针自身带 `require.main` 守卫，所以那个套件可以只 require 它取判据而不触发建库。
 
+### 一次性密钥隔离
+
+探针在 main() 里先调 `isolateDisposableSecrets()`（scripts/devSecretIsolation.js，
+与 e2e-smoke / load-test / production-drill 三个 harness 同一条纪律），再种自己的
+一次性密钥：它 require 到 `src/models` → `src/config`（index.js 在 require 期
+hydrate `*_FILE`），宿主残留的 `*_FILE` 指针或 `.env` 明文密钥会把一次性密钥覆写成
+真实值，把探针进程接回真实 Redis / 告警 webhook / 观测面。守卫先于赋值的顺序
+不变量见 devSecretIsolation 头注释。
+
 ### 复核记录
 
 - **2026-09-17**：P0-2 修复已落地（`_assertHandshakeSessionUsable` /

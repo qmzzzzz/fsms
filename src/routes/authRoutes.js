@@ -25,48 +25,16 @@ const {
 const { body, param } = require('express-validator');
 const { mustBeString } = require('../utils/validationRules');
 const { MAX_DATA_URI_CHARS } = require('../utils/avatarImage');
-const { validatePasswordStrength } = require('../utils/helpers');
-const config = require('../config');
 const ApiResponse = require('../utils/apiResponse');
-
-// ===== 登录口令加密传输（密文轨/明文轨双轨）=====
-// 明文轨守卫：LOGIN_ENCRYPT_STRICT=true 后所有明文口令字段直接拒绝
-// （前端全量切换后开启；仅 HTTPS/localhost 部署可开——非 secure context
-//  浏览器无 WebCrypto，前端只能走明文降级轨，开 strict 会把用户锁在门外）
-const rejectPlaintextInStrict = () => {
-  if (config.loginEncryptStrict) {
-    throw new Error('服务端已启用口令加密传输，请刷新页面后重试');
-  }
-  return true;
-};
-
-// S-L1：strict 模式下 enc 与明文字段并存视为协议违规——明文校验器挂在 `.if(!enc)`
-// 条件内，并存时会被整体跳过（enc 优先、明文被静默忽略，不构成降级）。此处补一条
-// 无条件的「enc 存在时明文必须缺席」断言；非 strict 双轨灰度期维持原兼容行为
-const rejectEncPlaintextCoexistence = (encField, plainField) =>
-  body(plainField).custom((value, { req }) => {
-    if (config.loginEncryptStrict && req.body[encField] && value !== undefined && value !== '') {
-      throw new Error(`已提供口令密文（${encField}），禁止同时携带明文字段（${plainField}）`);
-    }
-    return true;
-  });
-
-// 口令密文字段的统一格式约束（ECDH 信封 base64，实际约 600 字符，
-// 上限与 utils/loginCipher.js 的 ENVELOPE_MAX_B64_LEN 一致）
-const encPasswordField = (field) =>
-  body(field)
-    .optional({ values: 'falsy' })
-    .isString()
-    .withMessage('口令密文格式无效')
-    .isLength({ max: 1024 })
-    .withMessage('口令密文长度异常');
-
-// 密码强度校验（企业级统一策略）
-const passwordStrengthCheck = (value) => {
-  const err = validatePasswordStrength(value);
-  if (err) throw new Error(err);
-  return true;
-};
+// 登录口令加密传输的密文轨/明文轨契约三件套 + 改密链，统一复用 reauthCredentialRules
+// （此前本地复制，与 securityRoutes 一度漂移出不同的长度口径——见 A 项收敛）
+const {
+  rejectPlaintextInStrict,
+  encPasswordField,
+  rejectEncPlaintextCoexistence,
+  passwordStrengthCheck,
+  buildChangePasswordValidation,
+} = require('../middleware/security/reauthCredentialRules');
 
 // 验证规则
 const registerValidation = [
@@ -138,35 +106,10 @@ const loginValidation = [
     .withMessage('请输入 6 位动态验证码或备用恢复码'),
 ];
 
-// 修改密码校验：新密码走统一企业级强度策略并限制上限，防 bcrypt 超长
-// isString() 必不可少：express-validator 会把对象/数组强制转字符串再跑
-// notEmpty/isLength，`{}` 转成 `[object Object]` 能通过全部校验，
-// 随后原值（对象）直达 bcrypt.compare 触发 TypeError → 500
-const changePasswordValidation = [
-  // 密文轨：ECDH 信封（优先，两个字段各自独立信封）
-  encPasswordField('encCurrentPassword'),
-  rejectEncPlaintextCoexistence('encCurrentPassword', 'currentPassword'),
-  encPasswordField('encNewPassword'),
-  rejectEncPlaintextCoexistence('encNewPassword', 'newPassword'),
-  // 明文轨：仅未携带对应密文字段时生效（灰度兼容）
-  body('currentPassword')
-    .if((value, { req }) => !req.body.encCurrentPassword)
-    .isString()
-    .withMessage('当前密码格式无效')
-    .notEmpty()
-    .withMessage('请提供当前密码')
-    .isLength({ max: 64 })
-    .withMessage('当前密码长度异常')
-    .custom(rejectPlaintextInStrict),
-  body('newPassword')
-    .if((value, { req }) => !req.body.encNewPassword)
-    .isString()
-    .withMessage('新密码格式无效')
-    .custom(passwordStrengthCheck)
-    .isLength({ max: 64 })
-    .withMessage('新密码长度不能超过 64 个字符')
-    .custom(rejectPlaintextInStrict),
-];
+// 修改密码校验：链体与 /security/change-password 单源共用（buildChangePasswordValidation），
+// currentPassword 上限与登录链同口径（128，收敛依据见 reauthCredentialRules 文件头注释）；
+// 新密码强度/上限由 helpers.validatePasswordStrength 单一实现收口
+const changePasswordValidation = buildChangePasswordValidation();
 
 // 刷新令牌校验（G3）：令牌可来自请求体或 httpOnly cookie，故请求体字段为可选；
 // 但一旦提交就必须是有界字符串——jwt.verify 前先卡长度，避免超长串进入
@@ -201,13 +144,13 @@ const mfaDisableValidation = [
   // 密文轨：ECDH 信封（优先，仅为兼容旧客户端保留；密码不再是可单独放行的因子）
   encPasswordField('encCurrentPassword'),
   rejectEncPlaintextCoexistence('encCurrentPassword', 'currentPassword'),
-  // 明文轨：仅未携带密文字段时生效（灰度兼容）
+  // 明文轨：仅未携带密文字段时生效（灰度兼容）；上限与改密/登录链同口径（128）
   body('currentPassword')
     .if((value, { req }) => !req.body.encCurrentPassword)
     .optional({ values: 'falsy' })
     .isString()
     .withMessage('密码格式无效')
-    .isLength({ max: 64 })
+    .isLength({ max: 128 })
     .withMessage('密码长度异常')
     .custom(rejectPlaintextInStrict),
 ];
@@ -297,7 +240,10 @@ router.get('/captcha', captchaLimiter, authController.getCaptcha);
  * @desc    查询登录验证码开关状态（登录页据此决定是否渲染验证码）
  * @access  Public
  */
-router.get('/captcha-status', authController.getCaptchaStatus);
+// 与 /captcha、/login-public-key 同族：本端点读 SystemConfig（每请求两次开关查询），
+// 属未认证重资源面，挂 strictLimiter 挡 DB 探针（同族此前只差这一个没挂——漏挂的
+// 那一个永远是最先被扫到的，口径见 mfa/enable 处的同款注释）。
+router.get('/captcha-status', strictLimiter, authController.getCaptchaStatus);
 
 /**
  * @route   GET /api/auth/login-public-key

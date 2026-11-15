@@ -23,6 +23,10 @@ const { buildLoginEnvelope } = require('../helpers/buildLoginEnvelope');
 
 const CAP = 1000; // getMemStoreMax() 的下限钳位就是 1000，测试只能打到这个量级
 
+// REDIS_URL 在模块加载期快照原值（env 泄漏收口）：本文件每条用例都 delete 它以压到
+// 内存表形态，套件结束若不还原，「删掉」本身也是泄漏——后续套件会静默丢掉 Redis 形态
+const SAVED_REDIS_URL = process.env.REDIS_URL;
+
 let warnSpy;
 
 beforeEach(() => {
@@ -38,6 +42,8 @@ afterEach(() => {
 
 afterAll(() => {
   delete process.env.SHARED_CACHE_MEM_MAX;
+  if (SAVED_REDIS_URL === undefined) delete process.env.REDIS_URL;
+  else process.env.REDIS_URL = SAVED_REDIS_URL;
 });
 
 /** 洪水：n 个互不相同的 nonce 占位（攻击者只需要服务端公钥就能造出来） */

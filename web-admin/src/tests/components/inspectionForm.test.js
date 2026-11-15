@@ -260,6 +260,9 @@ describe('InspectionForm 编辑回填的时间口径', () => {
     // 未改动任何字段就保存，两个时间必须与后端下发的 ISO 完全一致
     expect(payload.planStartTime).toBe(START)
     expect(payload.planEndTime).toBe(END)
+    // P3：行级合成键 __uid 只服务前端渲染/diff，不得随载荷上行
+    expect(payload.checkItems.length).toBeGreaterThan(0)
+    expect(payload.checkItems.every((it) => !('__uid' in it))).toBe(true)
   })
 
   test('空时间不被伪造：缺失时保持必填校验拦截，而不是回填成「现在」', async () => {

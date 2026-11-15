@@ -67,6 +67,16 @@ describe('共享限流存储运行期抛错', () => {
     mockRedisStoreInstance.decrement.mockReset();
   });
 
+  afterEach(async () => {
+    // 把本用例 store 的在途降级续体冲进本用例的窗口再收尾：skipSuccessfulRequests 的
+    // decrement 由响应 finish 处理器异步触发，其 rejection 续体可能落到**下一个用例**
+    // 的窗口里，恰好打在那边 incSpy 的计数断言上（跨用例污染，实测把「每次降级都计入
+    // security_alerts_total」顶成 3）。restoreAllMocks 顺带把 incSpy/warnSpy 收掉，
+    // 不让本用例的 spy 泄进下一用例。
+    for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+    jest.restoreAllMocks();
+  });
+
   test('Redis 就绪后命令抛错 → 请求不变成 5xx，且配额用满仍回 429', async () => {
     process.env.REDIS_URL = 'redis://127.0.0.1:6399';
     mockRedisStoreInstance.increment.mockRejectedValue(new Error('redis unreachable'));
@@ -136,6 +146,50 @@ describe('共享限流存储运行期抛错', () => {
     mockRedisStoreInstance.increment.mockResolvedValue({ totalHits: 1, resetTime: undefined });
     expect((await request(app).get('/probe')).status).toBe(200);
     expect(mockRedisStoreInstance.increment).toHaveBeenCalled();
+  });
+
+  // 2026-11-14 审计：resetKey/resetAll 原先没有降级包装（同文件 increment/decrement 都有）
+  // ——复位调用方（测试 afterEach / 管理动作）会吃到裸 rejection，与 decrement 的
+  // 「响应收尾路径没有错误兜底」同一形态。补齐后三件事一起钉住：回落进程内计数、
+  // 计入同一降级信号、不冒泡成未处理拒绝（即下方用例名点名的三件事）。
+  test('resetKey 抛错 → 回落进程内计数并计入同一降级信号，不得冒泡成未处理拒绝', async () => {
+    process.env.REDIS_URL = 'redis://127.0.0.1:6399';
+    mockRedisStoreInstance.resetKey.mockReset();
+    mockRedisStoreInstance.resetKey.mockRejectedValue(new Error('redis unreachable'));
+    const metrics = require('../../utils/metrics');
+    const incSpy = jest.spyOn(metrics, 'incSecurityAlert');
+    const logger = require('../../utils/logger');
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    const store = makeSharedStore('failover-resetkey');
+    await settleStoreSwitch();
+
+    // 修复前：rejection 直接冒泡（未处理拒绝）且零信号
+    await expect(store.resetKey('key-x')).resolves.toBeUndefined();
+    // 信号按 prefix/op 点名（日志一次性，别的 store 的迟到信号不携带本串），
+    // 计数断言只作辅助——迟到续体的过滤靠本组 afterEach 的冲刷
+    expect(
+      warnSpy.mock.calls.filter((c) => String(c[0]).includes('failover-resetkey/resetKey'))
+    ).toHaveLength(1);
+    expect(incSpy.mock.calls.some((c) => c[0] === 'ratelimit_store_degraded')).toBe(true);
+  });
+
+  test('resetAll：active 没有 resetAll 时维持「无则静默」契约（不抛错、不发降级信号）', async () => {
+    process.env.REDIS_URL = 'redis://127.0.0.1:6399';
+    const metrics = require('../../utils/metrics');
+    const incSpy = jest.spyOn(metrics, 'incSecurityAlert');
+    const logger = require('../../utils/logger');
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    const store = makeSharedStore('failover-resetall');
+    await settleStoreSwitch();
+
+    // 本文件顶部的 mockRedisStoreInstance 没有 resetAll：该形态此前就按静默处理，
+    // 补降级包装不得把它变成抛错或误报降级（信号判据点名本 store 的 prefix/op，
+    // 跨用例迟到的降级续体不携带该串）
+    await expect(store.resetAll()).resolves.toBeUndefined();
+    expect(
+      warnSpy.mock.calls.filter((c) => String(c[0]).includes('failover-resetall/'))
+    ).toHaveLength(0);
+    expect(incSpy.mock.calls.some((c) => c[0] === 'ratelimit_store_degraded')).toBe(false);
   });
 });
 

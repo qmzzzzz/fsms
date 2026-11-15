@@ -97,7 +97,6 @@ describe('deviceCode 上限：路由与模型同一口径', () => {
   test('反向保护：恰好 50 字符放行（收口不得变成一刀切）', async () => {
     const code = `${stamp}${'Y'.repeat(50 - stamp.length)}`;
     const res = await post(code);
-    if (res.status !== 201) console.log('ZZDEBUG', JSON.stringify(res.body));
     expect(res.status).toBe(201);
     const stored = await FireDevice.findOne({ deviceCode: code });
     expect(stored).not.toBeNull();

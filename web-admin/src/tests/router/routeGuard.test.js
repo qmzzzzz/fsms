@@ -246,6 +246,22 @@ describe('A. 守卫决策表', () => {
     expect(next).toHaveBeenCalledWith('/dashboard')
   })
 
+  test('已登录访问注册页：同样跳首页（P3：/register 与 /login 同口径拦截）', async () => {
+    mockStore.isAuthenticated = true
+    const next = await runGuard(mkRoute({ name: 'register', meta: {}, fullPath: '/register' }))
+    expect(next).toHaveBeenCalledWith('/dashboard')
+  })
+
+  test('已登录（须改密）访问注册页：先去改密页', async () => {
+    mockStore.isAuthenticated = true
+    mockStore.currentUser = { mustChangePassword: true }
+    const next = await runGuard(mkRoute({ name: 'register', meta: {}, fullPath: '/register' }))
+    expect(next).toHaveBeenCalledWith('/profile')
+    // 本组 mock store 是共享单例：mustChangePassword 必须就地还原，
+    // 否则后续用例会被守卫悄悄改写到 /profile
+    mockStore.currentUser = null
+  })
+
   test('未登录访问公开页（/login、/register）：不探测会话，直接放行', async () => {
     // P-2：公开入口是匿名用户的高频路径，/auth/me 的 401 往返不应发生在这一层。
     // 若把恢复探测重新挪到公开路由判断之前，本用例会红。
@@ -436,9 +452,13 @@ describe('D. 标签页标题（H6：登录后不再永停「用户登录」）',
     mockStore.permissions = ['device:read']
     document.title = ''
     // 复位到无 meta 的公开路由：既保证「起点 ≠ 目标」，也给出干净的标题基线
-    // （/register 不带 titleKey/title，afterEach 对它早退，不动标题）
+    // （/register 不带 titleKey/title，afterEach 对它早退，不动标题）。
+    // P3 起 /register 也被「已登录踢回首页」拦截（与 /login 同口径），
+    // 因此复位必须在未登录态下进行，落定后再恢复登录态。
+    mockStore.isAuthenticated = false
     await router.replace('/register').catch(() => {})
     await settle(() => router.currentRoute.value.path === '/register', '复位起点 /register')
+    mockStore.isAuthenticated = true
   })
 
   afterEach(() => {

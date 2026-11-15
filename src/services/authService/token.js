@@ -182,10 +182,8 @@ async function revokeOnRefreshReplay(decoded, reason, consumedAt) {
 
 /**
  * 原子消费旧 refresh token（一次性使用）；已被消费 ⇒ 进入重放检测。
- *
  * 把「查黑名单→加黑名单」合并为一次原子抢占：并发的两次 /refresh 只有一次能换取新令牌对，
  * 另一次进入重放检测，消除原「检查与轮换非原子」的 TOCTOU 平行会话窗口。
- *
  * @param {string} refreshTokenRaw
  * @param {object} decoded 已验证的 refresh 载荷
  * @returns {Promise<{ok: true}|{ok: false, outcome: string}>}
@@ -278,6 +276,15 @@ async function refreshSession(refreshTokenRaw, ctx) {
     return { outcome: 'INVALID' };
   }
 
+  // ObjectId 形态闸（审计 2026-11-14 C）：本服务签发的载荷里 userId 恒为 _id 的
+  // 24 位十六进制串（generateToken 只吃 user._id），签发面之外的任何形态都不是
+  // 本服务铸造的血统——直接按 INVALID 拒绝（注册码 REFRESH_TOKEN_INVALID → 401）。
+  // 此前非法形态会让 findById 抛 CastError，只能靠控制器的异常兜底网归一成 401，
+  // 「非法载荷」与「数据库故障」在日志里无法区分；服务层先给出可判定的 outcome。
+  if (!/^[0-9a-fA-F]{24}$/.test(String(decoded.userId))) {
+    return { outcome: 'INVALID' };
+  }
+
   // 先做廉价校验（用户状态/IP 范围/密码修改时间/tokenVersion），
   // 最后一步才做原子消费——顺序反了会在重放检测之前就花掉一次黑名单写入
   const user = await User.findById(decoded.userId);
@@ -293,11 +300,10 @@ async function refreshSession(refreshTokenRaw, ctx) {
     return { outcome };
   };
 
-  // 临时锁定（lockUntil）与 loginUser / authenticate 同口径：锁定窗口内
-  // refresh 不得续期。此前只查 status，被爆破锁定（status 仍为 active）的
-  // 账户手里的 refresh 仍能换出新 access，而新 access 会被中间件拒绝，
-  // 客户端表现为反复刷新、始终 403。直接拒绝并给出可区分的码，让客户端
-  // 回登录页而不是空转。
+  // 临时锁定（lockUntil）与 loginUser / authenticate 同口径：锁定窗口内 refresh
+  // 不得续期。此前只查 status，被爆破锁定（status 仍为 active）的账户手里的 refresh
+  // 仍能换出新 access，而新 access 会被中间件拒绝，客户端表现为反复刷新、始终 403。
+  // 直接拒绝并给出可区分的码，让客户端回登录页而不是空转。
   if (user.lockUntil && user.lockUntil > new Date()) {
     return deny('ACCOUNT_LOCKED');
   }
@@ -337,11 +343,9 @@ async function refreshSession(refreshTokenRaw, ctx) {
 }
 /**
  * 判别一枚 refresh 串是否**不属于**当前操作者。
- *
  * 无法判别时按"不属于"处理（fail-closed）：载荷里没有 userId、或压根拿不到操作者
  * 身份，都不能证明"这串是我的"。反过来，签名无效/已过期的串**不算**外来——
  * 它本就不可用，与 revokeOneRefreshToken 的口径一致（否则一次携带过期串的登出会被拒）。
- *
  * @param {string} token 原始 refresh 串
  * @param {string} ownerUserId 当前操作者 userId（authenticate 保证存在）
  * @returns {boolean} true=这串不属于当前操作者
@@ -392,11 +396,11 @@ async function revokeOneRefreshToken(token) {
  *   `body || cookie` 这种"二选一"让一条已轮换掉的旧串把在用的那条挡在身后）
  * @returns {Promise<{revokeFailed:boolean}>} revokeFailed=true 表示有令牌未能确认入库
  *
- * fail-closed：令牌吊销未能落库时由控制器返回失败而非「登出成功」。
- * 原实现把 blacklistToken 的异常吞进 logger.warn 照常返回成功，于是
- * DB 瞬断期间「登出」只是清了 cookie —— 被窃取的 access token 在其剩余
- * 有效期（默认 2h）内仍可通过认证，而用户已认为会话已终止、不会再补救。
- * refresh 轮换路径（consumeToken）刻意 fail-closed，契约必须一致。
+ * fail-closed：令牌吊销未能落库时由控制器返回失败而非「登出成功」。原实现把
+ * blacklistToken 的异常吞进 logger.warn 照常返回成功，于是 DB 瞬断期间「登出」
+ * 只是清了 cookie —— 被窃取的 access token 在其剩余有效期（默认 2h）内仍可通过
+ * 认证，而用户已认为会话已终止、不会再补救。refresh 轮换路径（consumeToken）
+ * 刻意 fail-closed，契约必须一致。
  */
 async function revokeTokensOnLogout({
   accessToken,

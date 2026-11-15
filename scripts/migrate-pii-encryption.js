@@ -193,6 +193,28 @@ function printRotationCleanupHint({ rotate, apply, corruptTotal }) {
 }
 
 /**
+ * apply 收尾的两类失败点名（从 main 抽出：main 的圈复杂度贴着 lint 上限，这段只是输出）。
+ * corrupt = 解密失败未覆盖的行；readbackFailed = 改写后回读不一致的行。
+ * 任何一类出现，main 都以非零退出，调用方无法忽略。
+ */
+function reportApplyFailures(corrupt, readbackFailed) {
+  if (corrupt.length > 0) {
+    console.error(
+      '\n存在解密失败的行（上方 corrupt 列表）：确认 PII_ROTATION_OLD_AES_KEY 是否正确，'
+    );
+    console.error('或按 id 人工核查——这些行本次**未被覆盖**，伪造的"成功"比失败更危险。');
+  }
+  if (readbackFailed.length > 0) {
+    console.error(
+      '\n存在改写后回读不一致的行（上方 readbackFailed 列表）：本次 $set 没有按意图落到库里，'
+    );
+    console.error(
+      '请按 id 核查后重跑演练确认——半截迁移在下次运行里就是一批解不开的"损坏行"，不得当成功收场。'
+    );
+  }
+}
+
+/**
  * 档位与轮换参数的前置校验（从 main 里抽出：main 的圈复杂度贴着 lint 棘轮上限，
  * 而这段只是三条 fail-closed 判据，不含任何业务价值）。
  *
@@ -269,9 +291,10 @@ async function main() {
 
   await mongoose.connect(uri);
 
-  // 逐集合扫描；任一集合有损坏行都让退出码非零（调用方无法忽略）
+  // 逐集合扫描；任一集合有损坏行或回读不一致都让退出码非零（调用方无法忽略）
   const collections = {};
   const corrupt = [];
+  const readbackFailed = [];
   for (const target of PII_TARGETS) {
     const stats = await scanAndRewrite(
       mongoose.connection.collection(target.collection),
@@ -280,6 +303,9 @@ async function main() {
     );
     collections[target.collection] = stats;
     corrupt.push(...stats.corrupt.map((c) => ({ collection: target.collection, ...c })));
+    readbackFailed.push(
+      ...stats.readbackFailed.map((r) => ({ collection: target.collection, ...r }))
+    );
   }
 
   const report = {
@@ -292,27 +318,23 @@ async function main() {
     rotate: args.rotate,
     collections,
     corruptTotal: corrupt.length,
+    readbackFailedTotal: readbackFailed.length,
   };
   console.log(JSON.stringify(report, null, 2));
 
-  if (corrupt.length > 0) {
-    console.error(
-      '\n存在解密失败的行（上方 corrupt 列表）：确认 PII_ROTATION_OLD_AES_KEY 是否正确，'
-    );
-    console.error('或按 id 人工核查——这些行本次**未被覆盖**，伪造的"成功"比失败更危险。');
-  }
+  reportApplyFailures(corrupt, readbackFailed);
   printRotationCleanupHint({
     rotate: args.rotate,
     apply: args.apply,
-    corruptTotal: corrupt.length,
+    corruptTotal: corrupt.length + readbackFailed.length,
   });
   if (!args.apply) {
     console.log('\n演练模式未改写任何记录。加 --apply --yes（并配置 ALLOWED_SOURCE_DB）执行。');
   }
 
   await mongoose.disconnect();
-  // 演练退出 0（当常规体检跑）；apply 带损坏行时以非零退出，让调用方无法忽略
-  process.exit(args.apply && corrupt.length > 0 ? 1 : 0);
+  // 演练退出 0（当常规体检跑）；apply 带损坏行或回读不一致时以非零退出，让调用方无法忽略
+  process.exit(args.apply && (corrupt.length > 0 || readbackFailed.length > 0) ? 1 : 0);
 }
 
 /** 解密辅助：轮换模式用旧主密钥解密（临时替换派生用的环境变量），其余用当前密钥。
@@ -337,11 +359,13 @@ function keysUpdate(plain, keyField, gramField) {
 }
 
 /**
- * 已有的键是否与将写入的逐字段相等？
+ * 已有的值是否与将写入的逐字段相等（数组按逐元素比较）？
  * 相等即不写——否则 `--keys-only` 每次运行都会对全表产生一次"没有变更的变更"
  * （updatedAt 漂移 + 审计上出现无意义的改写），且幂等性无从验证。
+ * （2026-11-14 审计起由 keysUnchanged 更名：apply 的回读自证复用同一条
+ * 「逐字段相等」判据，它比的不再只有检索键，还有密文列本身。）
  */
-function keysUnchanged(doc, update) {
+function valuesUnchanged(doc, update) {
   return Object.entries(update).every(([path, next]) => {
     const current = getPath(doc, path);
     if (Array.isArray(next)) {
@@ -384,7 +408,7 @@ function resolveKeysOnly(doc, spec, stored, args) {
   const got = plaintextOf(doc, spec, stored, args);
   if (got.corrupt) return got;
   const update = keysUpdate(got.plain, keyField, gramField);
-  if (keysUnchanged(doc, update)) return { skip: 'keys-present' };
+  if (valuesUnchanged(doc, update)) return { skip: 'keys-present' };
   return { update, keyOnly: true };
 }
 
@@ -423,6 +447,36 @@ function resolveFieldUpdate(doc, spec, args) {
   };
 }
 
+/**
+ * apply 模式的回读自证（2026-11-14 审计）：updateOne 只证明「发出了写」，不证明
+ * 「写成了」——modifiedCount≠1（并发删改/过滤器漂移）或回读值与写入意图不一致
+ * 都会留下「脚本报成功、库里一半旧一半新」的状态，PII 列的半截迁移在下次运行里
+ * 就是一批解不开的"损坏行"。回读只取 $set 涉及的顶层列，逐字段比对（复用
+ * valuesUnchanged）；失败点名进 stats，由 main 汇总后以非零退出。
+ * 单独成函数：scanAndRewrite 的圈复杂度贴着 lint 上限。
+ */
+async function verifyAppliedWrite(coll, doc, update, stats) {
+  const result = await coll.updateOne({ _id: doc._id }, { $set: update });
+  if (result.modifiedCount !== 1) {
+    stats.readbackFailed.push({
+      id: String(doc._id),
+      fields: ['<updateOne 未命中（modifiedCount≠1）>'],
+    });
+    return;
+  }
+  // 只投影 dotted 路径的**顶层祖先**（reporter.phone → reporter）：同一投影里
+  // 同时出现路径与它的父对象会被 Mongo 以 "Path collision"（Location31250）拒绝。
+  const projection = {};
+  for (const p of Object.keys(update)) {
+    projection[p.split('.')[0]] = 1;
+  }
+  const after = await coll.findOne({ _id: doc._id }, { projection });
+  const drifted = Object.keys(update).filter((p) => !valuesUnchanged(after, { [p]: update[p] }));
+  if (drifted.length > 0) {
+    stats.readbackFailed.push({ id: String(doc._id), fields: drifted });
+  }
+}
+
 /** 全表扫描分拣与（apply 模式下的）改写；按 target 决定扫哪些列、有无检索键与盲索引 */
 async function scanAndRewrite(coll, target, args) {
   const stats = {
@@ -433,6 +487,7 @@ async function scanAndRewrite(coll, target, args) {
     keysBackfilled: 0,
     corrupt: [],
     rewritten: 0,
+    readbackFailed: [],
   };
   const paths = [...target.fields.map((f) => f.path), ...target.legacyPlaintextSelfHeal];
   // 投影必须带上键列：`--keys-only` 靠比对"已有键 vs 将写入的键"来决定是否重写
@@ -450,13 +505,15 @@ async function scanAndRewrite(coll, target, args) {
     const update = {};
 
     // legacyPlaintextSelfHeal（当前只有 users.realName）：这些列**刻意保持明文**，
-    // 若某行在加密窗口内已带密文（本脚本早期版本或手工操作产物），这里解回
-    // 明文自愈——窗口期密文都是「当前密钥」产物，直接用当前密钥解；
-    // 解不开按损坏行点名（与受管列同一口径）。
+    // 加密窗口内的密文行在此解回明文自愈（窗口期密文都是「当前密钥」产物）。
+    // AAD 必须与写侧同口径（2026-11-14 审计）：v2 密文缺 { subjectId, field }
+    // 上下文时解密在 buildAad 就抛错 ⇒ 窗口期以 v2 形态误加密的行会被误报成
+    // 「损坏行」（数据实际是好的）。v1 不消费该参数，传了无副作用；
+    // field 字面量与 PII_TARGETS 的 path 一致（写侧就是明文字段路径名）。
     for (const field of target.legacyPlaintextSelfHeal) {
       if (isEncrypted(getPath(doc, field))) {
         try {
-          update[field] = decryptPii(getPath(doc, field));
+          update[field] = decryptPii(getPath(doc, field), { subjectId: String(doc._id), field });
         } catch (e) {
           stats.corrupt.push({ id: String(doc._id), field, reason: e.message });
         }
@@ -482,7 +539,7 @@ async function scanAndRewrite(coll, target, args) {
     if (Object.keys(update).length > 0) {
       stats.rewritten += 1;
       if (args.apply) {
-        await coll.updateOne({ _id: doc._id }, { $set: update });
+        await verifyAppliedWrite(coll, doc, update, stats);
       }
     }
   }

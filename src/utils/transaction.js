@@ -1,8 +1,7 @@
 /**
  * MongoDB 事务封装（第二轮审计，修复 B-1 的基础设施）
  *
- * 背景：全仓 51 处写点中，设备删除（deleteDevice）等少数路径存在真实的
- * 跨集合多步写；无事务时任一步失败会残留悬空引用（幽灵告警/巡检数据）。
+ * 背景：全仓 51 处写点中，设备删除（deleteDevice）等少数路径存在真实的跨集合多步写；无事务时任一步失败会残留悬空引用（幽灵告警/巡检数据）。
  *
  * 设计约束：MongoDB 事务要求副本集（或 mongos），而开发/测试环境是
  * standalone（mongodb-memory-server 单节点）。强制事务会让全部测试与单机
@@ -94,7 +93,8 @@ async function withTransaction(fn, options = {}) {
   } finally {
     // endSession() 是 async，而且它会**显式 rethrow**：node_modules/mongodb/lib/sessions.js:121-129
     // 的 catch 里除 MongoOperationTimeoutError 外全部 squash，唯独这一种 `throw error`。
-    // 原先这里裸调用 ⇒ 没人持有的拒绝 ⇒ src/index.js:526 的 unhandledRejection 处理器
+    // 原先这里裸调用 ⇒ 没人持有的拒绝 ⇒ src/index.js:533 的 unhandledRejection 处理器
+    // （2026-11-15 审计收敛批把崩溃收尾链抽到 utils/crashFlush.js，注册区净 −4 行后由 :526 顺移；同日全树 prettier 规范化后 :522→:524；PROXY 装配抽 helper 后 :524→:533）
     // 在**所有环境**都 process.exit(1)：一次事务清理超时打死整个进程（不是日志噪音）。
     // 上游同一条链的写法就是"接住"：mongoose/lib/connection.js:743
     // `session.endSession().catch(() => {})`、mongodb/lib/cursor/abstract_cursor.js:579

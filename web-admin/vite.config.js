@@ -128,11 +128,13 @@ const elementPlusDirectiveResolver = () => {
 // 安全响应头
 const buildSecurityHeaders = (mode) => {
   const isDev = mode === 'development'
-  // 开发模式需 'unsafe-eval'：vue-i18n 完整构建内置消息编译器，运行时用 new Function()
-  // 编译翻译文案，缺 'unsafe-eval' 会被 CSP 拦截（浏览器报 "blocks the use of 'eval'"）
-  // 生产构建保持严格 'self'；若生产出现同类拦截，正解是引入 @intlify/unplugin-vue-i18n
-  // 做预编译，而不是放宽线上 CSP
-  const scriptSrc = isDev ? "script-src 'self' 'unsafe-inline' 'unsafe-eval'" : "script-src 'self'"
+  // P3（2026-11-15 核实）：dev 不再需要 'unsafe-eval'。旧注释称 vue-i18n 完整构建
+  // 运行时 new Function 编译文案——该理由已失效：项目自定义 messageCompiler
+  // （web-admin/src/i18n/index.js，纯字符串插值、无函数求值）无条件替换了默认
+  // JIT 编译器，且生产 CSP 一直以严格 "script-src 'self'" 跑同一条代码路径。
+  // 若开发期出现 CSP 拦截，正解与生产同口径：做预编译/修编译器，而不是放宽 dev CSP。
+  // 'unsafe-inline' 保留：Vite dev 客户端与首帧主题脚本的历史形态仍在使用。
+  const scriptSrc = isDev ? "script-src 'self' 'unsafe-inline'" : "script-src 'self'"
   // ← 修改：开发模式放宽 connect-src 协议限制，兼容局域网/热点 IP 访问时的 HMR WebSocket
   // L8：生产 connect-src 仅保留 'self'（API/WS 均经同域 Nginx 代理），
   // 移除部署后不存在的 localhost 遗留项

@@ -287,7 +287,7 @@ function formatShipper() {
     '# HELP log_shipper_flush_failures_total Log batches that failed to reach the SIEM endpoint',
     '# TYPE log_shipper_flush_failures_total counter',
     'log_shipper_flush_failures_total ' + shipperFlushFailures,
-    '# HELP log_shipper_dropped_lines_total Log lines dropped because the in-process buffer hit its cap',
+    '# HELP log_shipper_dropped_lines_total Log lines lost between logger and SIEM (buffer cap trim, or JSON.stringify failure)',
     '# TYPE log_shipper_dropped_lines_total counter',
     'log_shipper_dropped_lines_total ' + shipperDroppedLines,
   ];

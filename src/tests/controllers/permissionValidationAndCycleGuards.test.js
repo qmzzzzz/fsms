@@ -325,5 +325,68 @@ describe('权限接口加固回归', () => {
       expect(res.status).toBe(200);
       expect((await Permission.findById(child._id)).parent).toBeFalsy();
     });
+
+    test('写后复验：并发窗口成环 ⇒ 补偿回滚 + PARENT_PERMISSION_CYCLE（先查后写竞态收口）', async () => {
+      // 预检查是「先查后写」：两次并发 update（A.parent=B 与 B.parent=A）可以双双
+      // 通过检查再双双落库成环。测试环境是 standalone（withTransaction 降级），
+      // 没有事务可依赖 ⇒ 控制器在提交点后按库现值重走链路。这里用 spy 模拟并发
+      // 窗口：本请求（A.parent=B）预检查通过后、savePermission 落库前，另一请求
+      // 把 B.parent=A 先写进库。
+      const a = await Permission.create({
+        name: 'PostWriteA',
+        code: `pwa:${rnd()}`,
+        type: 'api',
+        module: 'test',
+      });
+      const b = await Permission.create({
+        name: 'PostWriteB',
+        code: `pwb:${rnd()}`,
+        type: 'api',
+        module: 'test',
+      });
+      const permissionService = require('../../services/permissionService');
+      const original = permissionService.savePermission.bind(permissionService);
+      const spy = jest
+        .spyOn(permissionService, 'savePermission')
+        .mockImplementation(async (doc) => {
+          await Permission.updateOne({ _id: b._id }, { $set: { parent: a._id } });
+          return original(doc);
+        });
+      try {
+        const res = await request(app)
+          .put(`/api/permissions/${a._id}`)
+          .set('Authorization', `Bearer ${token}`)
+          .send({ parent: String(b._id) });
+        expect(res.status).toBe(400);
+        expect(res.body.errors.errorCode).toBe('PARENT_PERMISSION_CYCLE');
+        // 补偿回滚：A.parent 回到写前快照（顶层），库里不留环
+        const fresh = await Permission.findById(a._id).select('parent').lean();
+        expect(fresh.parent).toBeFalsy();
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    test('写后复验不误伤正常写入：无并发窗口时合法挂载照常 200', async () => {
+      const root = await Permission.create({
+        name: 'PostWriteOkR',
+        code: `pwor:${rnd()}`,
+        type: 'api',
+        module: 'test',
+      });
+      const leaf = await Permission.create({
+        name: 'PostWriteOkL',
+        code: `pwol:${rnd()}`,
+        type: 'api',
+        module: 'test',
+      });
+      const res = await request(app)
+        .put(`/api/permissions/${leaf._id}`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ parent: String(root._id) });
+      expect(res.status).toBe(200);
+      const fresh = await Permission.findById(leaf._id).select('parent').lean();
+      expect(String(fresh.parent)).toBe(String(root._id));
+    });
   });
 });

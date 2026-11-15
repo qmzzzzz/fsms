@@ -137,12 +137,49 @@ describe('§13 V-5 sessionSync 通道层', () => {
 
     expect(KEY).toBe(STORAGE_MIRROR_KEY)
     const payload = { type: 'login', userId: 'u-admin', username: 'admin', ts: Date.now() }
+    localStorage.setItem(KEY, JSON.stringify(payload))
     window.dispatchEvent(
       new StorageEvent('storage', { key: STORAGE_MIRROR_KEY, newValue: JSON.stringify(payload) })
     )
 
     expect(received).toHaveLength(1)
     expect(received[0]).toMatchObject({ type: 'login', userId: 'u-admin' })
+    // P3：接收方用后即清——用户名不滞留 localStorage
+    expect(localStorage.getItem(KEY)).toBeNull()
+  })
+
+  test('兜底镜像键写方延迟摘除（P3）：广播后 1s 清理，用户名不长期滞留', async () => {
+    vi.stubGlobal('BroadcastChannel', undefined)
+    vi.useFakeTimers()
+    try {
+      const { broadcastAuthChange } = await loadModule()
+      broadcastAuthChange('login', { userId: 'u-carol', username: 'carol' })
+      // 写入即时可见（投递依赖它）
+      expect(localStorage.getItem(STORAGE_MIRROR_KEY)).not.toBeNull()
+      vi.advanceTimersByTime(1100)
+      expect(localStorage.getItem(STORAGE_MIRROR_KEY)).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('写方延迟摘除不覆盖新广播：值已变（别的标签页写了新载荷）时跳过', async () => {
+    vi.stubGlobal('BroadcastChannel', undefined)
+    vi.useFakeTimers()
+    try {
+      const { broadcastAuthChange } = await loadModule()
+      broadcastAuthChange('login', { userId: 'u-a', username: 'a' })
+      // 模拟另一个标签页在窗口期内写入了自己的新载荷
+      localStorage.setItem(
+        STORAGE_MIRROR_KEY,
+        JSON.stringify({ type: 'logout', userId: 'u-b', username: 'b', ts: Date.now() + 1 })
+      )
+      vi.advanceTimersByTime(1100)
+      // 不是自己写的那份 → 不动它（由它的写方/接收方负责清理）
+      expect(localStorage.getItem(STORAGE_MIRROR_KEY)).not.toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   test('initSessionSync：其他 key / 空值 / 非法 JSON 一律忽略', async () => {

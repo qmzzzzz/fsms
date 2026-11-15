@@ -94,6 +94,24 @@ function parseArgs(argv) {
 }
 
 // ============================ 渲染（纯函数） ============================
+/**
+ * 留档字段转义（纯函数）。写进 markdown 的一切动态值都过这一层：
+ * CLI 的 --operator / --environment / --note 是现场输入，manifest 里的
+ * timestamp / uri / 集合名也可能来自别人产出的文件——不转义的后果：
+ *   · 换行可以在表格单元里拆表、在"补充"段凭空开出标题/新段落，
+ *     把记录改成"看起来由别人签署"的形状（留档是演练时效的证据，注入即伪造证据）；
+ *   · `|` 直接拆列，`\` 是 markdown 转义符本身。
+ * 折叠所有空白（含换行）为单个空格；只转义 `\` 与 `|` 两个结构性字符，
+ * 不吞反引号/星号等强调语法——留档是给人读的，过度转义会让合法内容面目全非。
+ */
+function escapeRecordField(value) {
+  return String(value ?? '')
+    .replace(/\s+/g, ' ')
+    .replace(/\\/g, '\\\\')
+    .replace(/\|/g, '\\|')
+    .trim();
+}
+
 /** 已有的 `### 演练 #N` 最大序号；没有则 0（下一条从 #1 起） */
 function maxDrillNumber(text) {
   const re = /^###\s*演练\s*#(\d+)/gm;
@@ -170,13 +188,14 @@ function validateManifest(manifest) {
  * @returns {string}
  */
 function renderDrillRecord({ manifest, sequence, operator, environment = null, note = null }) {
-  const when = manifest.timestamp.replace(/T/, ' ').replace(/\..*$/, '');
+  // 全部动态值先转义再进模板（见 escapeRecordField 的头注释）
+  const when = escapeRecordField(manifest.timestamp).replace(/T/, ' ').replace(/\..*$/, '');
   const date = when.slice(0, 10);
   const rows = Object.entries(manifest.collections).map(([name, c]) => {
-    const snap = c.documents;
-    const restored = c.restored;
-    const same = restored === snap ? '☑ 一致' : '☐ **不一致**';
-    return `| ${name} | ${snap} | ${restored} | ${same} |`;
+    const snap = escapeRecordField(c.documents);
+    const restored = escapeRecordField(c.restored);
+    const same = c.restored === c.documents ? '☑ 一致' : '☐ **不一致**';
+    return `| ${escapeRecordField(name)} | ${snap} | ${restored} | ${same} |`;
   });
 
   const verdict = manifest.restoreVerified
@@ -189,8 +208,12 @@ function renderDrillRecord({ manifest, sequence, operator, environment = null, n
     '| 项目     | 内容 |',
     '| -------- | ---- |',
     `| 演练日期 | ${when} |`,
-    `| 执行人   | ${operator} |`,
-    `| 环境     | ${environment || `库 ${manifest.uri}（由 run-rollback-drill.js 记录）`} |`,
+    `| 执行人   | ${escapeRecordField(operator)} |`,
+    `| 环境     | ${
+      environment
+        ? escapeRecordField(environment)
+        : `库 ${escapeRecordField(manifest.uri)}（由 run-rollback-drill.js 记录）`
+    } |`,
     '| 演练范围 | ☐ 备份 ☐ 蓝绿切流 ☐ 应用层回滚 ☐ 迁移回滚 ☑ 数据级恢复 |',
     '',
     '**数据级回滚结果**（来源：`scripts/run-rollback-drill.js` 的 manifest，自动登记）：',
@@ -201,7 +224,7 @@ function renderDrillRecord({ manifest, sequence, operator, environment = null, n
     '',
     `**结论**：${verdict}`,
   ];
-  if (note) lines.push('', `**补充**：${note}`);
+  if (note) lines.push('', `**补充**：${escapeRecordField(note)}`);
   lines.push('');
 
   return lines.join('\n');
@@ -293,6 +316,7 @@ if (require.main === module) {
 module.exports = {
   DEFAULT_RECORD_FILE,
   RECORD_ANCHOR,
+  escapeRecordField,
   parseArgs,
   maxDrillNumber,
   validateManifest,

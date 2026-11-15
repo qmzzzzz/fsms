@@ -34,7 +34,12 @@ const os = require('os');
 const path = require('path');
 const mongoose = require('mongoose');
 
-// 必须在 require 之前设：链锁超时与 WAL 路径都在模块加载期读 env
+// 必须在 require 之前设：链锁超时与 WAL 路径都在模块加载期读 env。
+// P2-9：写入前先快照原值——AUDIT_WAL_PATH 是**运行期**被 6 个套件的 start() 现读的
+// （auditBuffer.js:471 wal.startup(process.env.AUDIT_WAL_PATH)），套件结束若不还原，
+// 同 worker 后续套件的 WAL 会指向本文件已删除的临时目录、静默失效（乱序下必踩）。
+const PREV_AUDIT_WAL_PATH = process.env.AUDIT_WAL_PATH;
+const PREV_AUDIT_CHAIN_LOCK_TIMEOUT_MS = process.env.AUDIT_CHAIN_LOCK_TIMEOUT_MS;
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'probe-zombie-'));
 process.env.AUDIT_WAL_PATH = path.join(tmpDir, 'zombie.wal');
 process.env.AUDIT_CHAIN_LOCK_TIMEOUT_MS = '150';
@@ -89,7 +94,18 @@ describe('链锁超时与僵尸写入的重复落库', () => {
     // 文件级压低的链锁预算随套件归还（auditChain 已改为每次 withChainLock 现读）：
     // 不还则同 worker 后续套件的锁预算被钉死在 150ms，负载下 flush 中止回缓冲
     // （seed 31337 实测：precastGate 的 insertMany 收空、攻击检测审计行 0 条）
-    delete process.env.AUDIT_CHAIN_LOCK_TIMEOUT_MS;
+    if (PREV_AUDIT_CHAIN_LOCK_TIMEOUT_MS === undefined) {
+      delete process.env.AUDIT_CHAIN_LOCK_TIMEOUT_MS;
+    } else {
+      process.env.AUDIT_CHAIN_LOCK_TIMEOUT_MS = PREV_AUDIT_CHAIN_LOCK_TIMEOUT_MS;
+    }
+    // WAL 路径随套件归还（P2-9）：本套件的 start()/stop() 已在上面收尾，先还 env 再删
+    // 临时目录——归还后同 worker 的后续套件读到的是原值（通常为未设 ⇒ 按库名派生默认路径）
+    if (PREV_AUDIT_WAL_PATH === undefined) {
+      delete process.env.AUDIT_WAL_PATH;
+    } else {
+      process.env.AUDIT_WAL_PATH = PREV_AUDIT_WAL_PATH;
+    }
     try {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     } catch (_) {

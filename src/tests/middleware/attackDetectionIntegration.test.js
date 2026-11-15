@@ -18,7 +18,12 @@
 const request = require('supertest');
 const mongoose = require('mongoose');
 
-// 风暴阈值压到 5（模块在 require 时读 env，必须先设再 require app）
+// 风暴阈值压到 5（模块在 require 时读 env，必须先设再 require app）。
+// 写入前快照原值（env 泄漏收口）：阈值是事件时现读的，套件结束随 afterAll 归还
+const PREV_SCAN_ENVS = {
+  SCAN_404_THRESHOLD: process.env.SCAN_404_THRESHOLD,
+  SCAN_404_WINDOW_MS: process.env.SCAN_404_WINDOW_MS,
+};
 process.env.SCAN_404_THRESHOLD = '5';
 process.env.SCAN_404_WINDOW_MS = '60000';
 
@@ -46,6 +51,9 @@ const waitForRow = async (action, predicate = () => true, tries = 40) => {
 
 describe('攻击检测面 · 真实链路集成', () => {
   let app;
+  // TRUST_PROXY_HOPS 注入前的原值（env 泄漏收口）：beforeAll 覆写、afterAll 按快照还原，
+  // 不再假设「原值必为未设」——若同 worker 前序套件留过别的档位，覆写后原值还能找回来
+  const prevTrustProxyHops = process.env.TRUST_PROXY_HOPS;
 
   beforeAll(async () => {
     if (mongoose.connection.readyState === 0) {
@@ -64,11 +72,14 @@ describe('攻击检测面 · 真实链路集成', () => {
     if (mongoose.connection.readyState !== 0) {
       await mongoose.connection.close();
     }
-    if (process.env.TRUST_PROXY_HOPS === '1') delete process.env.TRUST_PROXY_HOPS;
+    if (prevTrustProxyHops === undefined) delete process.env.TRUST_PROXY_HOPS;
+    else process.env.TRUST_PROXY_HOPS = prevTrustProxyHops;
     // 检测阈值改为事件时现读后，文件级的压低值会漏给同 worker 的后续套件
-    // （阈值 5 对生产形态的默认 40 来说形同无闸）——随套件归还
-    delete process.env.SCAN_404_THRESHOLD;
-    delete process.env.SCAN_404_WINDOW_MS;
+    // （阈值 5 对生产形态的默认 40 来说形同无闸）——按快照随套件归还
+    if (PREV_SCAN_ENVS.SCAN_404_THRESHOLD === undefined) delete process.env.SCAN_404_THRESHOLD;
+    else process.env.SCAN_404_THRESHOLD = PREV_SCAN_ENVS.SCAN_404_THRESHOLD;
+    if (PREV_SCAN_ENVS.SCAN_404_WINDOW_MS === undefined) delete process.env.SCAN_404_WINDOW_MS;
+    else process.env.SCAN_404_WINDOW_MS = PREV_SCAN_ENVS.SCAN_404_WINDOW_MS;
   });
 
   beforeEach(async () => {

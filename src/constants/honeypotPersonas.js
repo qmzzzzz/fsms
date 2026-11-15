@@ -1,3 +1,5 @@
+'use strict';
+
 const { normalizeCanaryUsername } = require('./canaryAccounts'); // 归一化与诱饵名/哨兵名同一套（trim + 小写），否则 ROOT 与 root 会派出两份画像
 
 const PERSONA_SURNAMES = Object.freeze([

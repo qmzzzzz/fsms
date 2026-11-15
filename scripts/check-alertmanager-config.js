@@ -23,14 +23,18 @@ const {
   CONTAINER_ALERTMANAGER_CONFIG_PATH,
 } = require('./alertmanager-config-path');
 
-// argv[2] 优先（compose 显式传挂载点），其次 ALERTMANAGER_CONFIG_PATH，
-// 最后回退容器内挂载点。解析规则与部署预检/合规检查共用（A-6）。
-const file =
-  process.argv[2] || resolveAlertmanagerConfigPath(process.env, CONTAINER_ALERTMANAGER_CONFIG_PATH);
-const allowPlaceholder =
-  (process.env.ALLOW_PLACEHOLDER_ALERT_WEBHOOK || '').trim().toLowerCase() === 'true';
-
 function main() {
+  // argv[2] 优先（compose 显式传挂载点），其次 ALERTMANAGER_CONFIG_PATH，
+  // 最后回退容器内挂载点。解析规则与部署预检/合规检查共用（A-6）。
+  // 刻意收进 main()：模块顶层读 argv/env 会让"只 require 判据做单测"的调用方
+  // 被 jest 进程的 argv 污染（判据/执行分离的另一半：守卫管执行时机，
+  // argv/env 的读取只属于执行支）。
+  const file =
+    process.argv[2] ||
+    resolveAlertmanagerConfigPath(process.env, CONTAINER_ALERTMANAGER_CONFIG_PATH);
+  const allowPlaceholder =
+    (process.env.ALLOW_PLACEHOLDER_ALERT_WEBHOOK || '').trim().toLowerCase() === 'true';
+
   let source;
   try {
     source = fs.readFileSync(file, 'utf8');
@@ -70,4 +74,10 @@ function main() {
   return 1;
 }
 
-process.exit(main());
+// 只在被直接执行时运行（compose 校验容器即此形态）；被 require（判据测试/复用）
+// 时不得读 argv、不得 process.exit——与同族 check-* 脚本同守卫。
+if (require.main === module) {
+  process.exit(main());
+}
+
+module.exports = { main };

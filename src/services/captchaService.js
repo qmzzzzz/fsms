@@ -1,23 +1,13 @@
 /**
- * 图形验证码服务
- * 生成 SVG 验证码并提供一次性校验（登录前置人机校验）
- *
- * 存储说明：
- * - 经 sharedCache 门面存储（captchaId → { text }）：
- *   配置 REDIS_URL 时为跨实例共享（验证码请求被负载均衡到任一实例均可校验）；
+ * 图形验证码服务：生成 SVG 验证码并提供一次性校验（登录前置人机校验）。存储说明：
+ * - 经 sharedCache 门面存储（captchaId → { text }）：配置 REDIS_URL 时为跨实例共享（验证码请求被负载均衡到任一实例均可校验）；
  *   未配置时回退进程内内存（单机部署/开发/测试行为不变）。
  * - 条目自带过期时间（门面按 TTL 存储），容量上限由独立计数器保护。
- *
- * 安全语义：
- * - 一次性消费：verify 无论成功与否都删除记录，杜绝同一验证码重放/爆破
- * - 大小写不敏感比对，5 分钟有效
- * - 上限保护 + 过期清理，防止恶意刷取撑爆存储
- * - 全局上限之外再加**单 IP 活跃配额**，并把计数还给「成功生成 / 消费」：
- *   只靠全局上限时，分布式刷取可以把计数顶满，让所有用户的登录/注册验证码
- *   一起不可用（#8）；拒绝路径也不得计数，否则洪水本身会把上限维持住。
- *
- * 注意：generate/verify 自 R-3 起为异步 API（共享存储读取必须异步），
- * 调用方需 await。
+ * 安全语义：- 一次性消费：verify 无论成功与否都删除记录，杜绝同一验证码重放/爆破；
+ * - 大小写不敏感比对，5 分钟有效；- 上限保护 + 过期清理，防止恶意刷取撑爆存储；
+ * - 全局上限之外再加**单 IP 活跃配额**，并把计数还给「成功生成 / 消费」：只靠全局上限时，分布式刷取可以把计数顶满，
+ *   让所有用户的登录/注册验证码一起不可用（#8）；拒绝路径也不得计数，否则洪水本身会把上限维持住。
+ * 注意：generate/verify 自 R-3 起为异步 API（共享存储读取必须异步），调用方需 await。
  */
 
 const crypto = require('crypto');
@@ -39,13 +29,9 @@ const CAPTCHA_CONFIG = {
 
 const CAPTCHA_TTL_MS = 5 * 60 * 1000; // 有效期 5 分钟
 const MAX_ACTIVE_ENTRIES = 10000; // 全局活跃上限（存储保护）
-// 单 IP 活跃配额：把「打满全局」的成本从 ~167 个源地址（60 次/5 分钟/IP）
-// 抬到 **500 个**（MAX_ACTIVE_ENTRIES / MAX_ACTIVE_ENTRIES_PER_IP = 10000 / 20）。
-// 【2026-10-24 更正：原文写"上千个"，与这两个常量对不上】按 10000/20 算是 500；
-// 且 20 小于 captchaLimiter 的 60 次/5 分钟，所以 20 才是先触发的那条 —— 两者
-// 一起决定了"打满需要 500 个源、每个源 20 枚"。这个数字直接决定要不要继续加固，
-// 写成两倍会让人低估风险。
-// 正常用户同一时刻只需 1-2 枚，重试也有余量。
+// 单 IP 活跃配额：把「打满全局」的成本从 ~167 个源地址（60 次/5 分钟/IP）抬到 **500 个**（MAX_ACTIVE_ENTRIES / MAX_ACTIVE_ENTRIES_PER_IP = 10000 / 20）。
+// 【2026-10-24 更正：原文写"上千个"，与这两个常量对不上】按 10000/20 算是 500；且 20 小于 captchaLimiter 的 60 次/5 分钟，所以 20 才是先触发的那条 ——
+// 两者一起决定了"打满需要 500 个源、每个源 20 枚"。这个数字直接决定要不要继续加固，写成两倍会让人低估风险。正常用户同一时刻只需 1-2 枚，重试也有余量。
 const MAX_ACTIVE_ENTRIES_PER_IP = 20;
 const CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 过期清理周期
 
@@ -61,10 +47,8 @@ let lastCapWarnAt = 0;
 
 const entryKey = (captchaId) => `captcha:${captchaId}`;
 const COUNT_KEY = 'captcha:active-count';
-// 保留键判定：所有以 active-count 开头的 captchaId 都会撞进计数器键命名空间
-// （全局键 captcha:active-count 与按 IP 键 captcha:active-count:ip:*）。
-// 客户端可自由提交 captchaId，若不拦，verify 的 getDel 会删掉计数键（见 verify）。
-// 合法 captchaId 恒为 crypto.randomUUID()，永不会取此值。
+// 保留键判定：所有以 active-count 开头的 captchaId 都会撞进计数器键命名空间（全局键 captcha:active-count 与按 IP 键 captcha:active-count:ip:*）。
+// 客户端可自由提交 captchaId，若不拦，verify 的 getDel 会删掉计数键（见 verify）。合法 captchaId 恒为 crypto.randomUUID()，永不会取此值。
 const collidesWithCountKey = (captchaId) => String(captchaId).startsWith('active-count');
 // IP 只以摘要进入键名：避免把地址原文写进共享存储与日志，同时保持定长。
 const ipScopeOf = (ip) => {
@@ -85,9 +69,7 @@ const startCaptchaCleanup = () => {
   cleanupTimer.unref?.();
 };
 
-/**
- * 停止定期清理（供优雅关闭调用）
- */
+/** 停止定期清理（供优雅关闭调用） */
 const stopCaptchaCleanup = () => {
   if (cleanupTimer) {
     clearInterval(cleanupTimer);
@@ -125,8 +107,9 @@ function pruneLocal() {
  *     而生产默认 `LOG_LEVEL=info`（utils/logger.js:85）⇒ **debug 根本不落盘**。
  * ⇒ 即「Redis 就绪但命令报错」期间，洪水护栏消失这件事在默认配置下**完全不可见**：
  *   没有日志、没有指标、没有告警。这正是本仓纪律所反对的形态
- *   （middleware/rateLimitStore.js:53-56：「降级态只写日志等于没有可告警信号——
- *   `grep 日志` 不是运维动作」；middleware/security/ipBlacklist.js:205 同口径）。
+ *   （middleware/rateLimitStore.js:22-27：「降级态只写日志等于没有可告警信号——
+ *   `grep 日志` 不是运维动作」；2026-11-14 审计修复批 makeDegradationSignal 抽到模块级，
+ *   纪律句由 :53-56 迁 :22-27；middleware/security/ipBlacklist.js:205 同口径）。
  *
  * 走 `incSecurityAlert` 与 `checkIPBlacklist` 的 ip_blacklist_failopen、
  * `makeSharedStore` 的 ratelimit_store_degraded **同一计数器**，因此被
@@ -143,7 +126,8 @@ const noteActiveBoundLost = () => {
   }
   // 日志与指标都要：指标给告警，日志给现场（含键名与 TTL 口径）。
   // 不设「只告警一次」的标志位——本仓已吃过「一次性信号被当成持续信号」的亏
-  // （middleware/rateLimitStore.js:66-79），而这里的调用频率受 captchaLimiter 约束。
+  // （middleware/rateLimitStore.js:40-48；原写 :66-79，makeDegradationSignal 抽到模块级后
+  // 「一次性信号」教训段随迁 :40-48），而这里的调用频率受 captchaLimiter 约束。
   logger.warn(
     `验证码活跃数上限判定不可用（Redis 已启用但计数读取失败），本次不设上限：${COUNT_KEY}`
   );
@@ -166,6 +150,27 @@ const noteCapReached = (scope) => {
   const limit = scope === 'ip' ? MAX_ACTIVE_ENTRIES_PER_IP : MAX_ACTIVE_ENTRIES;
   logger.warn(
     `验证码活跃数已达${scope === 'ip' ? '单 IP' : '全局'}上限（${limit}），拒绝生成，疑似异常刷取`
+  );
+};
+
+/**
+ * 验证码条目写入共享层失败时的统一信号出口（log + 安全告警计数）。
+ *
+ * `sharedCache.set` 返回 false = 共享层没收到（未就绪/命令抛错），条目此刻只落在本进程
+ * 内存回退里——本实例的 verify 仍可用，但 LB 把校验请求派到其他实例时条目查无此物
+ * ⇒ 用户拿着一张本实例才能过的验证码（降级方向：本实例 fail-open、跨实例 fail-closed）。
+ * 门面在这条路径上只有 debug 日志（生产 info 不落盘），不留声就等于降级不可见——
+ * 与上方 noteActiveBoundLost 同一条纪律。台账登记见 constants/failOpenSites.js
+ * 的 captcha_issue_store_degraded。
+ */
+const noteIssueStoreDegraded = () => {
+  try {
+    require('../utils/metrics').incSecurityAlert('captcha_issue_store_degraded', 'medium');
+  } catch (_) {
+    /* 指标端不可用不影响生成主流程 */
+  }
+  logger.warn(
+    '验证码条目未落到共享层（Redis 不可用，仅本进程内存可校验），跨实例校验将失败：captcha:*'
   );
 };
 
@@ -237,8 +242,16 @@ const generate = async ({ ip } = {}) => {
   const entry = { text: captcha.text, ipKey };
 
   if (redis) {
-    // TTL 带抖动：避免大批验证码同一时刻过期（O-15）；一次性语义不受影响
-    await sharedCache.set(entryKey(captchaId), entry, sharedCache.jitterTtl(CAPTCHA_TTL_MS));
+    // TTL 带抖动：避免大批验证码同一时刻过期（O-15）；一次性语义不受影响。
+    // 返回值必须查：false = 共享层没收到、条目只在本进程内存——照常发码（可用性优先，
+    // 与上方「刻意不 fail-closed」同一方向），但必须留声，否则"发出去的码别处验不了"
+    // 这件事在默认日志级别下无任何痕迹（见 noteIssueStoreDegraded）。
+    const landed = await sharedCache.set(
+      entryKey(captchaId),
+      entry,
+      sharedCache.jitterTtl(CAPTCHA_TTL_MS)
+    );
+    if (landed === false) noteIssueStoreDegraded();
   } else {
     localStore.set(captchaId, { ...entry, expiresAt: Date.now() + CAPTCHA_TTL_MS });
     localIpCounts.set(ipKey, (localIpCounts.get(ipKey) || 0) + 1);
@@ -263,8 +276,7 @@ const verify = async (captchaId, inputText) => {
   if (collidesWithCountKey(captchaId)) return false;
 
   if (sharedCache.isRedisEnabled()) {
-    // 评价报告低危项：原 get→del 两步在并发下同一验证码可被消费两次（双花）。
-    // 改用原子取删 GETDEL（sharedCache.getDel）：取值与删除在同一命令内完成。
+    // 评价报告低危项：原 get→del 两步在并发下同一验证码可被消费两次（双花）。改用原子取删 GETDEL（sharedCache.getDel）：取值与删除在同一命令内完成。
     const entry = await sharedCache.getDel(entryKey(captchaId)).catch(() => null);
     if (!entry) return false;
     // 条目已离开存储 ⇒ 无论比对结果如何，都要归还它占用的双配额

@@ -1,8 +1,4 @@
-/**
- * 限流中间件
- * 防止 API 滥用和暴力攻击
- */
-// 限流中间件：防止 API 滥用和暴力攻击
+// 限流中间件：防止 API 滥用和暴力攻击（防滥用/暴力攻击面，桶口径见各 limiter 定义）
 
 const rateLimit = require('express-rate-limit');
 const { ipKeyGenerator } = rateLimit;
@@ -634,7 +630,8 @@ const passwordChangeLimiter = rateLimit({
  * "单账号 5 次/15 分钟"实际变成"单账号 × 每个源 IP 各 5 次"。
  * 两条独立放大路径：
  *   · 代理池/NAT 后面的真·多源 IP（不需要任何伪造）；
- *   · `TRUST_PROXY_HOPS>0` 时（生产 compose 默认 1 跳，`app.js:211`）
+ *   · `TRUST_PROXY_HOPS>0` 时（生产 compose 默认 1 跳，`app.js:214`；
+ *     2026-11-15 dev 访问日志脱敏批在 app.js 文件头 +2 行 require，注入点由 :211 顺移）
  *     能直连应用端口的主体（同网段容器、宿主进程、SSRF 跳转）用
  *     `X-Forwarded-For` 任意编造 req.ip——实测伪造一跳即可让 req.ip 变成 1.2.3.4，
  *     审计行记录的来源 IP 与 `password_changed` 溯源同被写成假值。

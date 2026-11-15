@@ -30,21 +30,39 @@
 const mongoose = require('mongoose');
 require('../src/config/secrets').hydrateSecretsFromFiles();
 const { resolveMongoUri, assertApplyAllowed } = require('./destructiveGuard');
+const { parseFlags } = require('./cliFlagPolicy');
 
-function parseArgs() {
-  const args = { apply: false, confirmYes: false };
-  for (const a of process.argv.slice(2)) {
-    if (a === '--apply') args.apply = true;
-    if (a === '--yes') args.confirmYes = true;
-  }
-  return args;
+/** 本脚本接受的开关（闭合集合；新增开关必须同步这里，否则被当未知参数拒绝） */
+const MODE_FLAGS = ['--apply', '--yes'];
+
+/**
+ * 未知参数不得「当没看见」（与 migrate-pii-encryption.js 同一口径，实现共用
+ * cliFlagPolicy 的白名单 + 最近建议）。原实现只认 --apply/--yes，其余 token 一律
+ * 静默忽略：拼错一个开关毫无反应，行为差异只能靠读源码反推——
+ * 例如 `--apply --yea` 会让脚本退化成演练模式（"以为改了、其实没改"的假成功，
+ * 比"以为没改、实际改了"更难发现，因为演练模式的输出长得像成功）。
+ */
+function parseArgs(argv = process.argv.slice(2)) {
+  const { flags, errors } = parseFlags(argv, MODE_FLAGS);
+  return {
+    args: { apply: flags.has('--apply'), confirmYes: flags.has('--yes') },
+    errors,
+  };
 }
 
 /** 「还持有恢复码」的统一判据：数组存在且至少有一条摘要（演练/回读共用） */
 const HOLDING_FILTER = { mfaRecoveryCodes: { $exists: true, $not: { $size: 0 } } };
 
 async function main() {
-  const args = parseArgs();
+  const { args, errors } = parseArgs();
+  // 参数错误必须在**任何副作用之前**拒绝：连 resolveMongoUri 都不做
+  // （被拒绝的执行不该向目标库握手，与 migrate-pii-encryption.js 同一纪律）。
+  if (errors.length) {
+    console.error(
+      '错误：参数无法识别，已拒绝执行（未连接数据库、未读写任何记录）：\n  ' + errors.join('\n  ')
+    );
+    process.exit(2);
+  }
 
   const { uri, dbName, host, isFallback } = resolveMongoUri({
     scriptName: 'invalidate-mfa-recovery-codes.js',
@@ -123,7 +141,14 @@ async function main() {
   process.exit(0);
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+// 只在被直接执行时运行。原实现是无条件 `main()`：任何 require（测试、复用
+// parseArgs 的其它脚本）都会立刻连库并跑全表统计——与 migrate-pii-encryption.js
+// 补守卫时踩的是同一个坑（"读一眼参数解析"的动作不该有副作用）。
+if (require.main === module) {
+  main().catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });
+}
+
+module.exports = { parseArgs, MODE_FLAGS };

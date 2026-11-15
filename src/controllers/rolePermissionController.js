@@ -52,12 +52,14 @@ const validateAssignmentInput = (req, res) => {
 
 const validatePermissionTargets = async (req, res, role, permissions, targetUserId) => {
   const objectIdRegex = /^[0-9a-fA-F]{24}$/;
-  // 格式过滤留在本处（非法片段不该静默混进 $in），归一（去重 + 大小写规范化）走唯一入口
-  // uniqueIdStrings，与 roleController.createRole 同一条尺——两条写路径各写一份归一，
-  // 同一个 role.permissions 字段就会出现两种落库形态。
-  const uniquePermIds = uniqueIdStrings(
-    permissions.filter((item) => objectIdRegex.test(String(item)))
-  );
+  // 非法片段必须显式 400 而不是静默滤掉：静默过滤 = 「提交 N 条、实授 N-1 条」回成功，
+  // 授予类操作报成功就必须真的授到了。归一（去重 + 大小写规范化）走唯一入口 uniqueIdStrings，
+  // 与 roleController.createRole 同一条尺（两种落库形态就是从那来的）。
+  if (permissions.some((item) => !objectIdRegex.test(String(item)))) {
+    ApiResponse.codeError(res, 'PERMISSION_ID_INVALID');
+    return null;
+  }
+  const uniquePermIds = uniqueIdStrings(permissions);
   if (uniquePermIds.length === 0) {
     ApiResponse.codeError(res, 'PERMISSION_ID_REQUIRED');
     return null;
@@ -266,7 +268,11 @@ const assignPermissions = asyncHandler(async (req, res) => {
   if (!assignment) return;
   const { uniquePermIds, operatorMaxLevel } = assignment;
 
-  if (input.targetUserId && role.isBuiltIn) {
+  if (input.targetUserId) {
+    // 非内置角色不支持克隆：targetUserId 此前被静默丢弃、请求落到全局改写分支——客户端以为只影响一个用户，实际改写整个角色的权限表
+    if (!role.isBuiltIn) {
+      return ApiResponse.codeError(res, 'TARGET_USER_NOT_CLONABLE');
+    }
     const targetUser = await findTargetUserInScope(
       req,
       res,
@@ -302,8 +308,7 @@ const assignPermissions = asyncHandler(async (req, res) => {
     const stillExists = await roleService.findRoleForUpdate(role._id);
     return ApiResponse.codeError(res, stillExists ? 'ROLE_STATE_CONFLICT' : 'ROLE_NOT_FOUND');
   }
-  // L-13：写后复验权限仍存在且生效。删除权限的请求采用「先删后查引用」，
-  // 本请求若在删除前通过校验、删除后才落库，这里会看到缺失并回滚。
+  // L-13：写后复验权限仍存在且生效（删除走「先删后查引用」，本请求若在校验后、落库前赶上删除，这里会看到缺失并回滚）
   const activePerms = await roleService.findPermissionsByIds(uniquePermIds, '_id', {
     activeOnly: true,
   });

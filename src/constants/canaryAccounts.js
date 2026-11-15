@@ -1,3 +1,5 @@
+'use strict';
+
 /**
  * 安全哨兵用户名（canary username）名单：默认值与 env 解析
  *

@@ -1,3 +1,5 @@
+'use strict';
+
 /**
  * 诱饵会话「本人自助面」的合成身份与轨迹（P2）与 honeypotDecoyData.js 的分工：那张表是"业务集合"的合成行，本文件只回答 "这个会话是谁"——权限目录、本人资料、登录与操作轨迹。权限行与真实目录逐字对齐（值取自 services/initData/permissionsSystem.js 与 permissionsBusiness.js）。装扮里出现一个真实系统里查不到的权限码，等于把陷阱写在脸上；这条同值关系由 src/tests/ci/honeypotSelfShapeParity.test.js 盯着。
  * 刻意排除四条（理由见 ADR-013 边界表"本人自助面"一节）：星号通配符（如 `system:*`）是超管语义，而装扮自称的是业务管理员；security:audit 与两条 pii 权限的缺席正是 P1c "审计导出 403、未脱敏导出要二次验证"两条回答自洽的前提——声称有权限却被拒。

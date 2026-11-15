@@ -18,6 +18,7 @@ jest.mock('../../utils/logger', () => ({
 
 const logger = require('../../utils/logger');
 const { postJson } = require('../../utils/httpPostJson');
+const metrics = require('../../utils/metrics');
 const { sendNotification } = require('../../services/securityAlertDelivery');
 
 const WEBHOOK = 'https://hooks.example.com/hook';
@@ -53,7 +54,9 @@ describe('webhook 域名解析与 IP 钉扎', () => {
     process.env.SECURITY_ALERT_WEBHOOK = WEBHOOK;
     process.env.SECURITY_ALERT_WEBHOOK_ALLOWLIST = 'hooks.example.com';
     delete process.env.SECURITY_ALERT_MIN_LEVEL;
-    delete process.env.SECURITY_ALERT_WEBHOOK_SECRET;
+    // 缺密钥已 fail-closed（不投递）：本文件绝大多数用例测的是"投递后的钉扎/签名"，
+    // 统一给默认密钥；"缺密钥不投递"由文件尾的专用用例单独钉住
+    process.env.SECURITY_ALERT_WEBHOOK_SECRET = 'whsec-default-for-pinning-tests';
     delete process.env.SECURITY_ALERT_DNS_TIMEOUT_MS;
     dnsLookup = jest.spyOn(dns.promises, 'lookup');
   });
@@ -166,5 +169,27 @@ describe('webhook 域名解析与 IP 钉扎', () => {
         )
         .digest('hex');
     expect(firstHeaders['X-Webhook-Signature']).toBe(expected);
+  });
+
+  test('webhook 已配置但签名密钥缺省 ⇒ fail-closed 不投递（不得发无签名载荷出站）', async () => {
+    delete process.env.SECURITY_ALERT_WEBHOOK_SECRET;
+    dnsLookup.mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
+
+    await sendNotification('probe_type', 'critical', '缺密钥探针');
+
+    // 目标校验都放行（公网域名），但不投递：无签名载荷不得出站
+    expect(postJson).not.toHaveBeenCalled();
+    // fail-closed 收敛必须留声：信号 + 日志各一条
+    const alertSpy = jest.spyOn(metrics, 'incSecurityAlert').mockImplementation(() => {});
+    try {
+      postJson.mockClear();
+      logger.warn.mockClear();
+      await sendNotification('probe_type', 'critical', '缺密钥探针（信号断言）');
+      expect(postJson).not.toHaveBeenCalled();
+      expect(alertSpy).toHaveBeenCalledWith('security_alert_webhook_unsigned_dropped', 'high');
+      expect(logger.warn.mock.calls.some((c) => String(c[0]).includes('fail-closed'))).toBe(true);
+    } finally {
+      alertSpy.mockRestore();
+    }
   });
 });

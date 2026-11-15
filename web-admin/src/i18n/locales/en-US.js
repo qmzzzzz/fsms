@@ -348,6 +348,9 @@ export default {
   },
   device: {
     title: 'Device Management',
+    // P3: deviceRoutes now requires deviceCode — the old "auto-generate if empty"
+    // placeholder contradicted the backend
+    deviceCodeRequiredHint: 'Enter the device code (required, max 50 characters)',
     deviceName: 'Device Name',
     deviceCode: 'Device Code',
     deviceType: 'Device Type',
@@ -507,7 +510,6 @@ export default {
     issuesFound: 'Findings',
     reviewCommentPlaceholder: 'Please enter a review comment',
     submitReviewBtn: 'Submit Review',
-    reviewCommentMinMsg: 'Review comment must be at least 10 characters',
     title: 'Inspection Management',
     inspectionTitle: 'Title',
     inspectionType: 'Type',
@@ -637,6 +639,8 @@ export default {
       'You do not have permission to view the permission catalog (requires permission:read or permission:tree). Only role metadata is shown.',
     permLoadFailed:
       'Failed to load this role’s permissions. The current selection does not reflect the real set, so saving is blocked. Please retry.',
+    permTreeLoadFailed:
+      'Failed to load the permission catalog; assignable permissions cannot be shown. Please retry — this also restores the current role’s selection.',
     codePlaceholder: 'e.g. SUPER_ADMIN, uppercase letters and underscores only',
     moduleFull: 'All Selected',
     modulePartial: 'Partial',
@@ -650,7 +654,6 @@ export default {
     clearPermTitle: 'Clear Permissions',
     clearPermConfirm:
       'This removes every permission from the role. Users holding it will immediately lose the corresponding abilities (effectively frozen). Continue?',
-    wsDisconnected: 'Realtime connection lost. Data on this page may be stale — reload to restore.',
     typeMenu: 'Menu',
     typeData: 'Data',
   },
@@ -765,7 +768,9 @@ export default {
     securityPolicy: 'Security Policy',
     bruteForceBan: 'Brute force auto-ban',
     ipRequired: 'Please enter IP address',
-    added: 'Added',
+    // P3: previous 'Added' was a sentence fragment when spliced with ip/list;
+    // now a complete interpolated sentence
+    added: 'Added {ip} to the {list}',
     queryMatch: 'IP Match Query',
     querying: 'Querying...',
     queryPlaceholder: 'Enter an IP to check matches, e.g. 192.168.1.10',
@@ -1014,6 +1019,7 @@ export default {
     createdHighRisk: 'High-risk grant submitted; {count} approvals required to activate',
     rejectTitle: 'Reject request',
     rejectPrompt: 'Enter a reason for rejecting {user} (optional)',
+    reasonTooLong: 'The rejection reason cannot exceed 200 characters',
     revokeTitle: 'Revoke grant',
     revokeConfirm:
       'Revoking immediately ends {count} permissions for {user}. This cannot be undone. Continue?',
@@ -1617,6 +1623,7 @@ export default {
         captcha_active_bound_lost: 'Captcha active entry bound lost',
         captcha_global_cap_reached: 'Captcha global concurrency cap reached',
         captcha_ip_cap_reached: 'Captcha per-IP concurrency cap reached',
+        captcha_issue_store_degraded: 'Captcha issue store degraded',
         captcha_switch_db_fallback: 'Captcha config fell back to database',
         forensic_capture_trigger_unavailable: 'Forensic capture trigger unavailable',
         forensic_capture_write_failed: 'Forensic capture write failed',
@@ -1642,6 +1649,7 @@ export default {
         reauth_grant_store_degraded: 'Re-auth grant store degraded',
         scan_probe_detected: 'Scanner Path Probing',
         scan_probe_storm: '404 Directory Brute-force Storm',
+        security_alert_webhook_unsigned_dropped: 'Unsigned security-alert webhook dropped',
         security_detection_failed: 'Security detection failed',
         sql_injection_attempt: 'SQL Injection Signature Hit',
         suspicious_ip_activity: 'Suspicious IP activity',
@@ -1914,9 +1922,11 @@ export default {
   },
   dashboard: {
     welcome: 'Welcome back to Fire Safety Management System!',
+    // P3: fallback display name when identity is missing (was hardcoded 'Admin')
+    defaultUserName: 'Admin',
     greetingLateNight: 'Good late night',
     greetingMorning: 'Good morning',
-    greetingNoon: 'Good noon',
+    greetingNoon: 'Good afternoon',
     greetingAfternoon: 'Good afternoon',
     greetingEvening: 'Good evening',
     totalDevices: 'Total Devices',
@@ -1977,7 +1987,6 @@ export default {
     startConfirm: 'Confirm to start',
     permissionDenied: 'Permission denied, cannot access this page',
     selectRequired: 'Please select',
-    autoGenerate: 'Auto-generate if empty',
     remark: 'Remark',
     exportSuccess: 'Export successful',
     exportFailed: 'Export failed',
@@ -1995,6 +2004,10 @@ export default {
       'Server response structure does not match expectations; some features may misbehave. Please contact an administrator.',
     permissionsUpdated:
       'Your permissions were changed by an administrator. The interface has been updated automatically (no re-login needed).',
+    // P2-6: global notice after realtime reconnect exhaustion / auth failure
+    // (moved up from role.wsDisconnected). Push loss affects every page, so the
+    // notice is registered once at the layout layer, not under the role namespace.
+    wsDisconnected: 'Realtime connection lost. Data on this page may be stale — reload to restore.',
     sessionExpired: 'Session is no longer valid, please sign in again',
     networkError: 'Network error, please check your connection',
     requestConfigError: 'Request configuration error',
@@ -2143,6 +2156,8 @@ export default {
     parentPermissionNotFound: 'Parent permission not found',
     parentPermissionCycle:
       'This parent setting would create a circular reference (the permission is already an ancestor of the target parent)',
+    permissionStateConflict:
+      'This permission code was just created by another operation; please refresh and retry',
     permissionTreeDepthAnomaly:
       'Abnormal permission tree depth; please ask an administrator to check parent references',
     permissionListInvalid: 'Please provide a valid permission list',
@@ -2181,6 +2196,8 @@ export default {
     targetUserNotFound: 'Target user not found',
     targetUserLacksRole:
       'The target user does not hold this role, so it cannot be adjusted individually',
+    targetUserNotClonable:
+      'Only built-in roles support cloning for a specific user; do not send targetUserId',
     userRolePermPeerOrHigherForbidden:
       'Not allowed to change role permissions of a peer or higher-level user',
     passwordConfirmMismatch: 'The two new passwords do not match',

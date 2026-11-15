@@ -84,7 +84,10 @@ const IPS = {
   abuse: '203.0.113.184',
   abuseLadder: '203.0.113.185',
   abuseNoIp: '203.0.113.186',
+  accountOnly: '203.0.113.187',
 };
+/** 分布式撞单账号的来源 IP 池（各自只贡献少量失败，ip 列不与 IPS 主池混用） */
+const DISTRIBUTED_ATTACK_IPS = ['198.51.100.41', '198.51.100.42', '198.51.100.43', '198.51.100.44'];
 
 describe('处置与通知解耦：频控不得挡住审计与封禁', () => {
   let abuseUser;
@@ -109,11 +112,11 @@ describe('处置与通知解耦：频控不得挡住审计与封禁', () => {
 
   afterAll(async () => {
     ipBlacklistStore.addToBlacklist = originalAdd;
-    const ips = Object.values(IPS);
+    const ips = [...Object.values(IPS), ...DISTRIBUTED_ATTACK_IPS];
     await purge({
       $or: [
         { ip: { $in: [...ips, ...ips.map((i) => `::ffff:${i}`)] } },
-        { username: new RegExp(`^zz(pd|bfdec)${stamp}`) },
+        { username: new RegExp(`^zz(pd|bfdec|bfacc)`) },
         { userId: { $in: [abuseUser?._id, abuseUser2?._id].filter(Boolean) } },
       ],
     });
@@ -158,6 +161,35 @@ describe('处置与通知解耦：频控不得挡住审计与封禁', () => {
     expect(banCalls).toHaveLength(1);
     expect(banCalls[0].ip).toBe(ip);
     expect(await AuditLog.countDocuments({ action: ALERT_TYPES.BRUTE_FORCE, ip })).toBe(1);
+  }, 20000);
+
+  test('分布式撞单账号（IP 维度未达标）⇒ 不封 IP，但补投账号维度 webhook（R）', async () => {
+    const ip = IPS.accountOnly;
+    const username = `zzbfacc_${stamp}`;
+    await startChainAtZero(ip);
+    const delivery = require('../../services/securityAlertDelivery');
+    delivery.sendNotification.mockClear();
+
+    // 分布式形态：目标账号的失败来自多个来源 IP，每个 IP 只试 1 次；
+    // 账户维度合计达标（含当前请求 IP 的一次 ⇒ ≥ 阈值），当前 IP 维度 < 阈值 ⇒ 不封。
+    for (const attackIp of DISTRIBUTED_ATTACK_IPS) {
+      await seedFailures(username, attackIp, 1);
+    }
+    await seedFailures(username, ip, 1);
+
+    await securityAlert.checkBruteForce(username, ip);
+
+    // R-H2：当前 IP 自己没刷满 ⇒ 不封（NAT 陪绑防线）
+    expect(banCalls).toHaveLength(0);
+    // R：账号维度必须补投通知（修复前在此 return，SOC 只能查审计）
+    expect(delivery.sendNotification).toHaveBeenCalledTimes(1);
+    const [type, level, , data] = delivery.sendNotification.mock.calls[0];
+    expect(type).toBe(ALERT_TYPES.BRUTE_FORCE);
+    expect(level).toBe('critical');
+    expect(data.accountDimension).toBe(true);
+    expect(data.username).toBe(username);
+    // 审计照写（既有口径不回归）
+    expect(await AuditLog.countDocuments({ action: ALERT_TYPES.BRUTE_FORCE, username })).toBe(1);
   }, 20000);
 
   test('封禁失败后的重试不被频控吞掉，且阶梯照常推进（第 2 次触发 ⇒ 第 2 档）', async () => {
@@ -341,7 +373,7 @@ describe('处置与通知解耦：频控不得挡住审计与封禁', () => {
 describe('写法门禁：shouldSendAlert 必须排在审计与封禁之后', () => {
   const stripComments = (src) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
 
-  test('checkBruteForce：首个 shouldSendAlert 晚于 AuditLog.create 与封禁', () => {
+  test('checkBruteForce：所有 shouldSendAlert 闸都晚于 AuditLog.create（审计永不关在门外）', () => {
     const src = stripComments(
       fs.readFileSync(path.join(__dirname, '..', '..', 'services', 'securityAlert.js'), 'utf8')
     );
@@ -349,21 +381,42 @@ describe('写法门禁：shouldSendAlert 必须排在审计与封禁之后', () 
     expect(from).toBeGreaterThan(-1);
     const body = src.slice(from, src.indexOf('\nconst checkBulkExport', from));
 
-    const gate = body.indexOf('shouldSendAlert(');
     const audit = body.indexOf('await AuditLog.create(');
     // 封禁动作已拆到 securityAlertIpBans.js；这里的判据是"处置调用点"，
     // 不是"addToBlacklist 字面量出现在哪个文件"。
     const ban = body.indexOf('applyBruteForceIpBan(');
-    expect(gate).toBeGreaterThan(-1);
+    const gates = [...body.matchAll(/shouldSendAlert\(/g)].map((m) => m.index);
     expect(audit).toBeGreaterThan(-1);
     expect(ban).toBeGreaterThan(-1);
-    expect(gate).toBeGreaterThan(audit);
-    expect(gate).toBeGreaterThan(ban);
+    expect(gates.length).toBeGreaterThanOrEqual(2);
+    // 真正要守的不变量：**每一处**频控闸都排在审计之后——"首个闸晚于审计"防的是
+    // 频控把审计证据关在门外。R（2026-11-15 审计）补的账号维度投递闸合法地排在
+    // 审计之后、封禁调用之前：它不包住封禁（封禁只由 R-H2 的 IP 维度判据决定是否执行），
+    // 所以旧版"首个闸 > 封禁"的文本序判据不再成立，改为逐闸断言。
+    for (const gate of gates) {
+      expect(gate).toBeGreaterThan(audit);
+    }
     // 闸**之前**不得有任何 return：那正是"频控把审计与封禁一起关在门外"的形状。
     // 允许 R-H2 的那个 `if (ipFailures < 阈值) return;`——它排在审计之后、封禁之前，
     // 是既有的正确设计（账号维度达标不封 IP，防 NAT 无辜陪绑），与本闸无关。
     const beforeAudit = body.slice(0, audit);
     expect(beforeAudit.search(/\breturn\b/)).toBe(-1);
+  });
+
+  test('checkBruteForce：IP 维度闸晚于封禁调用（封禁不得被频控吞掉）', () => {
+    const src = stripComments(
+      fs.readFileSync(path.join(__dirname, '..', '..', 'services', 'securityAlert.js'), 'utf8')
+    );
+    const from = src.indexOf('const checkBruteForce =');
+    const body = src.slice(from, src.indexOf('\nconst checkBulkExport', from));
+    const ban = body.indexOf('applyBruteForceIpBan(');
+    // 封禁**之后**的那处闸（IP 维度投递闸）：封禁无条件执行、频控只约束通知——
+    // "封禁失败时的重试被吞"要防的正是它被任何闸包住。账号维度闸（封禁之前）
+    // 属于 R-H2 早退分支，不经过封禁，由上一条用例逐闸断言。
+    const gatesAfterBan = [...body.matchAll(/shouldSendAlert\(/g)]
+      .map((m) => m.index)
+      .filter((idx) => idx > ban);
+    expect(gatesAfterBan.length).toBeGreaterThanOrEqual(1);
   });
 
   // 同一族的第三个检测器（2026-10-01 补齐）：checkBulkExport 此前是

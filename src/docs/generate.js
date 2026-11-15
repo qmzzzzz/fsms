@@ -4,8 +4,7 @@ const path = require('path');
 const { DEVICE_TYPE } = require('../utils/constants');
 const { PRIVILEGE_GRANT_STATUSES } = require('../constants/privilegeGrant');
 const DEVICE_TYPE_VALUES = Object.values(DEVICE_TYPE);
-// 同一口径（续集）：审计页两维枚举此前在本文件与产物里各抄一份，与 constants/audit.js 没有任何连线——常量加一档时文档会继续宣称旧的四档，
-// 调用方按文档传值换来一个 400。现在接上同一根线（openapiSync 有对账）。
+// 同一口径（续集）：审计页两维枚举此前在本文件与产物里各抄一份，与 constants/audit.js 没有任何连线——常量加一档时文档会继续宣称旧的四档，调用方按文档传值换来一个 400。现在接上同一根线（openapiSync 有对账）。
 const { AUDIT_RISK_LEVELS, AUDIT_DISPLAY_LEVELS } = require('../constants/audit');
 const { PERMISSION_TYPES, PERMISSION_METHODS } = require('../constants/permission');
 const { IP_LIST_TYPES } = require('../constants/ipList');
@@ -21,8 +20,7 @@ const {
   INSPECTION_REVIEW_RESULTS,
 } = require('../constants/inspection');
 const { USER_STATUS } = require('../utils/constants');
-// 设备状态：全集与「通用状态接口可写子集」都取自 constants/deviceStatus（它自身只是 utils/constants 的 DEVICE_STATUS 的派生视图）。原先这两处各写一份字面量，与路由
-// 校验器之间没有连线——加一档会让文档继续推荐旧五档，症状同 audit/alarm 那一族。
+// 设备状态：全集与「通用状态接口可写子集」都取自 constants/deviceStatus（它自身只是 utils/constants 的 DEVICE_STATUS 的派生视图）。原先这两处各写一份字面量，与路由校验器之间没有连线——加一档会让文档继续推荐旧五档，症状同 audit/alarm 那一族。
 const { DEVICE_STATUS_VALUES, DEVICE_STATUS_WRITABLE } = require('../constants/deviceStatus');
 
 const spec = {
@@ -142,24 +140,35 @@ spec.paths['/api/auth/register'] = {
 spec.paths['/api/auth/login'] = {
   post: p('post', ['Auth'], '用户登录', {
     security: false,
+    description:
+      '口令双轨（与 authRoutes 的 loginValidation 同口径）：密文轨优先——encPassword 经 ' +
+      'GET /api/auth/login-public-key 公钥加密上行；明文轨为灰度兼容——仅未携带 encPassword 时接受，' +
+      'LOGIN_ENCRYPT_STRICT=true 后明文轨整体关闭。前端（web-admin LoginView）走密文轨。',
+    // required 只钉 username：password 是「未携带密文时」的条件必填（express-validator 的 .if 链），OpenAPI 3.0.3 的 oneOf 表达不了这种条件必填，故按仓内既有口径（/auth/mfa/disable 同款）用字段级 optional + description 表达二选一，而不是把 requestBody 拆成两个 oneOf 分支重复 properties。
     requestBody: body({
       type: 'object',
-      required: ['username', 'password'],
+      required: ['username'],
       properties: {
-        username: { type: 'string' },
-        password: { type: 'string' },
+        username: { type: 'string', maxLength: 128 },
+        password: {
+          type: 'string',
+          description:
+            '明文口令（灰度兼容轨）：仅未携带 encPassword 时必填，上限 128 字符；LOGIN_ENCRYPT_STRICT=true 时被直接拒绝',
+        },
         captchaId: { type: 'string' },
         encPassword: {
           type: 'string',
+          maxLength: 1024,
           description:
-            '口令密文（ECDH+HKDF+AES-GCM 信封，经 GET /api/auth/login-public-key 公钥加密）；与 password 二选一',
+            '口令密文（ECDH+HKDF+AES-GCM 信封，经 GET /api/auth/login-public-key 公钥加密）；与 password 二选一，携带时优先走密文轨',
         },
         captchaText: { type: 'string', description: '图形验证码答案（开启验证码时必填）' },
         mfaCode: { type: 'string', description: 'MFA 动态口令（6 位 TOTP 或 XXXX-XXXX 恢复码）' },
       },
     }),
     responses: {
-      200: { description: '登录成功，返回 token 和 refreshToken' },
+      // I-01：令牌只经 httpOnly cookie 下发，响应体刻意不含 token/refreshToken（防 XSS 读副本）。
+      200: { description: '登录成功：令牌经 httpOnly cookie 下发，响应体返回 { expires, user }' },
       401: { description: '用户名或密码错误' },
       429: { description: '请求过于频繁' },
     },
@@ -247,10 +256,7 @@ spec.paths['/api/auth/avatar'] = {
       },
       true
     ),
-    responses: {
-      200: { description: '头像已更新，返回 { avatar, width, height, size }' },
-      400: badRequest,
-    },
+    responses: { ...ok('头像已更新，返回 { avatar, width, height, size }'), ...badRequest },
   }),
   delete: p('delete', ['Auth'], '移除头像（本人，幂等）'),
 };
@@ -267,8 +273,8 @@ spec.paths['/api/avatars/{userId}'] = {
         },
       },
       304: { description: '未修改（If-None-Match 命中）' },
-      403: forbidden,
-      404: notFound,
+      ...forbidden,
+      ...notFound,
     },
   }),
 };
@@ -763,8 +769,7 @@ const alarmListParams = [
     in: 'query',
     schema: { type: 'string', enum: ALARM_LEVELS },
   },
-  // 原先 alarmType 的 query 参数没有 enum，而路由校验器一直在 isIn(...) 上拒非法值：
-  // 文档比运行时宽，调用方按文档传 'smoking' 会拿到 400。接同一根线后一并补齐。
+  // 原先 alarmType 的 query 参数没有 enum，而路由校验器一直在 isIn(...) 上拒非法值：文档比运行时宽，调用方按文档传 'smoking' 会拿到 400。接同一根线后一并补齐。
   { name: 'alarmType', in: 'query', schema: { type: 'string', enum: ALARM_TYPES } },
   { name: 'startDate', in: 'query', schema: { type: 'string' } },
   { name: 'endDate', in: 'query', schema: { type: 'string' } },
@@ -1497,7 +1502,7 @@ spec.paths['/api/security/upgrade'] = {
         description:
           '返回 { server, upgrade, checkedAt }；upgrade.reasons 逐条解释升级按钮为何不可用',
       },
-      403: forbidden,
+      ...forbidden,
     },
   }),
 };
@@ -1509,7 +1514,7 @@ spec.paths['/api/security/upgrade/jobs/{jobId}'] = {
     ],
     responses: {
       200: { description: '返回 { job }；非 UUID 或状态文件不存在时按 404 处理' },
-      404: notFound,
+      ...notFound,
     },
   }),
 };
@@ -1530,8 +1535,8 @@ spec.paths['/api/security/upgrade/requests'] = {
     }),
     responses: {
       202: { description: '请求已入队，返回 { job }' },
-      400: badRequest,
-      403: forbidden,
+      ...badRequest,
+      ...forbidden,
       409: { description: '已有任务进行中或排队（errorCode=UPGRADE_ALREADY_RUNNING）' },
       503: {
         description: '升级未启用或队列不可用（UPGRADE_DISABLED / UPGRADE_QUEUE_UNAVAILABLE）',
@@ -1669,11 +1674,8 @@ module.exports = spec;
 
 if (require.main === module) {
   const outPath = path.join(__dirname, 'openapi.json');
-  // 产物按仓库自己的 prettier 配置落盘。原先这里直接写 JSON.stringify 的结果：
-  // 短数组会逐行展开，而已提交产物是 prettier 版（短数组并成一行）——于是「改完生成器重跑一次」必然把 500 多行格式噪声灌进 diff，
-  // 并且让 CI 的 `npm run format:check` 红（openapiSync 的逐端点深比对按内容比，抓不到格式漂移；实测这次整改就是这么撞上的）。
-  // prettier 只在 CLI 分支 require：被 app/tests require 时不走这里，生产安装（--omit=dev）因此不需要它。失败不做静默降级——
-  // 退回未格式化写法等于把这个坑重新埋回去。
+  // 产物按仓库自己的 prettier 配置落盘。原先这里直接写 JSON.stringify 的结果：短数组会逐行展开，而已提交产物是 prettier 版（短数组并成一行）——于是「改完生成器重跑一次」必然把 500 多行格式噪声灌进 diff，并且让 CI 的 `npm run format:check` 红（openapiSync 的逐端点深比对按内容比，抓不到格式漂移；实测这次整改就是这么撞上的）。
+  // prettier 只在 CLI 分支 require：被 app/tests require 时不走这里，生产安装（--omit=dev）因此不需要它。失败不做静默降级——退回未格式化写法等于把这个坑重新埋回去。
   (async () => {
     const prettier = require('prettier');
     const options = await prettier.resolveConfig(outPath);

@@ -129,6 +129,10 @@ describe('Helper Utils', () => {
       expect(validatePasswordStrength('Ab1!')).toBe('密码长度至少 12 位');
       expect(validatePasswordStrength('Abcdef1!')).toBe('密码长度至少 12 位'); // 8 位在旧策略下合法，现须拒绝
       expect(validatePasswordStrength('Abcdefgh1!xy')).toBeFalsy(); // exactly 12 chars OK
+      // 长度判据 [\s\S]{12,} 必须把行终止符计入长度：`.` 不匹配 \n，含换行的口令被拆成
+      // 多段短运行——下面两条每段最长 4 位，旧判据 `.{12,}` 对 12 位这条会误报「长度不足」
+      expect(validatePasswordStrength('Ab1!\nAb1!\nAb')).toBeFalsy(); // 合计 12 位（含 2 个换行）
+      expect(validatePasswordStrength('Ab1!\nAb1!\nA')).toBe('密码长度至少 12 位'); // 合计 11 位
     });
 
     // 以下四条：输入必须≥12 位，否则会被第一条「至少 12 位」规则先行拦下，

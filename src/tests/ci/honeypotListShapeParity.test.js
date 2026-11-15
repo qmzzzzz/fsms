@@ -325,8 +325,15 @@ const sortPairsOf = (rel) => {
   return out;
 };
 
+// 蜜罐总开关（constants/honeypotAccounts 的 isHoneypotEnabled 运行期现读）：写入前快照原值，
+// 套件结束随 afterAll 归还——不还则同 worker 后续套件的蜜罐账户被静默物化（生产默认是关闭的）
+const PREV_HONEYPOT_ENABLED = process.env.HONEYPOT_ENABLED;
 beforeAll(() => {
   process.env.HONEYPOT_ENABLED = 'true';
+});
+afterAll(() => {
+  if (PREV_HONEYPOT_ENABLED === undefined) delete process.env.HONEYPOT_ENABLED;
+  else process.env.HONEYPOT_ENABLED = PREV_HONEYPOT_ENABLED;
 });
 
 const makeRes = () => {
@@ -825,9 +832,9 @@ describe('H/I/J 投影键集、值域桥与反向对照', () => {
    * 登记表不能变成永久豁免口。
    */
   const L_REF_VACUUM_LEDGER = {
-    // FireDevice.js:139-141：inspectionRecord 的写入方法全仓零调用 ⇒ 真实设备也不会有记录，空数组是忠实形状
+    // FireDevice.js:141-143：inspectionRecord 的写入方法全仓零调用 ⇒ 真实设备也不会有记录，空数组是忠实形状
     'devices.inspectionRecord.inspector':
-      '写入方法全仓零调用（FireDevice.js:139-141）：空数组是忠实形状',
+      '写入方法全仓零调用（FireDevice.js:141-143）：空数组是忠实形状',
   };
 
   test('L. 引用完整性：行里每个引用型 id 都能在对应合成表的 _id 里找到（引用路径从模型 schema 现扫）', () => {

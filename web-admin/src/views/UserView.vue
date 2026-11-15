@@ -577,6 +577,7 @@ import { api, isCanceledError, isHandledApiError } from '@/utils/api'
 import { formatTime } from '@/utils/datetime'
 import { useListLoadState } from '@/composables/useListLoadState'
 import { encryptPassword } from '@/utils/loginCipher'
+import { encryptionErrorMessage } from '@/utils/encryptionError'
 import { passwordStrengthRule } from '@/utils/password'
 import { enterSubmit } from '@/utils/enterSubmit'
 import ReauthDialog from '@/components/ReauthDialog.vue'
@@ -1093,13 +1094,8 @@ const doReveal = async () => {
         credential = { encCurrentPassword: enc }
       } catch (e) {
         console.warn('[loginCipher] 二次验证口令加密失败，已阻断提交：', e?.message)
-        ElMessage.error(
-          e?.code === 'PUBLIC_KEY_PIN_MISMATCH'
-            ? t('login.publicKeyPinMismatch')
-            : e?.code === 'INSECURE_CONTEXT'
-              ? t('login.insecureContext')
-              : t('login.encryptionFailed')
-        )
+        // 文案统一走共享 helper（P2 收敛）：指纹不符/非安全上下文/通用失败三分支
+        ElMessage.error(encryptionErrorMessage(t, e))
         return
       }
     }
@@ -1351,15 +1347,8 @@ const submitForm = async () => {
       // FE-M3：管理员代设口令走密文轨——「可用但失败」阻断提交（用户重试成本为零）
       const enc = await encryptPassword(dialog.form.password, 'USER_CREATE').catch((e) => {
         console.warn('[loginCipher] 建号口令加密失败：', e?.message)
-        // 公钥指纹不符（PUBLIC_KEY_PIN_MISMATCH）：主动 MITM 或服务端轮换密钥后
-        // 前端包未随之重建——与「网络抖动、重试即可」不是一回事，文案须可执行
-        ElMessage.error(
-          e?.code === 'PUBLIC_KEY_PIN_MISMATCH'
-            ? t('login.publicKeyPinMismatch')
-            : e?.code === 'INSECURE_CONTEXT'
-              ? t('login.insecureContext')
-              : t('login.encryptionFailed')
-        )
+        // 文案统一走共享 helper（P2 收敛）：指纹不符/非安全上下文/通用失败三分支
+        ElMessage.error(encryptionErrorMessage(t, e))
         return 'BLOCKED'
       })
       if (enc === 'BLOCKED') return

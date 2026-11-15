@@ -27,9 +27,9 @@ const {
 } = require('../../services/attackEventQueryService');
 
 /**
- * 显式挑选筛选字段：只这几个键流进下游的校验与组装。
- * buildAttackEventFilters 也不得整包吃 req.query（page/limit/cursor 等分页键
- * 不参与条件构造；qs 展开的数组/对象形态在下游逐项判型收口）。
+ * 显式挑选筛选字段：只这几个键流进下游的校验与组装。buildAttackEventFilters 也不得
+ * 整包吃 req.query（page/limit/cursor 等分页键不参与条件构造；qs 展开的数组/对象
+ * 形态在下游逐项判型收口）。
  */
 const readFilters = (q) => ({
   startDate: q.startDate,
@@ -43,10 +43,12 @@ const readFilters = (q) => ({
   path: q.path,
 });
 
-// 参数构建阶段的统一 400 出口：客户端输入问题不得降级成 500
-// （与 queryAuditLogs 对 buildAuditQuery 的处置同形；文案由 services 层单源给出）
-const respondBadRequest = (res, error) =>
-  ApiResponse.error(res, error.message || '参数错误', error.statusCode || error.status || 400);
+// 参数构建阶段的统一 400 出口：客户端输入问题不得降级成 500，也**不得把 error.message
+// 原样回显**（意外异常的消息可能携带内部细节）——改走注册表错误码 VALIDATION_FAILED，文案归前端 i18n；服务端留一行日志保可诊断性
+const respondBadRequest = (res, error) => {
+  logger.warn(`攻击告警查询参数被拒：${error && (error.message || error)}`);
+  return ApiResponse.codeError(res, 'VALIDATION_FAILED');
+};
 
 /**
  * GET /api/security/attack-events —— 攻击告警分页查询（游标与偏移双模，同审计列表）

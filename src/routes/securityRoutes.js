@@ -31,48 +31,17 @@ const {
   strictLimiter,
 } = require('../middleware/rateLimit');
 const { consumeValidation } = require('../middleware/validateQuery');
-const { validatePasswordStrength } = require('../utils/helpers');
 const {
   rejectPlaintextInStrict,
   encPasswordField,
   rejectEncPlaintextCoexistence,
   reauthCredentialValidation, // /reauth 与管理员写操作（含升级）共用的凭据契约
+  buildChangePasswordValidation, // 改密两条链单源（/auth/password 不带确认框、本链带）
 } = require('../middleware/security/reauthCredentialRules');
 
-// 验证规则 isString() 前置：express-validator 会把对象/数组先强转字符串再跑后续校验，
-// `{}` → `[object Object]` 可通过 notEmpty/matches，原值随后进入
-// bcrypt.compare 触发 TypeError → 500（与 authRoutes 同口径修复）
-const changePasswordValidation = [
-  // 密文轨：ECDH 信封（优先，两个字段各自独立信封）
-  encPasswordField('encCurrentPassword'),
-  encPasswordField('encNewPassword'),
-  // 明文轨：仅未携带对应密文字段时生效（灰度兼容）
-  body('currentPassword')
-    .if((value, { req }) => !req.body.encCurrentPassword)
-    .isString()
-    .withMessage('当前密码格式无效')
-    .notEmpty()
-    .withMessage('请提供当前密码')
-    .custom(rejectPlaintextInStrict),
-  body('newPassword')
-    .if((value, { req }) => !req.body.encNewPassword)
-    .isString()
-    .withMessage('新密码格式无效')
-    .custom((value) => {
-      // 统一委托 helpers 单一强度实现（覆盖长度上限与泄露口令黑名单）
-      const err = validatePasswordStrength(value);
-      if (err) throw new Error(err);
-      return true;
-    })
-    .custom(rejectPlaintextInStrict),
-  body('confirmPassword').custom((value, { req }) => {
-    // 密文轨下 newPassword 明文在信封内，一致性比对由控制器解密后执行
-    if (!req.body.encNewPassword && value !== req.body.newPassword) {
-      throw new Error('两次输入的密码不一致');
-    }
-    return true;
-  }),
-];
+// 与 /auth/password 同一条单源链（currentPassword 上限 128，收敛依据见 reauthCredentialRules
+// 文件头）；withConfirmPassword 只对这里成立——本链的前端是双确认框提交
+const changePasswordValidation = buildChangePasswordValidation({ withConfirmPassword: true });
 
 /**
  * 举报目标类型（单一声明，下面两条链共用）：
@@ -313,6 +282,9 @@ router.put(
   '/users/:userId/lock',
   authenticate,
   checkPermission('user:lock'),
+  // 账户锁定是重资源面（写库 + 强制会话失效 + 审计），与本文件 mfa/reset、
+  // password/reset、audit-logs 族同一档严格限流（同族口径：权限码之后挂）
+  strictLimiter,
   param('userId').isMongoId().withMessage('用户 ID 格式无效'),
   // 必须在边界把字符串收成真布尔：validator 的 isBoolean 放行 'false'/'0'，
   // 而服务层按 truthy 判定（locked ? 'locked' : 'active'），不转换的话
@@ -668,6 +640,9 @@ router.post(
   '/ip-list',
   authenticate,
   checkPermission('security:config'),
+  // 写名单是重资源操作（落库 + 快照失效 + 全网段护栏查询），与 forensic 的
+  // pool-ban 两步、GET /audit-logs/:id 同档严格限流（forensicRoutes 文件头同口径）
+  strictLimiter,
   body('ip')
     .isString()
     .trim()

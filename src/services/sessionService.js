@@ -1,36 +1,20 @@
 /**
- * 用户会话服务（设备级会话管理）
- *
- * 职责边界：
- *  - 本模块是「会话生命周期」的唯一事实来源（创建/校验/触碰/吊销/列举）；
- *  - 控制器与中间件只调用本模块，不直接操作 UserSession 集合，
- *    避免吊销语义散落到多处后各自漂移（tokenVersion 的教训就在这里：
- *    它被 3 个文件分别递增，语义靠注释维持）。
- *
- * 设备解析改用 ua-parser-js（原为手写正则）：
- *   会话列表的核心用途是让用户判断「这次登录是不是我」。手写正则只能给出
- *   Chrome/Windows 这种粒度，而两条「Chrome · Windows」并排时用户无法区分
- *   哪台是自己的办公机、哪台是陌生设备——功能等于打了对折。ua-parser-js
- *   能给出版本号与设备厂商/型号（如 Chrome 120 · Windows 10 / Apple iPhone），
- *   这才够用户下判断。
- *
- *   固定版本 1.0.41（MIT）而非 2.x：2.x 起主包改为 AGPL-3.0-or-later，
- *   对闭源部署有传染性许可风险；且 2.x 引入 3 个运行时依赖，
- *   而 1.x 是零依赖单文件。安全上也更可控（供应链面更小）。
- *   写死精确版本而非 ^ 范围：该包历史上出过被投毒的补丁版本（2021 年
- *   0.7.29/0.8.0/1.0.0 三个版本被植入挖矿与窃密代码），锁死版本可避免
- *   自动升级到未经审查的补丁号。
- *
- *   原始 UA 仍完整保留：解析规则会随浏览器版本演进而失准，保留原文才能
- *   在事后重新解析或人工判断。
+ * 用户会话服务（设备级会话管理）。职责边界：本模块是「会话生命周期」的唯一事实来源（创建/校验/触碰/吊销/列举）；
+ * 控制器与中间件只调用本模块，不直接操作 UserSession 集合，避免吊销语义散落到多处后各自漂移
+ * （tokenVersion 的教训就在这里：它被 3 个文件分别递增，语义靠注释维持）。
+ * 设备解析改用 ua-parser-js（原为手写正则）：会话列表的核心用途是让用户判断「这次登录是不是我」。手写正则只能给出
+ * Chrome/Windows 这种粒度，而两条「Chrome · Windows」并排时用户无法区分哪台是自己的办公机、哪台是陌生设备——功能等于打了对折。
+ * ua-parser-js 能给出版本号与设备厂商/型号（如 Chrome 120 · Windows 10 / Apple iPhone），这才够用户下判断。
+ * 固定版本 1.0.41（MIT）而非 2.x：2.x 起主包改为 AGPL-3.0-or-later，对闭源部署有传染性许可风险；且 2.x 引入 3 个运行时依赖，
+ * 而 1.x 是零依赖单文件。安全上也更可控（供应链面更小）。写死精确版本而非 ^ 范围：该包历史上出过被投毒的补丁版本
+ * （2021 年 0.7.29/0.8.0/1.0.0 三个版本被植入挖矿与窃密代码），锁死版本可避免自动升级到未经审查的补丁号。
+ * 原始 UA 仍完整保留：解析规则会随浏览器版本演进而失准，保留原文才能在事后重新解析或人工判断。
  */
 
 const crypto = require('crypto');
 const UAParser = require('ua-parser-js');
 const logger = require('../utils/logger');
-// 跨实例失效广播通道。sharedCache 仅依赖 logger，顶层引入无环路
-// （与 userPermissionService 同一口径）。未配置 REDIS_URL 时发布/订阅均为无操作，
-// 自动退化为单进程语义。
+// 跨实例失效广播通道。sharedCache 仅依赖 logger，顶层引入无环路（与 userPermissionService 同一口径）。未配置 REDIS_URL 时发布/订阅均为无操作，自动退化为单进程语义。
 const sharedCache = require('./sharedCache');
 const ipLocationService = require('./ipLocationService');
 const UserSession = require('../models/UserSession');
@@ -42,17 +26,11 @@ const { onSessionRevoked, notifySessionRevoked } = require('./sessionRevocationE
 const { MAX_ACTIVE_SESSIONS_PER_USER, enforceSessionCap } = require('./sessionCap');
 
 /**
- * 会话校验缓存（进程内，短 TTL）
- *
- * 为什么需要：authenticate 是**每个**请求都会经过的路径，若每次都查
- * UserSession，等于给所有接口加一次数据库往返。既有的用户缓存
- * （middleware/auth.js userCache，TTL 60s）已经是同样的思路。
- *
- * 为什么 TTL 取 15 秒而非 60 秒：这是「单设备吊销的生效延迟」上限。
- * 用户点了「踢除该设备」却发现对方还能操作一分钟，会认为功能没生效；
- * 15 秒足够短到符合预期，又能挡掉绝大部分重复查询。
- * 且吊销路径会主动 invalidate（见 revokeSession），正常情况下即时生效——
- * TTL 只是多进程部署时的兜底上限。
+ * 会话校验缓存（进程内，短 TTL）。为什么需要：authenticate 是**每个**请求都会经过的路径，若每次都查 UserSession，
+ * 等于给所有接口加一次数据库往返。既有的用户缓存（middleware/auth.js userCache，TTL 60s）已经是同样的思路。
+ * 为什么 TTL 取 15 秒而非 60 秒：这是「单设备吊销的生效延迟」上限。用户点了「踢除该设备」却发现对方还能操作一分钟，
+ * 会认为功能没生效；15 秒足够短到符合预期，又能挡掉绝大部分重复查询。且吊销路径会主动 invalidate（见 revokeSession），
+ * 正常情况下即时生效——TTL 只是多进程部署时的兜底上限。
  */
 const sessionCache = new Map();
 const SESSION_CACHE_TTL = 15 * 1000;
@@ -164,10 +142,41 @@ const describeDevice = (device = {}) => {
   return [model, browser, os].filter(Boolean).join(' · ');
 };
 
-/** 缓存容量保护：超限时整体清空（重建成本远低于逐条淘汰的记账开销） */
+/**
+ * 缓存容量保护：超限先丢**已过期**条目（无信息损失），仍超限按 expireAt 最早
+ * （最接近自然过期）逐条淘汰至回到上限内。
+ *
+ * 旧写法超限即整体 clear：一次写满把全量会话缓存拍空，下一拍起这些设备的每个请求
+ * 都 miss ⇒ 数千条会话校验同时打到 UserSession（认证热路径上的自造惊群），且 TTL 内
+ * 其余用户"本来能命中"的读全部白算。淘汰按 expireAt 升序取：被丢的是马上也要自然
+ * 过期的条目，信息损失最小。成本只有"越过上限后"的那几次 O(n log n) 排序（n=5001），
+ * 上限内是 O(1) 快路径——旧注释"记账开销大于重建"在 n=5000 的量级不成立。
+ * 节流表 lastTouchAt 是纯观测记账：按 Map 插入序（FIFO）淘汰即可，丢失只是多写一次。
+ * 对外接口与调用点不变（validateSession/touchSession 的写前守卫）。
+ */
 const guardCacheSize = () => {
-  if (sessionCache.size > SESSION_CACHE_MAX) sessionCache.clear();
-  if (lastTouchAt.size > SESSION_CACHE_MAX) lastTouchAt.clear();
+  if (sessionCache.size <= SESSION_CACHE_MAX && lastTouchAt.size <= SESSION_CACHE_MAX) return;
+  const now = Date.now();
+  if (sessionCache.size > SESSION_CACHE_MAX) {
+    // 第一轮：已过期条目免费丢弃（它们下次读也会被判失效）
+    for (const [k, entry] of sessionCache) {
+      if (sessionCache.size <= SESSION_CACHE_MAX) break;
+      if (!entry || entry.expireAt <= now) sessionCache.delete(k);
+    }
+    // 第二轮：仍超限 ⇒ 按 expireAt 最早的顺序淘汰（防病态同值 TTL 用排序保证全序）
+    const overflow = sessionCache.size - SESSION_CACHE_MAX;
+    if (overflow > 0) {
+      const byExpire = [...sessionCache.entries()].sort((a, b) => {
+        const ea = a[1] && Number.isFinite(a[1].expireAt) ? a[1].expireAt : now;
+        const eb = b[1] && Number.isFinite(b[1].expireAt) ? b[1].expireAt : now;
+        return ea - eb;
+      });
+      for (let i = 0; i < overflow; i += 1) sessionCache.delete(byExpire[i][0]);
+    }
+  }
+  while (lastTouchAt.size > SESSION_CACHE_MAX) {
+    lastTouchAt.delete(lastTouchAt.keys().next().value);
+  }
 };
 
 /**

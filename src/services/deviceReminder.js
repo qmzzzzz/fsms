@@ -1,26 +1,32 @@
 /**
- * 设备到期/维护提醒服务周期性扫描到期设备与待维护设备，生成提醒记录并写入审计日志，供前端首页与消息中心展示。提醒维度：  - expiringSoon 即将到期（默认 30 天内）
- *   - expired     已过期仍在册
- *   - needMaintenance 超过检查周期未维护
- *   - needSchedule 从未录入过检查日、因而根本没有排期的设备
- *     （范围比较 $lte 不匹配缺失字段，缺这一档就等于把"没排期"当成"不需排期"）
- * 四个维度的判据不在这里写：统一取自 constants/deviceAlerts，
- * 与 stats / 报表 / 仪表盘共用同一份，避免同一台设备在两个出口结论相反。
+ * 设备到期/维护提醒服务周期性扫描到期设备与待维护设备，生成提醒记录并写入审计日志，供前端首页与消息中心展示。
+ * 提醒维度：- expiringSoon 即将到期（默认 30 天内）；- expired 已过期仍在册；- needMaintenance 超过检查周期未维护；
+ * - needSchedule 从未录入过检查日、因而根本没有排期的设备（范围比较 $lte 不匹配缺失字段，缺这一档就等于把"没排期"当成"不需排期"）
+ * 四个维度的判据不在这里写：统一取自 constants/deviceAlerts，与 stats / 报表 / 仪表盘共用同一份，避免同一台设备在两个出口结论相反。
  */
 
 const FireDevice = require('../models/FireDevice');
 const logger = require('../utils/logger');
 const { withListBudget } = require('../utils/queryBudget');
 const { deviceAlertFilters } = require('../constants/deviceAlerts');
-// 与 reportDashboardService 的「事实逾期」统计共用同一份派生清单（F-151）：两边各写一遍时，看板会
-// 统计出调度器永不改写的超期数（或反过来漏计），而漏计在看板上显示为「没有超期」——静默的负结果。
+// 与 reportDashboardService 的「事实逾期」统计共用同一份派生清单（F-151）：两边各写一遍时，看板会统计出调度器永不改写的超期数（或反过来漏计），而漏计在看板上显示为「没有超期」——静默的负结果。
 const { INSPECTION_OVERDUE_MARKABLE_STATUSES } = require('../constants/inspection');
 
-// 内存级缓存最新一次扫描结果，供接口快速返回
+// 内存级缓存最新一次扫描结果，供接口快速返回。缓存键=扫描参数（expiringDays|resultLimit）：窗口参数不同的两次请求不得互吃缓存——
+// 7 天窗口的调用拿到 30 天窗口的缓存结果是跨参数污染（返回的明细范围与请求意图不符，响应里的 expiringDays 字段虽然诚实，但调用方未必核对）。
+// 参数域有界（expiringDays 经 normalizeExpiringDays 钳到 [0,365]），单槽+键比对即可，无需 Map。
 let lastScanResult = null;
+let lastScanKey = null;
 let lastScanAt = null;
 // 修复：isScanning 声明移至顶部，避免函数定义中引用未声明变量（可读性与 TDZ 安全）
 let isScanning = false;
+
+/** 扫描缓存键：与 scanDeviceReminders 的解构缺省同口径（undefined 才落缺省值） */
+const scanCacheKeyOf = (options = {}) => {
+  const expiringDays = options.expiringDays === undefined ? 30 : options.expiringDays;
+  const resultLimit = options.resultLimit === undefined ? 200 : options.resultLimit;
+  return `${expiringDays}|${resultLimit}`;
+};
 
 /**
  * 扫描设备并生成到期/维护提醒
@@ -41,9 +47,8 @@ let isScanning = false;
  * 而漏掉的那一处不会报错，只会让某一档的计数继续假装是总数。
  */
 const ALERT_BUCKETS = [
-  // E5：expired/expiringSoon 按 {expiryDate:1,_id:1}（复合索引见 models/FireDevice.js，
-  // 迁移 20261103000000）；needMaintenance 按 {nextCheckDate:1,installDate:1,_id:1}
-  //（既有三键索引，零新增写放大）；needSchedule 维持 {installDate:1,_id:1}。
+  // E5：expired/expiringSoon 按 {expiryDate:1,_id:1}（复合索引见 models/FireDevice.js，迁移 20261103000000）；
+  // needMaintenance 按 {nextCheckDate:1,installDate:1,_id:1}（既有三键索引，零新增写放大）；needSchedule 维持 {installDate:1,_id:1}。
   [
     'expired',
     { expiryDate: 1, _id: 1 },
@@ -59,8 +64,7 @@ const ALERT_BUCKETS = [
     { nextCheckDate: 1, installDate: 1, _id: 1 },
     'deviceCode deviceName deviceType location nextCheckDate status',
   ],
-  // 从未做过检查 ⇒ 没有排期 ⇒ $lte 判据永不命中。
-  // 这一档存在的理由就是：一台装好多年的设备可以在所有出口里永久隐身。
+  // 从未做过检查 ⇒ 没有排期 ⇒ $lte 判据永不命中。这一档存在的理由就是：一台装好多年的设备可以在所有出口里永久隐身。
   [
     'needSchedule',
     { installDate: 1, _id: 1 },
@@ -87,8 +91,7 @@ const unscannedResult = () => ({
   needMaintenance: [],
   needSchedule: [],
   limits: {
-    // 本次没有扫描 ⇒ 没有上限可言，也没有清单被截断；这些 0 的含义由 `partial` 承担，
-    // 键必须与正常路径同构，否则调用方读 `limits.truncated.expired` 又是一次 undefined
+    // 本次没有扫描 ⇒ 没有上限可言，也没有清单被截断；这些 0 的含义由 `partial` 承担，键必须与正常路径同构，否则调用方读 `limits.truncated.expired` 又是一次 undefined
     resultLimit: null,
     truncated: {
       ...Object.fromEntries(ALERT_BUCKET_KEYS.map((key) => [key, false])),
@@ -102,10 +105,14 @@ const unscannedResult = () => ({
 const scanDeviceReminders = async (options = {}) => {
   // 互斥锁：防止并发重叠
   if (isScanning) {
-    // H-1 数据边界：带 scopeFilter 的调用绝不可返回全局缓存——
-    // 那是无范围的全库扫描结果，直接返回会把全部设备提醒泄漏给低权限用户
+    // H-1 数据边界：带 scopeFilter 的调用绝不可返回全局缓存——那是无范围的全库扫描结果，直接返回会把全部设备提醒泄漏给低权限用户
     if (options.scopeFilter) {
       logger.warn('设备到期扫描已在进行中，本次数据范围查询跳过');
+      return unscannedResult();
+    }
+    // 缓存键不含本次参数时同样不可返回（J：不同 expiringDays/resultLimit 不得互吃缓存），返回带 partial 标记的兜底形状，让调用方能判别"这次没有可用的结果"
+    if (lastScanKey !== scanCacheKeyOf(options)) {
+      logger.warn('设备到期扫描已在进行中，且缓存参数与本次请求不一致，返回未扫描兜底');
       return unscannedResult();
     }
     logger.warn('设备到期扫描已在进行中，返回上次全库结果');
@@ -178,6 +185,7 @@ const scanDeviceReminders = async (options = {}) => {
     // 仅后台全库扫描写入全局缓存；按用户范围的查询结果各不相同，不可缓存共享
     if (!scopeFilter) {
       lastScanResult = result;
+      lastScanKey = scanCacheKeyOf(options);
       lastScanAt = new Date();
     }
 
@@ -240,9 +248,15 @@ const getDeviceReminders = async (options = {}) => {
   if (options.scopeFilter) {
     return await scanDeviceReminders(options);
   }
-  // 缓存 TTL：超过扫描间隔则重新扫描
+  // 缓存 TTL：超过扫描间隔则重新扫描；键（expiringDays|resultLimit）与缓存不符同样重扫，
+  // 不同窗口参数的请求互不污染（J）
   const intervalMs = options.intervalMs || 24 * 60 * 60 * 1000;
-  if (lastScanResult && lastScanAt && Date.now() - lastScanAt.getTime() < intervalMs) {
+  if (
+    lastScanResult &&
+    lastScanAt &&
+    lastScanKey === scanCacheKeyOf(options) &&
+    Date.now() - lastScanAt.getTime() < intervalMs
+  ) {
     return lastScanResult;
   }
   return await scanDeviceReminders(options);

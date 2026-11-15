@@ -108,6 +108,7 @@
         v-if="canReadAlarm"
         :rows="recentAlarms"
         :error="alarmLoadError"
+        :loading="alarmLoading"
         @retry="loadRecentAlarms"
       />
 
@@ -240,6 +241,8 @@ const loading = ref(true)
 // 由页面警示条明确「加载失败/上次数据」并提供重试入口
 const statsLoadError = ref(false)
 const alarmLoadError = ref(false)
+// P3：最近报警在途标志——RecentAlarmsCard 的重试按钮随它禁用（防连点重发）
+const alarmLoading = ref(false)
 
 // 请求新鲜度守卫：5 分钟定时刷新与 visibilitychange 恢复可能交叠，
 // 先发出的慢响应若后返回，会把统计卡与报警表覆盖成旧值（实测复现：
@@ -345,6 +348,7 @@ const loadRecentAlarms = async () => {
   // P3-39：无 alarm:read 时「最近报警」整块不渲染
   if (!canReadAlarm.value) return
   const isCurrent = alarmGuard()
+  alarmLoading.value = true
   try {
     const res = await api.alarms.getList({ limit: 5 })
     if (!isCurrent()) return
@@ -383,6 +387,9 @@ const loadRecentAlarms = async () => {
     // 但卡片必须能区分「确实没有报警」与「没加载出来」：失败时保留旧数据
     // 并显示错误/陈旧提示与重试入口（RecentAlarmsCard 的 error 属性）。
     alarmLoadError.value = true
+  } finally {
+    // 过期请求收尾也不得解除新请求的在途标志（与新值覆盖旧值同一口径）
+    if (isCurrent()) alarmLoading.value = false
   }
 }
 

@@ -412,10 +412,16 @@ describe('DeviceView 新增保存载荷', () => {
     expect(dateInput.value).toBe(expectedLocal)
   })
 
-  test('新增：deviceCode 留空提交 undefined（由后端生成，不得发空串）', async () => {
+  test('新增：deviceCode 留空被必填校验拦下（deviceRoutes 已收紧 required，占位不再宣称自动生成）', async () => {
     create.mockResolvedValue({ data: { success: true } })
     const c = await open()
     const d = await openDialog(c, '新增设备')
+    // P3 口径对齐：后端 deviceCode 必填（notEmpty + max50）且从未实现自动生成，
+    // 占位文案改为必填提示；required 规则镜像后端，留空不再发出注定 400 的请求
+    const codeInput = d.querySelector(
+      'input[placeholder="请输入设备编号（必填，不超过 50 个字符）"]'
+    )
+    expect(codeInput).toBeTruthy()
     typeInto(d.querySelector('input[placeholder="设备名称"]'), '二层烟感')
     await flush(4)
     click(d.querySelector('.el-select__wrapper'))
@@ -429,9 +435,33 @@ describe('DeviceView 新增保存载荷', () => {
     const submit = dlgFootBtn('新增')
     expect(submit).toBeTruthy()
     click(submit)
+    await flush(8)
+    // deviceCode 缺失：本地必填校验拦截，不发请求
+    expect(create).not.toHaveBeenCalled()
+    expect(ElMessage.success).not.toHaveBeenCalled()
+    expect(c.errors).toEqual([])
+  })
+
+  test('新增：deviceCode 有值时随载荷提交（不再降级成 undefined）', async () => {
+    create.mockResolvedValue({ data: { success: true } })
+    const c = await open()
+    const d = await openDialog(c, '新增设备')
+    typeInto(
+      d.querySelector('input[placeholder="请输入设备编号（必填，不超过 50 个字符）"]'),
+      'SMK-100'
+    )
+    typeInto(d.querySelector('input[placeholder="设备名称"]'), '二层烟感')
+    await flush(4)
+    click(d.querySelector('.el-select__wrapper'))
+    await flush(8)
+    const opts = Array.from(visiblePopper().querySelectorAll('.el-select-dropdown__item'))
+    click(opts[0])
+    await flush(10)
+    const submit = dlgFootBtn('新增')
+    click(submit)
     await waitFor(() => create.mock.calls.length === 1, { message: '新增请求发出' })
     const payload = create.mock.calls[0][0]
-    expect(payload.deviceCode).toBeUndefined()
+    expect(payload.deviceCode).toBe('SMK-100')
     expect(payload.deviceName).toBe('二层烟感')
     expect(payload.deviceType).toBeTruthy()
     expect(payload.installDate).toMatch(/^\d{4}-\d{2}-\d{2}/)

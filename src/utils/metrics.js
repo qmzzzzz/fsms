@@ -1,28 +1,14 @@
 /**
  * 应用指标（报告 O-8）：零依赖自实现的 Prometheus 文本格式 /metrics
- *
- * 背景：本项目管理面板为 Vue3+ECharts 手搓（吃自家 JSON 接口），
- * 不引入 prom-client 等新依赖；/metrics 供运维侧（Prometheus/兼容抓取器）
- * 拉取，错误率/分位数由消费方按原始计数计算。
- *
+ * 背景：本项目管理面板为 Vue3+ECharts 手搓（吃自家 JSON 接口），不引入 prom-client 等新依赖；/metrics 供运维侧（Prometheus/兼容抓取器）拉取，错误率/分位数由消费方按原始计数计算。
  * 暴露内容：
- * - http_requests_total{method,route,status_code}：请求计数
- * - http_request_duration_seconds{...}：延迟直方图（bucket/sum/count）
- * - security_alerts_total{type,level}：安全告警事件计数（securityAlert 上报）
- * - auth_login_total{result} / auth_mfa_total{action}：业务级计数
- * - metrics_series_dropped_total{store}：被 series 上限丢弃的新 series 条数
- * - audit_records_dropped_total{reason}：落库前被丢弃的审计记录条数（合规空洞）
- * - audit_buffer_backlog_records：进程内缓冲当前积压条数（gauge，拉取时取值）
- * - readyz_verdict / readyz_verdict_age_seconds / readyz_checks_total{result}：就绪判定
- * - disk_free_bytes{path} / disk_total_bytes{path} / disk_probe_failures_total：日志卷余量
- * - log_shipper_flush_failures_total / log_shipper_dropped_lines_total：日志投递失败与丢行
- * - export_inflight / export_queued / export_rejected_total{reason}：报表导出并发闸（P-2）
- * - ws_connections / ws_inbound_throttled_total / ws_inbound_disconnects_total：WebSocket 容量信号（O-2）
- *
- * route 标签取「路由模板」而非原始 URL：匹配到具体路由时用 baseUrl+path
- * （如 /api/devices/:id），未匹配（404）统一记 unmatched——防止把用户可控
- * 的路径参数做成高基数标签撑爆时序库。
- *
+ * - http_requests_total{method,route,status_code}：请求计数；http_request_duration_seconds{...}：延迟直方图（bucket/sum/count）
+ * - security_alerts_total{type,level}：安全告警事件计数（securityAlert 上报）；auth_login_total{result} / auth_mfa_total{action}：业务级计数
+ * - metrics_series_dropped_total{store}：被 series 上限丢弃的新 series 条数；audit_records_dropped_total{reason}：落库前被丢弃的审计记录条数（合规空洞）
+ * - audit_buffer_backlog_records：进程内缓冲当前积压条数（gauge，拉取时取值）；readyz_verdict / readyz_verdict_age_seconds / readyz_checks_total{result}：就绪判定
+ * - disk_free_bytes{path} / disk_total_bytes{path} / disk_probe_failures_total：日志卷余量；log_shipper_flush_failures_total / log_shipper_dropped_lines_total：日志投递失败与丢行
+ * - export_inflight / export_queued / export_rejected_total{reason}：报表导出并发闸（P-2）；ws_connections / ws_inbound_throttled_total / ws_inbound_disconnects_total：WebSocket 容量信号（O-2）
+ * route 标签取「路由模板」而非原始 URL：匹配到具体路由时用 baseUrl+path（如 /api/devices/:id），未匹配（404）统一记 unmatched——防止把用户可控的路径参数做成高基数标签撑爆时序库。
  * 开关：METRICS_ENABLED=false 关闭 /metrics 端点（采集照常，只是不暴露）。
  */
 
@@ -56,18 +42,11 @@ function escapeLabelValue(value) {
   return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
 }
 
-// 评价报告低危项：指标 Map 无淘汰上限——正常路径 route 标签是路由模板
-// （有界），但防御纵深不能依赖单一标签的自觉：未来任何人引入一个用户可控
-// 标签（如 path、userId），长跑进程内存就会缓慢增长。加 series 上限：
-// 超限后只累计已存在的 series、丢弃新 series。
-//
-// 上限是**逐 store** 各 MAX_SERIES 条（不是全局共享一个 5000 的额度）：
-// 各 store 的标签维度独立，一个 store 被打满不该让另一个 store 失去登记能力。
+// 评价报告低危项：指标 Map 无淘汰上限——正常路径 route 标签是路由模板（有界），但防御纵深不能依赖单一标签的自觉：未来任何人引入一个用户可控标签（如 path、userId），长跑进程内存就会缓慢增长。加 series 上限：超限后只累计已存在的 series、丢弃新 series。
+// 上限是**逐 store** 各 MAX_SERIES 条（不是全局共享一个 5000 的额度）：各 store 的标签维度独立，一个 store 被打满不该让另一个 store 失去登记能力。
 const MAX_SERIES = 5000;
 
-// store 名 = 对外标签 store="..." 的闭合取值集，与五个 metric 家族一一对应。
-// 必须是闭合集合：「报告被丢弃了多少 series」这件事自身若按丢弃的标签值建
-// series，就等于用一个高基数计数器去监控高基数——上限被绕过的经典写法。
+// store 名 = 对外标签 store="..." 的闭合取值集，与五个 metric 家族一一对应。必须是闭合集合：「报告被丢弃了多少 series」这件事自身若按丢弃的标签值建 series，就等于用一个高基数计数器去监控高基数——上限被绕过的经典写法。
 const SERIES_STORES = ['requests', 'duration', 'alerts', 'login', 'mfa'];
 const droppedSeries = new Map(); // store -> 因上限被丢弃的新 series 次数
 const seriesLimitWarned = new Set(); // 逐 store 各告警一次（全局一次会漏报第二个打满的 store）
@@ -94,9 +73,7 @@ function warnSeriesLimitOnce(store) {
 
 /**
  * 还能不能登记一条新 series。返回 false 时调用方丢弃新 series（既有 series 照常累计）。
- *
- * 截断必须是**消费方可见**的：单靠一条 warn-once 日志，抓取的 Prometheus/面板看不出
- * "这个 store 被砍掉了一批 series"——沉默的兜底机制比没有兜底更危险。
+ * 截断必须是**消费方可见**的：单靠一条 warn-once 日志，抓取的 Prometheus/面板看不出"这个 store 被砍掉了一批 series"——沉默的兜底机制比没有兜底更危险。
  */
 function canAddSeries(store, currentSize) {
   if (currentSize < MAX_SERIES) return true;
@@ -107,12 +84,7 @@ function canAddSeries(store, currentSize) {
 
 /**
  * 标签值归一：调用方漏传（undefined / null / 空串）时统一成 'unknown'。
- *
- * 必须在**入口**做，不能等渲染时各修各的：labelsKey 与快照共用同一个 labels 对象，
- * 文本渲染用 String(value)（undefined → "undefined"）、快照的 collectSeries 用
- * `labels[k] || 'unknown'`（→ "unknown"），于是同一条 series 在两个视图里
- * 顶着两个不同的标签值——而这两个视图恰是告警规则（吃 /metrics 文本）与
- * 管理面板（吃 JSON 快照）各自的取数口径，改一处口径就对不上另一处。
+ * 必须在**入口**做，不能等渲染时各修各的：labelsKey 与快照共用同一个 labels 对象，文本渲染用 String(value)（undefined → "undefined"）、快照的 collectSeries 用 `labels[k] || 'unknown'`（→ "unknown"），于是同一条 series 在两个视图里顶着两个不同的标签值——而这两个视图恰是告警规则（吃 /metrics 文本）与管理面板（吃 JSON 快照）各自的取数口径，改一处口径就对不上另一处。
  */
 function normLabel(value) {
   if (value === undefined || value === null) return 'unknown';
@@ -157,8 +129,8 @@ function methodLabelOf(method) {
 }
 
 /**
- * HTTP 指标采集中间件：请求结束时记录计数与延迟。
- * 挂载点在所有业务中间件之前（IP 黑名单/限流器产生的 403/429 同样计数）。
+ * HTTP 指标采集中间件：请求结束时记录计数与延迟。挂载点在所有业务中间件之前（IP 黑名单/限流器产生的 403/429 同样计数）。
+ * 同一条请求 series（method×route×status）在两个 store（requests/duration）里必须**成对**存在：登记走同一把容量判据（两个 canAddSeries 都通过才登记，任一满则整对不登记也不累计）。此前计数先登记、直方图后登记，两侧各自碰运气——requests store 有位而 duration store 满时，该路由「有量无延迟」：requests_total 有曲线、延迟分位数永远空白，面板无从区分「没人访问」与「延迟数据被砍」，告警也只看得出计数异常。成对登记后要么都可见、要么都缺席，半登记态不再出现（两侧的丢弃计数仍各自独立记，见 metricsSeriesFidelity 的独立额度判据）。
  */
 function metricsMiddleware(req, res, next) {
   const startNs = process.hrtime.bigint();
@@ -169,16 +141,26 @@ function metricsMiddleware(req, res, next) {
         route: routeLabelOf(req),
         status_code: String(res.statusCode),
       };
-      incCounter('requests', counters, labels, counterLabels);
-      const durationSec = Number(process.hrtime.bigint() - startNs) / 1e9;
       const key = labelsKey(labels);
       let h = histograms.get(key);
-      if (!h) {
-        if (!canAddSeries('duration', histograms.size)) return;
-        h = { buckets: DURATION_BUCKETS.map(() => 0), sum: 0, count: 0 };
-        histograms.set(key, h);
-        histogramLabels.set(key, labels);
+      if (!counters.has(key) || !h) {
+        // 成对容量预检：两个都问（即便一侧已满也要问另一侧），保证两侧的
+        // dropped 计数各自独立累计；任一侧拒收 ⇒ 整对不登记、本次不累计
+        const counterBlocked = !counters.has(key) && !canAddSeries('requests', counters.size);
+        const histBlocked = !h && !canAddSeries('duration', histograms.size);
+        if (counterBlocked || histBlocked) return;
+        if (!counters.has(key)) {
+          counterLabels.set(key, labels);
+          counters.set(key, 0);
+        }
+        if (!h) {
+          h = { buckets: DURATION_BUCKETS.map(() => 0), sum: 0, count: 0 };
+          histograms.set(key, h);
+          histogramLabels.set(key, labels);
+        }
       }
+      counters.set(key, (counters.get(key) || 0) + 1);
+      const durationSec = Number(process.hrtime.bigint() - startNs) / 1e9;
       h.sum += durationSec;
       h.count += 1;
       for (let i = 0; i < DURATION_BUCKETS.length; i++) {
@@ -195,14 +177,8 @@ function metricsMiddleware(req, res, next) {
 /** 安全告警计数（securityAlert.sendNotification 调用） */
 function incSecurityAlert(type, level) {
   try {
-    // 走与其他计数器同一个 incCounter，从而共享 MAX_SERIES 上限与逐 store 告警。
-    // 原实现是手写的 set/get，唯独这个计数器绕过了 canAddSeries——
-    // 而它偏偏是喂 alert 类型字符串的那个：今天所有调用点都传字面量所以没爆，
-    // 但只要有人传一个动态 type（IP、用户名），它就是唯一会无界增长、
-    // 并把每次 /metrics 抓取体撑大的映射。防御性上限不该靠调用方自觉。
-    //
-    // type/level 是外部可控面（sendNotification 的第一个实参），故过 normLabel：
-    // 缺省时两视图口径必须一致，且不能靠调用方自觉传全。
+    // 走与其他计数器同一个 incCounter，从而共享 MAX_SERIES 上限与逐 store 告警。原实现是手写的 set/get，唯独这个计数器绕过了 canAddSeries——而它偏偏是喂 alert 类型字符串的那个：今天所有调用点都传字面量所以没爆，但只要有人传一个动态 type（IP、用户名），它就是唯一会无界增长、并把每次 /metrics 抓取体撑大的映射。防御性上限不该靠调用方自觉。
+    // type/level 是外部可控面（sendNotification 的第一个实参），故过 normLabel：缺省时两视图口径必须一致，且不能靠调用方自觉传全。
     incCounter(
       'alerts',
       alertCounters,
@@ -337,13 +313,9 @@ function metricsEndpoint(req, res) {
 /**
  * JSON snapshot（报告 O-8 面板半：现有 Vue3+ECharts 面板直读）
  * GET /api/metrics（authenticate + security:audit 权限）返回本对象。
- *
- * - summary：全站请求/错误/错误率
- * - latency：全站与逐路由平均延迟（来自直方图 sum/count）
- * - routes：按请求量降序的逐路由计数与错误数
- * - alerts：安全告警计数（按类型/级别）
- * - series：series 上限与逐 store 丢弃数（截断是否发生过的机读答案）
- * - process：RSS/heap/uptime（面板健康卡）
+ * - summary：全站请求/错误/错误率；latency：全站与逐路由平均延迟（来自直方图 sum/count）
+ * - routes：按请求量降序的逐路由计数与错误数；alerts：安全告警计数（按类型/级别）
+ * - series：series 上限与逐 store 丢弃数（截断是否发生过的机读答案）；process：RSS/heap/uptime（面板健康卡）
  */
 /** 逐路由计数汇总：跨 method 合并到 route 模板上，5xx 记为错误 */
 function aggregateRoutes(valueMap, labelMap) {

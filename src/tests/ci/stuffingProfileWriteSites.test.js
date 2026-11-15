@@ -155,3 +155,13 @@ describe('画像派生字段的写入面：两个蜜罐入口都带、且落进�
     });
   });
 });
+
+// 收尾（mongooseTeardownLedger 台账条目「他人脏文件（AM）」晋升）：本套件 beforeAll 里
+// connect 了内存 Mongo，不关则该 worker 在最后一个文件后被 jest-worker 强杀、套件输出被吞。
+// 放在 root 级且是最后一条 root 钩子：内层「行为半」的 cleanup afterAll（内层钩子先跑）
+// 还要查库，这里最后断连。写法对齐已合规套件（如 forensicCaptureHardening.test.js 末尾）。
+afterAll(async () => {
+  if (mongoose.connection.readyState !== 0) {
+    await mongoose.connection.close();
+  }
+});

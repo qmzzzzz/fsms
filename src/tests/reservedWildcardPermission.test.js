@@ -11,7 +11,7 @@
  *    之后直接 savePermission ⇒ PUT 一个 `{status:'inactive'}` 就把超管的唯一权限源关掉
  *
  * 为什么放在 savePermission：它是 update 路径唯一的落库出口
- * （grep 全仓：savePermission 只有 permissionController.js:203 一个调用方），
+ * （grep 全仓：savePermission 只有 permissionController.js:202 一个调用方），
  * 在这里拦既避开控制器复杂度棘轮，也不给未来新增调用方留绕过面。
  */
 const mongoose = require('mongoose');
@@ -33,11 +33,13 @@ describe('保留通配权限的停用防线', () => {
     Permission = require('../models/Permission');
     Role = require('../models/Role');
     service = require('../services/permissionService');
-    // 一次 jest 调用只有**一个** mongod，所有套件共用同一个库，而 Permission.code 是
-    // unique。全仓有十几套用例各自 upsert 一条 `*:*`（如 statsAnomalyScope、
-    // auditDataScope、assignRoles），所以原来的 Permission.create 只要撞上别人的
-    // 生命周期就是 E11000、整组用例红——红不红取决于落到哪个 worker、时序怎么交错。
-    // 改成"有就复用、没有才建"，并记住归属，删除侧才谈得上只清自己那条。
+    // 历史注记（O，2026-11-15 更正：setup.js 已按文件隔离，每个测试文件一个全新空库，
+    // 下方「所有套件共用同一个库」的前提已不存在）。写作时一次 jest 调用只有一个
+    // mongod、所有套件共用同一个库，而 Permission.code 是 unique，全仓十几套用例
+    // 各自建 `*:*`（如 statsAnomalyScope、auditDataScope、assignRoles），谁撞上谁的
+    // 生命周期就是 E11000、整组红——故改成"有就复用、没有才建"，并记住归属。
+    // 现在「别人的 `*:*`」在本文件库里不会出现，复用分支只剩兜底意义；
+    // 保留它是为了让删除侧的归属判据（createdByUs）仍然自洽。
     const existing = await Permission.findOne({ code: RESERVED }).lean();
     if (existing) {
       createdByUs = false;
@@ -59,8 +61,8 @@ describe('保留通配权限的停用防线', () => {
     if (createdByUs) {
       await Permission.deleteMany({ code: RESERVED }).catch(() => {});
     }
-    // `zzrw:read` 是上一条用例建的普通权限，原来漏了清理：它会留在共享库里
-    // 被任何按 module/code 统计权限的用例读到。
+    // `zzrw:read` 是上一条用例建的普通权限，原来漏了清理（共享库时代会污染其它
+    // 套件的统计；现在文件各自独立库，保留清理只为本文件自身的行为可预期）。
     await Permission.deleteMany({ code: 'zzrw:read' }).catch(() => {});
     await Role.deleteMany({ name: new RegExp(stamp) }).catch(() => {});
     if (mongoose.connection.readyState !== 0) {

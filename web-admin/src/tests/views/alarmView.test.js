@@ -1010,17 +1010,27 @@ describe('AlarmView 行级动作：派单 / 到达现场', () => {
     expect(c.errors).toEqual([])
   })
 
-  test('已完成的行：不渲染「指派处理」入口（状态收敛门控），点「处理完成」只提示不发请求', async () => {
+  test('已完成的行：不渲染「指派处理」与「处理完成」入口（终态按钮按状态收口）', async () => {
     const c = await open([mkRow('d6', { status: 'resolved' })])
     // 新门控按状态与所需权限一一对应：resolved 既非 pending 也非 processing →
     // 「指派处理」入口直接缺席（旧实现会渲染出来，点击后 handle() 早退、给不了任何反馈）。
     expect(rowBtn(c, 0, '指派处理')).toBeUndefined()
-    // 「处理完成」仍按 alarm:handle 显示；resolve() 对非 processing 行只给前置条件说明、不发请求
-    click(rowBtn(c, 0, '处理完成'))
-    await flush(10)
-    expect(resolveAlarm).not.toHaveBeenCalled()
+    // P3：终态行不再渲染「处理完成」——挂在那里只会误导（看起来还能办结），
+    // 点击也只会吃一条 resolveRequiresProcessing 警告
+    expect(rowBtn(c, 0, '处理完成')).toBeUndefined()
     expect(dispatch).not.toHaveBeenCalled()
     expect(arrive).not.toHaveBeenCalled()
+    expect(resolveAlarm).not.toHaveBeenCalled()
+    expect(c.errors).toEqual([])
+  })
+
+  test('pending 行保留「处理完成」入口：点击给前置条件说明、不发请求（P3-45 信息路径）', async () => {
+    const c = await open([mkRow('d7', { status: 'pending' })])
+    const btn = rowBtn(c, 0, '处理完成')
+    expect(btn).toBeTruthy()
+    click(btn)
+    await flush(10)
+    expect(resolveAlarm).not.toHaveBeenCalled()
     expect(confirm).not.toHaveBeenCalled()
     // 只有状态说明提示，且文案指向真实前置条件
     expect(ElMessage.warning).toHaveBeenCalledWith(i18n.global.t('alarm.resolveRequiresProcessing'))

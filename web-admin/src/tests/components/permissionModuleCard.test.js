@@ -295,12 +295,14 @@ describe('PermissionModuleCard 点击回传契约（把原始对象/原始 id �
     await flush(3)
 
     expect([...ui.checkedPermIds.value]).toEqual([ID4])
+    // G（2026-11-15）：原写法 /s+/g 是漏了反斜杠的笔误——匹配的是字面 's' 字符
+    // 而不是空白，折叠空白归一化的意图失效（恰因文本无孤立 's' 才侥幸没红）
     expect(
-      cards[1].querySelector('.glass-module-card__count').textContent.replace(/s+/g, ' ').trim()
+      cards[1].querySelector('.glass-module-card__count').textContent.replace(/\s+/g, ' ').trim()
     ).toBe('已启用 1 / 1 (100%)')
     // 第 1 张卡（设备模块）必须纹丝不动
     expect(
-      cards[0].querySelector('.glass-module-card__count').textContent.replace(/s+/g, ' ').trim()
+      cards[0].querySelector('.glass-module-card__count').textContent.replace(/\s+/g, ' ').trim()
     ).toBe('已启用 0 / 3 (0%)')
     expect(cards[0].querySelector('.glass-module-card__state').textContent.trim()).toBe('未启用')
   })

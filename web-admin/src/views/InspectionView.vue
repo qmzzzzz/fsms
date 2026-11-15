@@ -250,7 +250,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, computed, shallowRef } from 'vue'
+import { ref, reactive, onMounted, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import vSegGlass from '@/directives/segGlass'
 import { CircleCheckFilled, Tools, Bell, Calendar } from '@element-plus/icons-vue'
@@ -306,11 +306,25 @@ const statusType = (s) =>
   })[s]
 const resultType = (r) => ({ normal: 'success', abnormal: 'danger', partial: 'warning' })[r]
 
-const statCards = shallowRef([
-  { title: t('inspection.pending'), value: 0, color: '#64748b', icon: Calendar },
-  { title: t('inspection.inProgress'), value: 0, color: '#d97706', icon: Tools },
-  { title: t('inspection.completed'), value: 0, color: '#16a34a', icon: CircleCheckFilled },
-  { title: t('common.warning'), value: 0, color: '#e63946', icon: Bell },
+// P3：统计卡的数字与标题解耦。此前标题在 shallowRef 初始化时用 t() 定格，
+// 语言切换后卡片标题仍是旧语言（只有重新拉到统计才会刷新）——
+// 改为 computed：标题随 locale 响应式重算，数字存普通 reactive 对象。
+const statValues = reactive({ pending: 0, inProgress: 0, completed: 0, overdue: 0 })
+const statCards = computed(() => [
+  { title: t('inspection.pending'), value: statValues.pending, color: '#64748b', icon: Calendar },
+  {
+    title: t('inspection.inProgress'),
+    value: statValues.inProgress,
+    color: '#d97706',
+    icon: Tools,
+  },
+  {
+    title: t('inspection.completed'),
+    value: statValues.completed,
+    color: '#16a34a',
+    icon: CircleCheckFilled,
+  },
+  { title: t('common.warning'), value: statValues.overdue, color: '#e63946', icon: Bell },
 ])
 
 // 「开始 / 提交结果」的可进入档位，与后端 src/constants/inspection.js 的
@@ -385,27 +399,11 @@ const loadData = async () => {
         // 直接读 s.pending 恒为 undefined → 四张统计卡永远是 0（谎报「无巡检」）。_id 取模型
         // 枚举原值：pending / in_progress / completed / overdue。
         const by = (k) => (s.byStatus || []).find((x) => x._id === k)?.count || 0
-        statCards.value = [
-          {
-            title: t('inspection.pending'),
-            value: by('pending'),
-            color: '#64748b',
-            icon: Calendar,
-          },
-          {
-            title: t('inspection.inProgress'),
-            value: by('in_progress'),
-            color: '#d97706',
-            icon: Tools,
-          },
-          {
-            title: t('inspection.completed'),
-            value: by('completed'),
-            color: '#16a34a',
-            icon: CircleCheckFilled,
-          },
-          { title: t('common.warning'), value: by('overdue'), color: '#e63946', icon: Bell },
-        ]
+        // 标题已收敛进 statCards computed（随 locale 切换），此处只记账数字
+        statValues.pending = by('pending')
+        statValues.inProgress = by('in_progress')
+        statValues.completed = by('completed')
+        statValues.overdue = by('overdue')
         statsLoadedOnce.value = true
         statsFailed.value = false
       } else {

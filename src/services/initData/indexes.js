@@ -19,11 +19,9 @@ const {
  * 于是新写入的文档 token 字段全为 undefined → 索引键均为 null →
  * **第二条起插入必然 E11000**。
  *
- * 后果（实测）：consumeToken 把这个 E11000 当作「refresh token 重放」，
- * 每次刷新都触发 invalidateUserTokens 递增 tokenVersion，用户会话被永久吊销，
- * 且因为同时写了 passwordChangedAt，前端收到「密码已修改，请重新登录」的
- * 误导性提示。表现为「注册用户的 refresh_token 永久失效」。
- *
+ * 后果（实测）：consumeToken 把这个 E11000 当作「refresh token 重放」，每次刷新都触发
+ * invalidateUserTokens 递增 tokenVersion，用户会话被永久吊销，且因为同时写了
+ * passwordChangedAt，前端收到「密码已修改，请重新登录」的误导性提示。
  * 这里在启动期做幂等清理：只删 `token` 单键索引，不动 tokenHash/expiresAt/userId。
  * @returns {Promise<void>}
  */
@@ -59,11 +57,9 @@ const reconcileTokenBlacklistIndexes = async () => {
  *
  * schema 从「字段级 unique」改为「显式 collation 唯一索引 username_ci」后，MongoDB 里既有的
  * `username_1`（默认 collation，大小写敏感）不会自动消失，两者并存时 Admin/admin 仍可共存。
- *
  * 顺序不可颠倒：存在大小写冲突账号时新索引建不起来，若已先删旧索引则**两个约束都没有**。
- * 故 ① 检测冲突组 → ② 有冲突保留旧索引并告警 → ③ 确认 username_ci 真的可用才删。
- * ③ 与 email 半边同款：只看名字不够——同名但非唯一/无 collation 都不构成约束。
- *
+ * 故 ① 检测冲突组 → ② 有冲突保留旧索引并告警 → ③ 确认 username_ci 真的可用才删（与 email
+ * 半边同款：只看名字不够——同名但非唯一/无 collation 都不构成约束）。
  * @returns {Promise<void>}
  */
 const dropLegacyUsernameIndex = async (coll, indexes) => {
@@ -135,7 +131,6 @@ const dropLegacyUsernameIndex = async (coll, indexes) => {
  *
  * **四步顺序固定，任一步不满足即保留旧索引 + 告警**（fail-loud，照抄 username_1 的形态）：
  *   ① 无缺失/空 emailKey 的行；② 无重复 emailKey；③ emailKey_1 确实已存在；④ 才删 email_1。
- *
  * 每一步都在防一个具体的坏结果（逐条实测，见 A3 方案 §2/§3）：
  *   · ① 唯一索引把「字段缺失」视作 null，多条缺失即
  *     `E11000 dup key: { emailKey: null }`，索引直接建不起来；`default: ''` 让空串行
@@ -227,19 +222,16 @@ const reconcileUserIndexes = async () => {
  * `useFileHash: false` 让迁移标识只有文件名，`20260831000000` 与
  * `20260919000000`（它本身就是为补前者的可达性而追加的一次性迁移）在任何跑过
  * 它们的库上都永远算"已应用"；模型侧 `createIndexes` 遇同名不同选项只抛
- * IndexOptionsConflict 而不会改选项。于是 `AUDIT_RETENTION_DAYS` 从 180 改到 365
- * 之后，物理 TTL 仍按 180 天删记录——constants/retention.js 把这类偏差定性为
- * 「对外声明留存 N 天、实际留得更少」，在合规语境下比配置错误本身更严重。
+ * IndexOptionsConflict 而不会改选项。于是 `AUDIT_RETENTION_DAYS` 从 180 改到 365 之后，
+ * 物理 TTL 仍按 180 天删记录——constants/retention.js 把这类偏差定性为「对外声明留存
+ * N 天、实际留得更少」，在合规语境下比配置错误本身更严重。
  * 每次改档再补一条一次性迁移不可持续，故按仓内既有形态（reconcileUserIndexes /
  * reconcileTokenBlacklistIndexes）把它收成常驻不变量。
  *
  * 顺带覆盖一个回滚后遗症：`20260831000000.down()` 会把 timestamp_-1 重建为
- * **无 TTL** 索引（:89），若只回滚迁移不回滚代码，启动即声明/物理不一致——
- * 本对账会把它补回来。
- *
+ * **无 TTL** 索引（:89），若只回滚迁移不回滚代码，启动即声明/物理不一致——本对账会补回来。
  * 只改已存在的索引，不创建：创建是模型声明与 20260831000000 的职责，
  * 同一件事不能有两个所有者（与 20260919000000 的幂等口径一致）。
- *
  * @returns {Promise<void>}
  */
 const reconcileAuditTtlIndex = async () => {
@@ -270,75 +262,99 @@ const reconcileAuditTtlIndex = async () => {
 
 const businessTtlIndexName = (field) => `ttl_${field}`;
 
-const reconcileBusinessTtlIndexes = async () => {
-  const summary = { aligned: [], created: [], orphaned: [], skipped: [] };
-  for (const policy of BUSINESS_RETENTION_POLICY) {
-    if (policy.disposition !== 'ttl' || !policy.ttlField) continue;
-    const name = businessTtlIndexName(policy.ttlField);
-    let coll;
-    try {
-      coll = mongoose.connection.collection(
-        mongoose.model(policy.modelName).collection.collectionName
-      );
-    } catch (e) {
+/**
+ * 单个业务集合的 TTL 对账（reconcileBusinessTtlIndexes 的逐项体，抽成独立函数是为把主循环的圈复杂度压回阈值——复杂度棘轮不为本次改动抬升）。
+ * @returns {Promise<void>} 失败一律内部降级（skipped + warn），不向调用方抛
+ */
+const reconcileOneBusinessTtl = async (policy, summary) => {
+  const name = businessTtlIndexName(policy.ttlField);
+  let coll;
+  try {
+    coll = mongoose.connection.collection(
+      mongoose.model(policy.modelName).collection.collectionName
+    );
+  } catch (e) {
+    summary.skipped.push({ model: policy.modelName, reason: e.message });
+    return;
+  }
+  const plan = resolveTtlIndexPlan(policy.modelName); // 每次调用现读 env：改档/关开关本轮即生效
+  let indexes = [];
+  try {
+    indexes = await coll.indexes();
+  } catch (e) {
+    if (!(e.codeName === 'NamespaceNotFound' || e.code === 26)) {
+      logger.warn(`业务保留期对账跳过 ${policy.modelName}：${e.message}`);
       summary.skipped.push({ model: policy.modelName, reason: e.message });
-      continue;
+      return;
     }
-    const plan = resolveTtlIndexPlan(policy.modelName); // 每次调用现读 env：改档/关开关本轮即生效
-    let indexes = [];
-    try {
-      indexes = await coll.indexes();
-    } catch (e) {
-      if (!(e.codeName === 'NamespaceNotFound' || e.code === 26)) {
-        logger.warn(`业务保留期对账跳过 ${policy.modelName}：${e.message}`);
-        summary.skipped.push({ model: policy.modelName, reason: e.message });
-        continue;
-      }
-    }
-    const physical = indexes.find((i) => i.name === name);
-    if (plan.days === null) {
-      if (physical && physical.expireAfterSeconds !== undefined) {
-        summary.orphaned.push({
-          model: policy.modelName,
-          index: name,
-          expireAfterSeconds: physical.expireAfterSeconds,
-        });
-        logger.error(
-          `业务保留期开关已关闭，但物理 TTL 仍在删除数据：${coll.collectionName}.${name} ` +
-            `expireAfterSeconds=${physical.expireAfterSeconds}s。对外声明是「无 TTL，数据永久保留」，` +
-            '与数据面相反；autoIndex 从不回收 TTL，请手工执行 ' +
-            `db.${coll.collectionName}.dropIndex("${name}")` +
-            ` 后重启（不自动删：删索引不可逆）。开关未生效原因：${plan.reason || '未配置'}`
-        );
-      }
-      continue;
-    }
-    const want = plan.days * 24 * 60 * 60;
-    if (!physical) {
-      await coll.createIndex({ [policy.ttlField]: 1 }, { name, expireAfterSeconds: want });
-      summary.created.push({ model: policy.modelName, index: name, expireAfterSeconds: want });
-      logger.warn(
-        `已按声明为 ${policy.modelName} 创建 TTL 索引 ${name}（${plan.days} 天）：` +
-          '物理索引此前缺失，过期数据不会被清理'
+  }
+  const physical = indexes.find((i) => i.name === name);
+  if (plan.days === null) {
+    if (physical && physical.expireAfterSeconds !== undefined) {
+      summary.orphaned.push({
+        model: policy.modelName,
+        index: name,
+        expireAfterSeconds: physical.expireAfterSeconds,
+      });
+      logger.error(
+        `业务保留期开关已关闭，但物理 TTL 仍在删除数据：${coll.collectionName}.${name} ` +
+          `expireAfterSeconds=${physical.expireAfterSeconds}s。对外声明是「无 TTL，数据永久保留」，` +
+          '与数据面相反；autoIndex 从不回收 TTL，请手工执行 ' +
+          `db.${coll.collectionName}.dropIndex("${name}")` +
+          ` 后重启（不自动删：删索引不可逆）。开关未生效原因：${plan.reason || '未配置'}`
       );
-      continue;
     }
-    if (physical.expireAfterSeconds === want) continue;
+    return;
+  }
+  const want = plan.days * 24 * 60 * 60;
+  // 对账失败不得中断启动（审计 2026-11-14 F）：本函数被 initializeSystem 直接 await，
+  // createIndex/collMod 裸抛会把整个启动带崩；兄弟对账器（users/tokenblacklists/
+  // auditlogs）对同类失败都只 warn 跳过。对账是收敛手段不是准入闸——本轮失败留痕，
+  // 下次启动重试（幂等）。
+  if (!physical) {
+    try {
+      await coll.createIndex({ [policy.ttlField]: 1 }, { name, expireAfterSeconds: want });
+    } catch (e) {
+      logger.warn(`业务保留期 TTL 建索引失败，本轮跳过 ${policy.modelName}：${e.message}`);
+      summary.skipped.push({ model: policy.modelName, index: name, reason: e.message });
+      return;
+    }
+    summary.created.push({ model: policy.modelName, index: name, expireAfterSeconds: want });
+    logger.warn(
+      `已按声明为 ${policy.modelName} 创建 TTL 索引 ${name}（${plan.days} 天）：` +
+        '物理索引此前缺失，过期数据不会被清理'
+    );
+    return;
+  }
+  if (physical.expireAfterSeconds === want) return;
+  try {
     await mongoose.connection.db.command({
       collMod: coll.collectionName,
       index: { keyPattern: { [policy.ttlField]: 1 }, expireAfterSeconds: want },
     });
-    summary.aligned.push({
-      model: policy.modelName,
-      index: name,
-      from: physical.expireAfterSeconds,
-      to: want,
-    });
-    logger.warn(
-      `${policy.modelName} 的 TTL 索引 ${name} 由 ${physical.expireAfterSeconds ?? '（未设置）'}s ` +
-        `对齐为声明值 ${want}s（${plan.days} 天）：mongoose 遇同名不同选项只抛 ` +
-        'IndexOptionsConflict 且不回收，改档只能在这里落地'
-    );
+  } catch (e) {
+    logger.warn(`业务保留期 TTL 对齐失败，本轮跳过 ${policy.modelName}：${e.message}`);
+    summary.skipped.push({ model: policy.modelName, index: name, reason: e.message });
+    return;
+  }
+  summary.aligned.push({
+    model: policy.modelName,
+    index: name,
+    from: physical.expireAfterSeconds,
+    to: want,
+  });
+  logger.warn(
+    `${policy.modelName} 的 TTL 索引 ${name} 由 ${physical.expireAfterSeconds ?? '（未设置）'}s ` +
+      `对齐为声明值 ${want}s（${plan.days} 天）：mongoose 遇同名不同选项只抛 ` +
+      'IndexOptionsConflict 且不回收，改档只能在这里落地'
+  );
+};
+
+const reconcileBusinessTtlIndexes = async () => {
+  const summary = { aligned: [], created: [], orphaned: [], skipped: [] };
+  for (const policy of BUSINESS_RETENTION_POLICY) {
+    if (policy.disposition !== 'ttl' || !policy.ttlField) continue;
+    await reconcileOneBusinessTtl(policy, summary);
   }
   return summary;
 };

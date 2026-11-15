@@ -51,7 +51,7 @@ const tryTakeOverStale = (lockPath, staleMs) => {
   return tryCreate(lockPath);
 };
 
-/** 在锁保护下执行 fn。 返回 {ok:true, value} 或 {ok:false, reason:'lock_timeout'}；**不抛**（appendBatch 依赖这条）。但 fn 自己抛的错误会原样抛出去 —— 调用方要能看见真实失败，而不是被锁逻辑吞成「超时」。 / */
+/** 在锁保护下执行 fn。 返回 {ok:true, value} 或 {ok:false, reason:'lock_timeout'}；**不抛**（appendBatch 依赖这条）。但 fn 自己抛的错误会原样抛出去 —— 调用方要能看见真实失败，而不是被锁逻辑吞成「超时」。 opts.lockName 可换锁文件名（同一目录多把锁互不互斥，审计锚点 sink 复用本实现时用 '.anchor-sink.lock' 与取证清单分开）。 / */
 async function withLock(dir, opts, fn) {
   const options = opts || {};
   const timeoutMs =
@@ -63,7 +63,7 @@ async function withLock(dir, opts, fn) {
       ? options.staleMs
       : readEnvInt('FORENSIC_MANIFEST_LOCK_STALE_MS', DEFAULT_STALE_MS);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const lockPath = path.join(dir, LOCK_FILE);
+  const lockPath = path.join(dir, options.lockName || LOCK_FILE);
   const deadline = Date.now() + Math.max(0, timeoutMs);
   let got = false;
   while (!got) {

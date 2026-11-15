@@ -161,7 +161,7 @@ describe('InspectionReviewForm 隐患设备展示（后端 populate 的嵌套形
 })
 
 describe('InspectionReviewForm 提交与关闭契约', () => {
-  /** 填审核意见（表单 rules 要求 min 10） */
+  /** 填审核意见（P2-4 后仅 required + maxlength=500 镜像后端，无最小长度） */
   const fillComment = async (c, value) => {
     const box = c.find('textarea')
     box.value = value
@@ -185,14 +185,19 @@ describe('InspectionReviewForm 提交与关闭契约', () => {
     expect(c.errors).toEqual([])
   })
 
-  test('审核意见不足 10 字：不发起请求、不 emit success', async () => {
+  test('审核意见短于 10 字也放行：后端仅 optional+max500，前端不得单方面加严（P2-4）', async () => {
     const c = await open({ title: '巡检A', findings: [] })
-    await fillComment(c, '太短')
+    review.mockResolvedValue({ data: { success: true } })
+    await fillComment(c, '合格')
     click(c.findAll('footer .glass-btn--primary')[0])
     await flush(8)
-    expect(review).not.toHaveBeenCalled()
-    expect(c.seen.success).toBe(0)
-    expect(c.props.modelValue).toBe(true)
+    // 合法的短意见（如「合格」「已复核」）此前被本地 min:10 拦截——正是 P2-4 的缺陷
+    expect(review).toHaveBeenCalledTimes(1)
+    expect(review).toHaveBeenCalledWith('insp-1', {
+      reviewComment: '合格',
+      reviewResult: 'approved',
+    })
+    expect(c.seen.success).toBe(1)
   })
 
   test('提交失败：提示错误且 loading 复位（按钮可再次点击）', async () => {

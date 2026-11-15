@@ -139,6 +139,7 @@ const ERROR_CODE_I18N_MAP = {
   PARENT_PERMISSION_SELF: 'errors.parentPermissionSelf',
   PARENT_PERMISSION_NOT_FOUND: 'errors.parentPermissionNotFound',
   PARENT_PERMISSION_CYCLE: 'errors.parentPermissionCycle',
+  PERMISSION_STATE_CONFLICT: 'errors.permissionStateConflict',
   PERMISSION_TREE_DEPTH_ANOMALY: 'errors.permissionTreeDepthAnomaly',
   PERMISSION_LIST_INVALID: 'errors.permissionListInvalid',
   EXPORT_FORMAT_UNSUPPORTED: 'errors.exportFormatUnsupported',
@@ -173,6 +174,7 @@ const ERROR_CODE_I18N_MAP = {
   TARGET_USER_ID_INVALID: 'errors.targetUserIdInvalid',
   TARGET_USER_NOT_FOUND: 'errors.targetUserNotFound',
   TARGET_USER_LACKS_ROLE: 'errors.targetUserLacksRole',
+  TARGET_USER_NOT_CLONABLE: 'errors.targetUserNotClonable',
   USER_ROLE_PERM_PEER_OR_HIGHER_FORBIDDEN: 'errors.userRolePermPeerOrHigherForbidden',
   PASSWORD_CONFIRM_MISMATCH: 'errors.passwordConfirmMismatch',
   PASSWORD_SAME_AS_CURRENT: 'errors.passwordSameAsCurrent',
@@ -601,10 +603,26 @@ const SCHEMA_ROUTE_MAP = [
   { match: '/auth/login', schema: LoginResponseSchema },
   // 顺序有讲究：'/auth/session' 是 '/auth/sessions' 的前缀，若排在前面，
   // 会话列表响应会被按「只含 authenticated 布尔」的 schema 校验并全部报漂移。
-  // includes 匹配没有边界概念，靠声明顺序消歧。
   { match: '/auth/sessions', method: 'get', schema: SessionListResponseSchema },
   { match: '/auth/session', method: 'get', schema: SessionStatusResponseSchema },
 ]
+
+/**
+ * P3：路径匹配收紧——裸 includes 没有边界概念，短 match 会命中任何以它开头
+ * 的更长路径（/auth/me 命中 /auth/metrics、/auth/login 命中 /auth/login-history），
+ * 把专用 schema 套到不相干的响应上，报一堆假漂移。要求 match 之后紧跟
+ * 结尾 / 路径分隔 / 查询串起点才算命中；前置部分仍由 includes 承担
+ * （baseURL 前缀在不同部署下可能不同，见 verifyResponseShape 的口径）。
+ * @param {string} url 响应的 config.url
+ * @param {string} match 映射表里的路径片段
+ * @returns {boolean}
+ */
+const schemaRouteMatches = (url, match) => {
+  const i = url.indexOf(match)
+  if (i === -1) return false
+  const next = url.charAt(i + match.length)
+  return next === '' || next === '/' || next === '?' || next === '#'
+}
 
 /**
  * 同一漂移只报一次：形状漂移的成因是后端契约变更，同一路径会持续命中。
@@ -651,7 +669,7 @@ const verifyResponseShape = (response) => {
     return
 
   const matched = SCHEMA_ROUTE_MAP.find((r) => {
-    if (!url.includes(r.match)) return false
+    if (!schemaRouteMatches(url, r.match)) return false
     if (!r.method) return true
     return String(response.config?.method || 'get').toLowerCase() === r.method
   })

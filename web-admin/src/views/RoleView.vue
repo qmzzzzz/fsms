@@ -80,7 +80,7 @@
                 v-if="canAssign"
                 type="button"
                 class="glass-btn glass-btn--primary glass-btn--sm"
-                :disabled="savingPermissions || treeForbidden || permLoadFailed"
+                :disabled="savingPermissions || treeForbidden || treeFailed || permLoadFailed"
                 @click="savePermissions"
               >
                 {{ savingPermissions ? $t('common.adding') : $t('role.assignPermissions') }}
@@ -102,6 +102,21 @@
               <p>{{ $t('role.permTreeForbidden') }}</p>
             </div>
 
+            <!-- P3：权限目录加载失败（非 403）的显式错误态。静默画空会让管理员把
+                 「目录没拿到」当成「系统就这么几个权限」；重试会一并恢复目录与当前角色勾选 -->
+            <div v-else-if="treeFailed" class="perm-unavailable perm-load-failed">
+              <div class="perm-unavailable__icon">⚠️</div>
+              <p>{{ $t('role.permTreeLoadFailed') }}</p>
+              <button
+                type="button"
+                class="glass-btn glass-btn--default glass-btn--sm"
+                :disabled="savingPermissions || loadingTree"
+                @click="retryLoadPermissionTree"
+              >
+                {{ $t('common.retry') }}
+              </button>
+            </div>
+
             <!-- 权限集没读到：显式错误态。不渲染权限网格，避免把「未知」画成「全部未勾选」 -->
             <div v-else-if="permLoadFailed" class="perm-unavailable perm-load-failed">
               <div class="perm-unavailable__icon">⚠️</div>
@@ -109,7 +124,7 @@
               <button
                 type="button"
                 class="glass-btn glass-btn--default glass-btn--sm"
-                :disabled="savingPermissions"
+                :disabled="savingPermissions || loadingTree"
                 @click="retryLoadRolePermissions"
               >
                 {{ $t('common.retry') }}
@@ -197,7 +212,6 @@ import { useI18n } from 'vue-i18n'
 import { useSystemLabels } from '@/i18n/systemLabels'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index.mjs'
-import { ElNotification } from 'element-plus/es/components/notification/index.mjs'
 import { Search } from '@element-plus/icons-vue'
 import { api } from '@/utils/api'
 import { acquireWebSocket, releaseWebSocket } from '@/utils/websocket'
@@ -227,6 +241,10 @@ const currentRole = ref(null)
 const savingPermissions = ref(false)
 const loadingTree = ref(false)
 const treeForbidden = ref(false)
+// P3：权限目录加载失败（非 403 的网络/5xx 故障）也必须显式表态。此前 catch 里
+// 只区分 403，其余一律 setTree([]) 静默画空——管理员会把「目录没拿到」读成
+// 「系统就这么几个权限」，勾选与保存的决策全部建立在残缺目录上。
+const treeFailed = ref(false)
 // 权限集加载失败：与「该角色没有任何权限」是两件事。前者必须进入显式错误态并禁用保存，
 // 否则空勾选会被当成用户的编辑意图，一次保存就把整集权限静默替换成空集。
 const permLoadFailed = ref(false)
@@ -320,15 +338,26 @@ const loadPermissionTree = async () => {
   try {
     const res = await api.roles.getPermissionTree()
     setTree(res?.data?.data)
+    treeFailed.value = false
   } catch (e) {
     // 目录接口要求 permission:read | permission:tree，而本页只要求 role:read。
     // 仅持 role:read 的自定义角色拿到 403 属预期结果，不是加载故障——
     // 标记后停止重试，并在面板里说明原因，避免把「无权查看」渲染成「空目录」。
     if (e?.response?.status === 403) treeForbidden.value = true
+    // P3：非 403（网络断/5xx）= 目录真的没拿到，进入显式错误态而不是静默画空
+    else treeFailed.value = true
     setTree([])
   } finally {
     loadingTree.value = false
   }
+}
+
+// 目录错误态的重试：目录被 setTree([]) 清空后，重拉角色权限集会先按需补拉目录，
+// 一并恢复「目录 + 当前角色勾选」两个面（无选中角色时只补拉目录）
+const retryLoadPermissionTree = () => {
+  treeFailed.value = false
+  if (currentRole.value) return loadRolePermissions(currentRole.value._id)
+  return loadPermissionTree()
 }
 
 // 角色切换竞态守卫：快速连点角色时，过期的 getById 响应在写回前被丢弃
@@ -440,6 +469,13 @@ const savePermissions = async () => {
     await retryLoadRolePermissions()
     return
   }
+  // P3：目录加载失败同理——面板被错误块顶掉、用户看不到可勾项，
+  // 此时不该允许对着看不见的目录提交整集替换
+  if (treeFailed.value) {
+    ElMessage.warning(t('role.permTreeLoadFailed'))
+    await retryLoadPermissionTree()
+    return
+  }
   savingPermissions.value = true
   try {
     const permIds = Array.from(checkedPermIds.value)
@@ -504,18 +540,9 @@ const initWebSocket = () => {
     // 该房间要求 SUPER_ADMIN/SECURITY_ADMIN —— 能进本页说明已有 role:read，
     // 但两者并非等价，后端拒绝时只回一条 error 事件，不影响其余功能
     ws.joinRoom('role-management')
-    // P3-43：重连耗尽后必须明确告知用户。此前连接静默死亡，页面照常显示
-    // 旧数据——用户会以为「没人改过角色」，实际是推送早就断了。
-    // 用 ElNotification 且 duration=0（不自动消失）：这条信息决定了
-    // 用户是否该信任眼前的数据，不能一闪而过。
-    ws.onGiveUp(() => {
-      ElNotification({
-        title: t('common.warning'),
-        message: t('role.wsDisconnected'),
-        type: 'warning',
-        duration: 0,
-      })
-    })
+    // P2-6：重连耗尽的 give-up 提示已上收布局层（usePermissionSync 统一注册）。
+    // 此前本页注册却全局弹出——推送失效影响所有页面，不该绑定在角色页生命周期上；
+    // 且只进角色页才有提示，其它页面连接死亡依旧无人知晓。
     ws.on('role-updated', handleRoleUpdated)
     ws.on('permissions-updated', handlePermissionsUpdated)
   } catch (error) {

@@ -20,6 +20,7 @@ import { describe, test, expect, vi, afterEach } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { mountComponent, click, flush, waitFor } from '../helpers/componentHarness'
+import i18n from '@/i18n'
 import {
   evaluatePasswordRules,
   isStrongPassword,
@@ -135,6 +136,9 @@ afterEach(() => {
   login.mockReset()
   encryptPassword.mockReset()
   encryptPassword.mockImplementation(async () => null)
+  // S（2026-11-15）：「在注册页切换语言」用例把 locale 翻到 en-US 后原先不还原，
+  // 会泄漏给同文件后续用例（auth-prefs 系用例默认断言 zh-CN 起点）
+  i18n.global.locale.value = 'zh-CN'
   document.body.innerHTML = ''
   document.documentElement.classList.remove('dark')
   document.documentElement.removeAttribute('lang')

@@ -12,10 +12,9 @@ const { PERMISSION_TYPES, RESOURCE_STATUSES } = require('./permission');
  * 这张表只剩"把源码里的集合写成常量"一件事，同源性由 honeypotListShapeParity.test.js 从该
  * 源码文本抽取比对——不是"再抄一份"就算数。
  */
-const OPEN_ALARM_STATUSES = Object.freeze(['pending', 'processing']);
 const ALARM_OPEN_STATUSES = Object.freeze(
-  ALARM_STATUSES.filter((code) => OPEN_ALARM_STATUSES.includes(code))
-);
+  ALARM_STATUSES.filter((code) => ['pending', 'processing'].includes(code))
+); // 「未终结档」源集合（AlarmService.js:381 的 $in ['pending','processing']）直接写进 filter：不再立一个 OPEN_ALARM_STATUSES 与本常量只差词序的同义名
 
 // 校验规则描述符：kind/参数/文案逐条对应真实路由的 listQueryValidation 数组（数组顺序=错误顺序）。
 // optional:'falsy' ≡ optional({values:'falsy'})（跳过 undefined/null/''/false/0）；
@@ -172,5 +171,4 @@ module.exports = {
   ALARM_OPEN_STATUSES,
   LIST_ENDPOINTS,
   LIST_ENDPOINTS_BY_KEY,
-  OPEN_ALARM_STATUSES,
 };

@@ -20,9 +20,9 @@ const funnelOf = async (cidr, rows = []) => {
   const seen = [];
   const model = {
     find: (q) => {
-      seen.push(q.ip);
+      seen.push(q);
       const hit = rows.filter(
-        (r) => q.ip.test(r.ip) && q.method.$in.includes(r.method) && r.createdAt >= q.createdAt.$gte
+        (r) => q.ip.test(r.ip) && q.method.$in.includes(r.method) && r.timestamp >= q.timestamp.$gte
       );
       return {
         select: () => ({
@@ -32,10 +32,10 @@ const funnelOf = async (cidr, rows = []) => {
     },
   };
   const result = await live.segmentHasLiveTraffic({ cidr, model });
-  return { re: new RegExp(seen[0], 'i'), result };
+  return { q: seen[0], re: new RegExp(seen[0].ip, 'i'), result };
 };
 
-const row = (ip) => [{ ip, method: 'GET', createdAt: new Date(), action: 'a' }];
+const row = (ip) => [{ ip, method: 'GET', timestamp: new Date(), action: 'a' }];
 
 const V4_HOSTS = [
   '10.9.8.9',
@@ -151,11 +151,18 @@ describe('ipPoolLiveTraffic 的取行范围', () => {
     expect(re.test('2001:db8:1::1')).toBe(true);
     expect(ipMatchesEntry('2001:db8:1::1', '2001:db8::/64')).toBe(false);
     const { result } = await funnelOf('2001:db8::/64', [
-      { ip: '2001:db8:1::1', method: 'GET', createdAt: new Date(), action: 'a' },
+      { ip: '2001:db8:1::1', method: 'GET', timestamp: new Date(), action: 'a' },
     ]);
     expect(result.live).toBe(false);
     expect(result.sample).toEqual([]);
     expect(result.scanned).toBe(1);
+  });
+
+  test('取行必须落在已索引的 timestamp 上（事件时间）：不得退回无索引的 createdAt 全扫', async () => {
+    const { q } = await funnelOf('10.9.8.0/24', row('10.9.8.9'));
+    expect(q.timestamp).toBeDefined();
+    expect(q.timestamp.$gte).toBeInstanceOf(Date);
+    expect(q.createdAt).toBeUndefined();
   });
 
   test('段内主机（含映射写法）算作有活跃流量，并回传样本', async () => {
@@ -171,7 +178,7 @@ describe('ipPoolLiveTraffic 的取行范围', () => {
     const rows = Array.from({ length: live.CANDIDATE_LIMIT }, (_, i) => ({
       ip: '2001:db8:1::' + (i + 1),
       method: 'GET',
-      createdAt: new Date(),
+      timestamp: new Date(),
       action: 'a',
     }));
     const { result } = await funnelOf('2001:db8::/64', rows);

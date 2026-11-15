@@ -13,7 +13,7 @@ const { withTransaction } = require('../../utils/transaction');
 const avatarService = require('../../services/avatarService');
 const { normalizeEmailKey } = require('../../utils/emailKey');
 const { piiSearchKey } = require('../../utils/piiCrypto');
-const { isSuperAdminRole } = require('../../utils/superAdmin');
+const { isSuperAdminRole, RESERVED_WILDCARD_PERMISSION } = require('../../utils/superAdmin');
 const statsCache = require('../../services/statsCache');
 const { invalidateUserCache } = require('../../middleware/auth');
 const userService = require('../../services/userService');
@@ -48,7 +48,10 @@ const rejectForbiddenStatusChange = async (req, res, { user, status, isSelf, tar
     !isSelf && status !== undefined && String(status) !== String(user.status);
   if (changesOthersStatus) {
     const operatorPermCodes = await userService.getPermissions(req.user.userId);
-    if (!operatorPermCodes.includes('user:lock') && !operatorPermCodes.includes('*:*')) {
+    if (
+      !operatorPermCodes.includes('user:lock') &&
+      !operatorPermCodes.includes(RESERVED_WILDCARD_PERMISSION)
+    ) {
       ApiResponse.codeError(res, 'USER_STATUS_CHANGE_FORBIDDEN');
       return true;
     }

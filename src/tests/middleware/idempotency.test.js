@@ -72,6 +72,35 @@ describe('幂等键纯函数层', () => {
     expect(fingerprintRequestBody(undefined)).toBe(fingerprintRequestBody({}));
     expect(fingerprintRequestBody([1])).toBe(fingerprintRequestBody({}));
   });
+
+  test('载荷指纹：嵌套对象键序无关（全深度规范化），数组顺序仍是判据', () => {
+    // 修复前只排顶层：{a:{x:1,y:2}} 与 {a:{y:2,x:1}} 算成两份载荷，客户端改写键序即 409
+    expect(fingerprintRequestBody({ a: { x: 1, y: 2 }, b: 3 })).toBe(
+      fingerprintRequestBody({ b: 3, a: { y: 2, x: 1 } })
+    );
+    // 深层数组内的对象同样键序无关
+    expect(fingerprintRequestBody({ list: [{ p: 1, q: 2 }] })).toBe(
+      fingerprintRequestBody({ list: [{ q: 2, p: 1 }] })
+    );
+    // 数组顺序是内容本身：规范化不得把两份不同顺序判成同一份
+    expect(fingerprintRequestBody({ list: [{ p: 1 }, { p: 2 }] })).not.toBe(
+      fingerprintRequestBody({ list: [{ p: 2 }, { p: 1 }] })
+    );
+    // 异形对象沿用 JSON.stringify 既有语义（Date 仍按 ISO 串参与哈希，不被误改成 {}）
+    expect(fingerprintRequestBody({ d: new Date('2026-01-01T00:00:00.000Z') })).toBe(
+      fingerprintRequestBody({ d: '2026-01-01T00:00:00.000Z' })
+    );
+    // 循环引用防护：req.body 原则上来自 JSON 解析（无环），但自引用结构不得抛错/栈溢出，
+    // 且结果必须确定（占位串位置由结构决定，同一形状哈希一致）
+    const cyclic = { a: 1 };
+    cyclic.self = cyclic;
+    expect(() => fingerprintRequestBody(cyclic)).not.toThrow();
+    const cyclic2 = { self: {} };
+    cyclic2.self.loop = cyclic2;
+    expect(fingerprintRequestBody(cyclic)).toBe(fingerprintRequestBody(cyclic));
+    expect(fingerprintRequestBody(cyclic2)).toBe(fingerprintRequestBody(cyclic2));
+    expect(fingerprintRequestBody(cyclic)).not.toBe(fingerprintRequestBody({ a: 1 }));
+  });
 });
 
 describe('幂等中间件（真实 HTTP + Mongo）', () => {
@@ -968,7 +997,9 @@ describe('第 15 轮补充：出口异常、鉴权前置、键上限（真实 HT
     const huge = 'k'.repeat(4096);
     const bad2 = await post('denied', {}, huge);
     expect(bad2.status).toBe(400);
-    expect(await IdempotencyRecord.countDocuments({ userId })).toBeGreaterThanOrEqual(0);
+    // 标题承诺「一律 400 且不落库」：4KB 键与 65 位键同一判据——该键的记录必须不存在
+    // （原为 countDocuments({ userId }) 的 toBeGreaterThanOrEqual(0) 恒真断言，无判别力）
+    expect(await IdempotencyRecord.countDocuments({ keyHash: keyHashOf('denied', huge) })).toBe(0);
   });
 });
 
@@ -1013,6 +1044,7 @@ describe('在途租约：崩溃/被杀/永久挂起不再把键钉满 24h（真�
   };
 
   let app;
+  let releaseLateClaim = null; // (p) 用例的门闩：resolve 后 X 的 403 才发出
 
   beforeAll(async () => {
     if (mongoose.connection.readyState === 0) await mongoose.connect(process.env.MONGODB_URI);
@@ -1032,6 +1064,17 @@ describe('在途租约：崩溃/被杀/永久挂起不再把键钉满 24h（真�
     };
     route('plain', (req, res) => {
       res.status(201).json({ success: true, data: { n: bump('plain') } });
+    });
+    // (p) P2-2 的门：第一次到达（X）挂起直到用例放开门闩再回 403——模拟「受理后业务迟迟
+    // 不结束、收尾迟到」；接管者（Y 及之后到达者）直接 2xx 完成。
+    route('latefail', async (req, res) => {
+      const n = bump('latefail');
+      if (n === 1)
+        await new Promise((resolve) => {
+          releaseLateClaim = resolve;
+        });
+      if (n === 1) res.status(403).json({ success: false, errors: { errorCode: 'FORBIDDEN' } });
+      else res.status(201).json({ success: true, data: { n } });
     });
     // filter 抛错的挂载点（复审 F1-3）：中间件契约要求 filter 失败降级为
     // 「不可回放」而不是卡死 in_progress
@@ -1222,6 +1265,80 @@ describe('在途租约：崩溃/被杀/永久挂起不再把键钉满 24h（真�
     expect(second.status).toBe(201);
     expect(second.headers['idempotency-replay-omitted']).toBe('true');
     expect(countOf('badfilter')).toBe(1);
+  });
+
+  test('(p) P2-2：非 2xx 的迟到收尾不得删除已被同键接管并完成的记录', async () => {
+    // 缺陷形态（修复前）：X 认领后业务挂起超租约，Y 原子接管（接管不改 state）并完成落库；
+    // 此时 X 才以 403 收尾——旧实现在这里无条件 deleteOne({keyHash})，把 Y 的 completed
+    // 判据一并抹掉，同键第三次到达变成全新执行（重复执行已交付的写入）。
+    const key = 'lease-late-' + stamp16();
+    const lateKeyHash = keyHashOf('latefail', key);
+    releaseLateClaim = null;
+
+    // X：认领后挂在门上。supertest 的请求是**惰性发车**（挂上 then/end 才真正送出），
+    // 不能等到用例末尾的 await 才发车——那样下面的认领轮询永远等不到请求到达。
+    // 立刻挂 then 触发在途；结论经包装 promise 交付（发送层失败折成 status 0，由断言显红）。
+    const firstSettled = post('latefail', {}, key).then(
+      (r) => r,
+      (e) => ({ status: 0, errMessage: String((e && e.message) || e) })
+    );
+    // 处理器开跑 = 中间件已完成认领（claim 先于 next()，登记失败会走 degradeOpen 放行
+    // 而不落记录——那个形态是真实 DB 故障，本用例会在下一个 waitFor 显式红）
+    await waitFor(() => countOf('latefail') >= 1, {
+      timeoutMs: 15000,
+      label: 'X 到达处理器（认领阶段已完成）',
+    });
+    await waitFor(
+      async () => {
+        const rec = await IdempotencyRecord.findOne({ keyHash: lateKeyHash }).lean();
+        return Boolean(rec) && rec.state === 'in_progress';
+      },
+      { timeoutMs: 15000, label: 'X 的在途认领落库' }
+    );
+    // 把 X 的认领回拨成「超租约」（seedClaim 同形，不真等 5 分钟）：此后同键请求可原子接管
+    await IdempotencyRecord.updateOne(
+      { keyHash: lateKeyHash },
+      {
+        $set: {
+          createdAt: new Date(Date.now() - 10 * 60 * 1000),
+          expiresAt: new Date(Date.now() - 10 * 60 * 1000 + RETENTION_MS),
+        },
+      }
+    );
+
+    const second = await post('latefail', {}, key); // Y：接管 + 2xx 完成
+    expect(second.status).toBe(201);
+    await waitFor(
+      async () => {
+        const rec = await IdempotencyRecord.findOne({ keyHash: lateKeyHash }).lean();
+        return Boolean(rec) && rec.state === 'completed';
+      },
+      { timeoutMs: 15000, label: 'Y 接管后收敛为 completed' }
+    );
+
+    releaseLateClaim(); // 放开 X：403 迟到收尾（旧实现在此删掉 Y 的记录）
+    const firstRes = await firstSettled;
+    expect(firstRes.status).toBe(403);
+
+    // 释放是响应后的 fire-and-forget 删（(f2) 同判例）：多轮采样确认 Y 的记录始终完好——
+    // 旧实现会在其中某一轮读到 null（记录被误删）。采样改走 waitFor 条件轮询：
+    // 每轮都是「真实 DB 往返 + 轮询间隔」，凑满 5 轮后统一断言，不再赌固定睡眠时长。
+    const samples = [];
+    await waitFor(
+      async () => {
+        const rec = await IdempotencyRecord.findOne({ keyHash: lateKeyHash }).lean();
+        samples.push(rec && rec.state);
+        return samples.length >= 5;
+      },
+      { timeoutMs: 4000, label: 'Y 的 completed 记录在 X 迟到收尾后的多轮采样中始终完好' }
+    );
+    expect(samples).toEqual(Array(5).fill('completed'));
+
+    // 判据仍在：同键第三次到达拿到 Y 的回放，而不是第三次真实执行
+    const third = await post('latefail', {}, key);
+    expect(third.status).toBe(201);
+    expect(third.headers['idempotency-replayed']).toBe('true');
+    expect(countOf('latefail')).toBe(2); // 修复前：third 重新执行 ⇒ 3
   });
 });
 

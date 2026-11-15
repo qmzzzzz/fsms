@@ -91,6 +91,19 @@ describe('authService gap A', () => {
       expect(result.outcome).toBe('INVALID_EMAIL');
     });
 
+    test('INVALID_EMAIL - 空串/null 不得绕过格式闸直达 500（审计 2026-11-14 A）', async () => {
+      // 旧判据 `if (email && ...)` 让 ''/null 绕到 assignProfileFields（email !== undefined
+      // 即写入），save 撞 schema required「邮箱不能为空」冒泡成 500；服务层直连调用方
+      // 必须拿到与路由 isEmail 同口径的 400（INVALID_EMAIL）。
+      const user = await makeUser('prof2b');
+      expect((await authService.updateUserProfile(user._id, { email: '' })).outcome).toBe(
+        'INVALID_EMAIL'
+      );
+      expect((await authService.updateUserProfile(user._id, { email: null })).outcome).toBe(
+        'INVALID_EMAIL'
+      );
+    });
+
     test('EMAIL_TAKEN - 邮箱已被其他用户占用', async () => {
       const userA = await makeUser('prof3a');
       const userB = await makeUser('prof3b');

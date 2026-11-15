@@ -1,3 +1,10 @@
+# ===== Compose 版本门槛（部署机必须先核对再跑）=====
+# 本文件使用了 `!override` YAML 标签（app-green 的 ports 段）。该标签自
+# **Compose v2.24.4**（2024-01，随 Docker Engine 25.0 一同发布）起才被解析；
+# 更早的版本会把它当普通标量文本，app-green 会同时 publish 3000 与 3001，
+# 与 app 抢端口（升级窗口内第二个容器起不来）。部署前先核对：
+#   docker compose version   # 须 >= v2.24.4
+# 标签语义参考：docs.docker.com/reference/compose-file/merge（!reset / !override）。
 services:
   app:
     # 镜像来源（R-7 / D-1）：CI 已把带版本 tag 的镜像推到 GHCR，但此处原先只写
@@ -183,7 +190,8 @@ services:
     # /readyz（供 readyz_verdict 持续产生）与 /health（决定退出码），compose 侧
     # 手写一条往往只探 /health，一旦后者生效就会把镜像侧的口径整体顶掉，
     # 表现为「容器健康但 readyz_verdict 从不产生」，MongoUnavailable 恒不触发。
-    # 判据与理由见 Dockerfile:194-202 与 src/tests/deploy/dockerHealthcheckReadyz.test.js。
+    # 判据与理由见 Dockerfile 文件尾的 HEALTHCHECK 段与
+    # src/tests/deploy/dockerHealthcheckReadyz.test.js。
     #
     # 因此：**不要在这里添加 healthcheck**（尤其不要写 `disable: true`）。
     # 本服务目前也没有 depends_on 的下游（nginx 在宿主侧，不在本编排内），
@@ -411,10 +419,16 @@ services:
     # 表象是 app 反复重启而健康状态一直绿——探针在说谎，排查方向被引到别处。
     #
     # 现在用 root 凭据从 secret 文件读入（**不进 environment**），并显式断言 ping 的 ok。
-    # 残留暴露（登记，别当它不存在）：`$(cat …)` 会把值展开进 mongosh 的 **argv**，
-    # 容器内 `ps` 的可见性取决于该容器里还有谁能起进程——本镜像只有 mongod/健康检查。
-    # 想连 argv 一起摘掉，得让 mongosh 从 env 读（`--eval` + `process.env`），那是一次
-    # 需要在真环境验一遍的健康检查改造，未在本轮做（见 work/lead/iter-report.md）。
+    # 凭据传递（P2-17 收口，2026-11-14 审计）：`$(cat …)` 读出的值经 **环境变量前缀**
+    # （MONGO_HC_USER/PASS）交给 mongosh，mongosh 在 --eval 里用 process.env 取用，
+    # 全程不落 argv——
+    #   · `sh -c` 的命令行（/proc/<pid>/cmdline，同容器任意 uid 可读）里只有
+    #     `$(cat /run/secrets/…)` 字面量，没有展开后的值；
+    #   · 秘值只存在于 mongosh 进程的 environ（/proc/<pid>/environ 仅同 uid/根可读，
+    #     mongod 以更低的 mongodb uid 运行，读不到 root 健康检查进程的 environ）；
+    #   · 前缀赋值只进 mongosh 的环境，healthcheck 进程用后即退。
+    # 代价是退出码细分（2=凭据文件读不到/为空，3=认证被拒，1=ping 不 ok），
+    # 对 healthcheck 语义没有影响（非 0 即 unhealthy）。
     # 凭据错误 ⇒ 恒 unhealthy ⇒ rs-init 不启动 ⇒ app 不启动（fail-loud，不静默降级）。
     # 首次初始化的窗口由 start_period 覆盖：MONGO_INITDB_ROOT_* 会先建好 root 用户，
     # 之后带凭据的 ping 才能通过。
@@ -422,11 +436,13 @@ services:
       test:
         - CMD-SHELL
         - >-
+          MONGO_HC_USER="$$(cat /run/secrets/mongo_root_username)"
+          MONGO_HC_PASS="$$(cat /run/secrets/mongo_root_password)"
           mongosh --quiet --host 127.0.0.1:27017
-          --username "$$(cat /run/secrets/mongo_root_username)"
-          --password "$$(cat /run/secrets/mongo_root_password)"
-          --authenticationDatabase admin
-          --eval 'if (db.runCommand({ ping: 1 }).ok !== 1) quit(1)'
+          --eval 'const u=process.env.MONGO_HC_USER, p=process.env.MONGO_HC_PASS;
+          if (!u || !p) quit(2);
+          try { db.getSiblingDB("admin").auth(u, p) } catch (e) { quit(3) }
+          if (db.getSiblingDB("admin").runCommand({ ping: 1 }).ok !== 1) quit(1)'
       interval: 10s
       timeout: 10s
       retries: 5

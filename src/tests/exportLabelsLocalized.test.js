@@ -119,10 +119,32 @@ describe('导出词表随语言切换', () => {
   });
 
   test('截断脚注跟随语言（英文文件末尾不得出现中文）', () => {
-    const { writeExportWorkbook } = require('../services/reportWorkbookService');
-    // 直接用 workbook 侧导出的脚注构造入口：通过 writeExportWorkbook 的 header 行为
-    // 会拉起 Mongo，故这里只校验 footer 文本来源——buildTruncationFooter 未导出，
-    // 用 writeExportWorkbook 的入参契约（lang）间接断言：见下一条集成用例。
-    expect(typeof writeExportWorkbook).toBe('function');
+    // P2-12（2026-11-15）修复：原用例只有 expect(typeof writeExportWorkbook).toBe('function')
+    // 一条恒真断言，标题承诺的「脚注跟随语言」零覆盖。buildTruncationFooter 现已从
+    // reportWorkbookService 导出（原「未导出」的注释已过时），直接对同一语境断言
+    // 中英两份脚注的逐字文案；lang 缺省回中文与第 1 条用例同一口径。
+    const { buildTruncationFooter } = require('../services/reportWorkbookService');
+    const { EXPORT_LIMIT } = require('../services/reportExportService');
+    const context = {
+      total: EXPORT_LIMIT + 7,
+      written: EXPORT_LIMIT,
+      truncated: true,
+      rowsLost: 0,
+      countDrift: 0,
+    };
+    const zhFooter = buildTruncationFooter({ ...context, lang: 'zh' });
+    const enFooter = buildTruncationFooter({ ...context, lang: 'en' });
+    expect(zhFooter).toBe(
+      `⚠ 数据已截断：本文件仅包含前 ${EXPORT_LIMIT} 行（命中总数 ${EXPORT_LIMIT + 7}），` +
+        '请缩小时间范围或增加筛选条件后重新导出。'
+    );
+    expect(enFooter).toBe(
+      `⚠ Data truncated: This file contains only the first ${EXPORT_LIMIT} rows ` +
+        `(total matches ${EXPORT_LIMIT + 7}). Narrow the time range or add filters and export again.`
+    );
+    // 标题承诺的反向对照：英文文件末尾不得出现中文
+    expect(enFooter).not.toMatch(/[\u4e00-\u9fff]/u);
+    // 缺省语言回中文（与「缺省导出行为不变」同一口径）
+    expect(buildTruncationFooter({ ...context })).toBe(zhFooter);
   });
 });

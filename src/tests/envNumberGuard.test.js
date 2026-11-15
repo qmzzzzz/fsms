@@ -12,7 +12,7 @@
  * LOG_SHIPPING_*）在并行会话的 M 态文件里，补丁已交付协作技术文档。
  */
 
-const { readPositiveNumberEnv } = require('../../src/utils/envNumber');
+const { readPositiveNumberEnv, readClampedIntEnv } = require('../../src/utils/envNumber');
 
 const NAME = 'TEST_NUMBER';
 
@@ -77,6 +77,43 @@ describe('readPositiveNumberEnv 判据', () => {
     withEnv('-1', () => {
       expect(Number(process.env[NAME]) || 15000).toBe(-1);
     });
+  });
+});
+
+describe('readClampedIntEnv 判据（区间整型）', () => {
+  test.each([
+    [undefined, 42],
+    ['', 42],
+    ['   ', 42],
+    ['0', 42],
+    ['5', 42], // 低于下界 [10,100]
+    ['500', 42], // 高于上界
+    ['1.5', 42], // 非整数
+    ['abc', 42],
+    ['NaN', 42],
+    ['10', 10], // 下界（闭区间）
+    ['100', 100], // 上界（闭区间）
+    [' 55 ', 55], // 数字两侧空白不碍事
+  ])('%s ⇒ %s', (raw, expected) => {
+    const r = withEnv(raw, (cb) => readClampedIntEnv(NAME, 42, [10, 100], { onInvalid: cb }));
+    expect(r.value).toBe(expected);
+  });
+
+  test('未配置/空白不告警，已配置但非法才告警（与 readPositiveNumberEnv 同一口径）', () => {
+    // 未配置是正常状态：缺省部署不得刷恒真告警（审计 2026-11-14）
+    for (const raw of [undefined, '', '   ']) {
+      const r = withEnv(raw, (cb) => readClampedIntEnv(NAME, 9, [10, 100], { onInvalid: cb }));
+      expect(r.value).toBe(9);
+      expect(r.invalid).toEqual([]);
+    }
+    // 错配必须出声：回调拿到原值与回退值，措辞与级别归调用方
+    const bad = withEnv('999', (cb) => readClampedIntEnv(NAME, 9, [10, 100], { onInvalid: cb }));
+    expect(bad.value).toBe(9);
+    expect(bad.invalid).toEqual([[NAME, '999', 9]]);
+  });
+
+  test('onInvalid 未传时同样只回退、不抛错（loginGuard 的调用形态）', () => {
+    expect(withEnv('abc', () => readClampedIntEnv(NAME, 7, [10, 100])).value).toBe(7);
   });
 });
 

@@ -73,37 +73,44 @@ describe('捕获开/关/抛错三态：请求与审计行为逐字不变', () =>
   });
 
   test('四态对拍：响应字节相同、审计文档（剥易变字段后）逐字相同', async () => {
-    // 态 1：捕获关闭（env 开关）
+    // 态 1：捕获关闭（env 开关）——快照原值、套件末尾按原形态归还：
+    // 直接赋 'true' 会把「原未设」的形态改写成字符串（Node env 赋值一律转字符串）
+    const prevEnabled = process.env.FORENSIC_CAPTURE_ENABLED;
     process.env.FORENSIC_CAPTURE_ENABLED = 'false';
     const off = await runOnce();
     process.env.FORENSIC_CAPTURE_ENABLED = 'true';
-    // 态 2：捕获开启但 IP 未被标记 ⇒ 与关闭态应当没有差异
-    const unmarked = await runOnce();
-    // 态 3：捕获开启且被标记（真捕获）
-    mockState.on = true;
-    const marked = await runOnce();
-    // 态 4：触发判据抛错（降级路径）
-    mockState.on = true;
-    mockState.throws = true;
-    const throwing = await runOnce();
-    mockState.throws = false;
+    try {
+      // 态 2：捕获开启但 IP 未被标记 ⇒ 与关闭态应当没有差异
+      const unmarked = await runOnce();
+      // 态 3：捕获开启且被标记（真捕获）
+      mockState.on = true;
+      const marked = await runOnce();
+      // 态 4：触发判据抛错（降级路径）
+      mockState.on = true;
+      mockState.throws = true;
+      const throwing = await runOnce();
+      mockState.throws = false;
 
-    const baselineAudit = JSON.stringify(off.audit);
-    expect(baselineAudit).not.toBe('[]'); // 防"两边都空"的假对拍
+      const baselineAudit = JSON.stringify(off.audit);
+      expect(baselineAudit).not.toBe('[]'); // 防"两边都空"的假对拍
 
-    for (const [name, run] of [
-      ['未标记', unmarked],
-      ['已标记', marked],
-      ['触发抛错', throwing],
-    ]) {
-      expect({ name, status: run.status }).toEqual({ name, status: off.status });
-      expect({ name, ct: run.contentType }).toEqual({ name, ct: off.contentType });
-      expect({ name, text: run.text }).toEqual({ name, text: off.text });
-      expect({ name, audit: JSON.stringify(run.audit) }).toEqual({ name, audit: baselineAudit });
+      for (const [name, run] of [
+        ['未标记', unmarked],
+        ['已标记', marked],
+        ['触发抛错', throwing],
+      ]) {
+        expect({ name, status: run.status }).toEqual({ name, status: off.status });
+        expect({ name, ct: run.contentType }).toEqual({ name, ct: off.contentType });
+        expect({ name, text: run.text }).toEqual({ name, text: off.text });
+        expect({ name, audit: JSON.stringify(run.audit) }).toEqual({ name, audit: baselineAudit });
+      }
+      // 反向对照：捕获自身的产物必须只在第 3 态出现（否则"对拍"根本没覆盖捕获）
+      expect(service.getForensicCaptureStats().captured).toBeGreaterThan(0);
+      expect(service.getForensicCaptureStats().rejected).toBeGreaterThan(0);
+    } finally {
+      if (prevEnabled === undefined) delete process.env.FORENSIC_CAPTURE_ENABLED;
+      else process.env.FORENSIC_CAPTURE_ENABLED = prevEnabled;
     }
-    // 反向对照：捕获自身的产物必须只在第 3 态出现（否则"对拍"根本没覆盖捕获）
-    expect(service.getForensicCaptureStats().captured).toBeGreaterThan(0);
-    expect(service.getForensicCaptureStats().rejected).toBeGreaterThan(0);
   });
 
   test('审计体脱敏不受捕获影响：口令明文在两种状态下都不出现', async () => {

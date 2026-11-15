@@ -1,3 +1,5 @@
+'use strict';
+
 const { normalizeCanaryUsername, DEFAULT_CANARY_USERNAMES } = require('./canaryAccounts'); // 与哨兵名单共用一份归一化（trim + 小写），不新造第二份大小写规则；默认诱饵名也直接派生自默认哨兵名，避免两份名单各自演化漂移
 const { isBreachedPassword } = require('../utils/helpers'); // 诱饵口令判据复用弱口令词干表，不新造第二张词表
 const { getSuperAdminUsername } = require('../utils/superAdmin'); // 超管名判据（该模块零 require，不成环）

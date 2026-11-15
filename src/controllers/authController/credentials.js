@@ -193,6 +193,11 @@ const login = asyncHandler(async (req, res) => {
       return ApiResponse.codeError(res, 'MFA_ATTEMPTS_EXCEEDED');
     case 'MFA_CODE_INVALID':
       return ApiResponse.codeError(res, 'MFA_CODE_INVALID');
+    case 'USER_GONE':
+      // 并发删号 fail-closed（审计 2026-11-14 B）：口令已验证通过、角色快照重查时
+      // 账户已不存在 ⇒ 服务层拒发会话。401 + 注册码如实报「用户不存在或已被删除」，
+      // 不落登录成功、也不伪造「凭据错误」（该账户已无可枚举的存在性）。
+      return ApiResponse.codeError(res, 'USER_NOT_FOUND_OR_DELETED');
     case 'OK':
       break;
     default:

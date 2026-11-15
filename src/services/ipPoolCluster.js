@@ -5,17 +5,17 @@ const DEFAULT_WINDOW_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_MIN_HITS = 20;
 const DEFAULT_MIN_IPS = 4;
 const DEFAULT_LIMIT = 50;
+// 取证面板是按需点查（forensicController，挂 strictLimiter），不是常驻定时任务；30s 足够完成 24h 窗口聚合，超过即说明集合规模/索引出了问题，该报错而不是等。
+const AGGREGATE_MAX_TIME_MS = 30000;
 
 const state = { runs: 0, lastError: null };
 
-/** 网段键转 CIDR：IPv4 前三段补 .0/24，IPv6 前四组补 ::/64。非法段返回 null（宁可漏报，不产出假 CIDR 去封） */
 const cidrOf = (segment) => {
   if (typeof segment !== 'string' || !segment) return null;
   const raw = segment.includes(':') ? `${segment}::/64` : `${segment}.0/24`;
   return normalizeCIDR(raw);
 };
 
-/** 判定：IP 数够多、但指纹数远少于 IP 数 ⇒ 轮换池；指纹数与 IP 数同量级 ⇒ 共享出口 */
 const verdictOf = ({ distinctIps, distinctFingerprints, minIps }) => {
   if (distinctIps < minIps) return 'too_few_ips';
   return distinctFingerprints <= Math.max(1, Math.floor(distinctIps / 4))
@@ -32,22 +32,26 @@ async function clusterIpPools({
   limit = DEFAULT_LIMIT,
 } = {}) {
   const since = new Date(now.getTime() - windowMs);
-  const rows = await model.aggregate([
-    { $match: { createdAt: { $gte: since }, ipSegment: { $ne: '' } } },
-    {
-      $group: {
-        _id: '$ipSegment',
-        hits: { $sum: 1 },
-        ips: { $addToSet: '$ip' },
-        fps: { $addToSet: '$fingerprint' },
-        firstSeen: { $min: '$createdAt' },
-        lastSeen: { $max: '$createdAt' },
+  // 聚合预算（P3 收口）：$addToSet 全量指纹/IP 在热网段上是内存放大器，必须给 maxTimeMS 硬闸；allowDiskUse 显式为 false——跑飞的分析宁可大声失败（MaxTimeMSExpired）也不悄悄往磁盘溢写（与 auditChainVerify 的预算口径同族）。
+  const rows = await model.aggregate(
+    [
+      { $match: { createdAt: { $gte: since }, ipSegment: { $ne: '' } } },
+      {
+        $group: {
+          _id: '$ipSegment',
+          hits: { $sum: 1 },
+          ips: { $addToSet: '$ip' },
+          fps: { $addToSet: '$fingerprint' },
+          firstSeen: { $min: '$createdAt' },
+          lastSeen: { $max: '$createdAt' },
+        },
       },
-    },
-    { $match: { hits: { $gte: minHits } } },
-    { $sort: { hits: -1 } },
-    { $limit: limit },
-  ]);
+      { $match: { hits: { $gte: minHits } } },
+      { $sort: { hits: -1 } },
+      { $limit: limit },
+    ],
+    { maxTimeMS: AGGREGATE_MAX_TIME_MS, allowDiskUse: false }
+  );
   state.runs += 1;
   const segments = rows.map((r) => {
     const cidr = cidrOf(r._id);
@@ -85,8 +89,8 @@ module.exports = {
   DEFAULT_MIN_HITS,
   DEFAULT_MIN_IPS,
   DEFAULT_LIMIT,
-  cidrOf,
-  verdictOf,
+  cidrOf, // 网段键转 CIDR：IPv4 前三段补 .0/24，IPv6 前四组补 ::/64。非法段返回 null（宁可漏报，不产出假 CIDR 去封）
+  verdictOf, // 判定：IP 数够多、但指纹数远少于 IP 数 ⇒ 轮换池；指纹数与 IP 数同量级 ⇒ 共享出口
   clusterIpPools,
   getClusterStats,
   resetClusterState,

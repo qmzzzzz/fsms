@@ -174,6 +174,46 @@ describe('传输加密启动断言', () => {
     }
   });
 
+  /**
+   * 「不能指向 localhost」防呆闸按 host 精确匹配（审计 2026-11-14）：它拦的是
+   * 「没配库串、还挂着开发默认值 mongodb://localhost:...」。旧的
+   * `uri.includes('localhost')` 子串判据双向都错：合法生产域名含子串被误杀，
+   * 大小写变体（LocalHost）反而漏网。
+   */
+  test('localhost 判据按 host 精确匹配：含子串的合法域名不误杀、大小写变体不漏网', () => {
+    const { isLocalhostHostname } = require('../../config/transportSecurity');
+    for (const host of ['localhost', 'LocalHost', 'mongo.localhost', '[localhost]']) {
+      expect(isLocalhostHostname(host)).toBe(true);
+    }
+    for (const host of [
+      'mylocalhost.example.com',
+      'localhost.example.org',
+      'example.com',
+      '::1',
+      '127.0.0.1',
+      null,
+      '',
+    ]) {
+      expect(isLocalhostHostname(host)).toBe(false);
+    }
+  });
+
+  test('库串主机恰好含 localhost 子串（合法生产域名）不再被防呆闸误杀', () => {
+    withEnv({ MONGODB_URI: 'mongodb://mylocalhost.example.com:27017/db?tls=true' });
+    const { fatal, lines } = runValidate();
+    expect(fatal).toBe(false); // 修复前：子串命中 ⇒ 误报「不能指向 localhost」
+    expect(lines.join('\n')).not.toContain('不能指向 localhost');
+  });
+
+  test('库串确实指向 localhost（含大小写/端口形态）⇒ 防呆闸仍拦下', () => {
+    for (const uri of ['mongodb://localhost:27017/db', 'mongodb://LocalHost:27017/db']) {
+      withEnv({ MONGODB_URI: uri });
+      const { fatal, lines } = runValidate();
+      expect({ uri, fatal }).toEqual({ uri, fatal: true });
+      expect(lines.join('\n')).toContain('MONGODB_URI 不能指向 localhost');
+    }
+  });
+
   test('Mongo 指向 [::] 且无 tls ⇒ 硬错误（曾因被误判回环而静默放行）', () => {
     withEnv({ MONGODB_URI: 'mongodb://[::]:27017/db' });
     const { fatal, lines } = runValidate();

@@ -217,7 +217,7 @@ describe('巡检计划的三类引用必须落在操作者数据范围内', () =
 
   /** 造一条 in_progress 的巡检：create（指派给操作者）→ start。两跳都走真实路由。 */
   // 必须带 locations.building：inspection 的 departmentField 就是 `locations.building`
-  // （constants/dataScopeFields.js:38），不填楼栋的巡检对 department 档操作者不在范围内，
+  // （constants/dataScopeFields.js:39），不填楼栋的巡检对 department 档操作者不在范围内，
   // start 会先被 INSPECTION_OPERATE_FORBIDDEN 拦掉——那样本组用例就测不到 complete 这条闸了。
   const mkInProgress = async (token, tag, assigneeId, extra = {}) => {
     const created = await create(token, tag, {
