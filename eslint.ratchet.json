@@ -33,10 +33,19 @@
   "src/config/validate.js": {
     "max-lines": 1
   },
+  "src/constants/failOpenSites.js": {
+    "max-lines": 1
+  },
+  "src/constants/runtime.js": {
+    "max-lines": 1
+  },
   "src/controllers/roleController.js": {
     "max-lines": 1
   },
   "src/docs/generate.js": {
+    "max-lines": 1
+  },
+  "src/index.js": {
     "max-lines": 1
   },
   "src/middleware/idempotency.js": {
@@ -63,10 +72,10 @@
   "src/services/auditAnchorSink.js": {
     "complexity": 1
   },
-  "src/utils/auditChain.js": {
+  "src/services/auditBuffer.js": {
     "max-lines": 1
   },
-  "src/services/auditBuffer.js": {
+  "src/services/auditChainVerify.js": {
     "max-lines": 1
   },
   "src/services/authService/session.js": {
@@ -75,10 +84,22 @@
   "src/services/authService/token.js": {
     "complexity": 1
   },
+  "src/services/forensicCaptureWal.js": {
+    "max-lines": 1
+  },
+  "src/services/privilegeGrantService.js": {
+    "max-lines": 1
+  },
   "src/services/sessionService.js": {
     "max-lines": 1
   },
   "src/services/upgradeService.js": {
+    "max-lines": 1
+  },
+  "src/tests/ci/helpers/childProcessGate.js": {
+    "complexity": 1
+  },
+  "src/utils/auditChain.js": {
     "max-lines": 1
   },
   "src/utils/errorCodes.js": {
@@ -99,50 +120,24 @@
     "scripts/migrate-pii-encryption.js": 344,
     "scripts/offlineBundleIntake.js": 496,
     "src/config/validate.js": 354,
+    "src/constants/failOpenSites.js": 354,
+    "src/constants/runtime.js": 333,
     "src/controllers/roleController.js": 304,
     "src/docs/generate.js": 1603,
+    "src/index.js": 316,
     "src/middleware/idempotency.js": 322,
     "src/middleware/rateLimit.js": 435,
     "src/models/User.js": 301,
-    "src/routes/authRoutes.js": 301,
-    "src/routes/securityRoutes.js": 382,
+    "src/routes/securityRoutes.js": 358,
     "src/services/AlarmService.js": 306,
-    "src/utils/auditChain.js": 301,
     "src/services/auditBuffer.js": 308,
-    "src/services/sessionService.js": 334,
-    "src/services/upgradeService.js": 528,
-    "src/utils/errorCodes.js": 908,
-    "src/utils/metrics.js": 315,
-    "src/constants/failOpenSites.js": 354,
-    "src/services/authService/login.js": 303,
-    "src/constants/runtime.js": 333,
+    "src/services/auditChainVerify.js": 314,
     "src/services/forensicCaptureWal.js": 311,
     "src/services/privilegeGrantService.js": 301,
-    "src/index.js": 316,
-    "src/services/auditChainVerify.js": 314
-  },
-  "src/constants/failOpenSites.js": {
-    "max-lines": 1
-  },
-  "src/services/authService/login.js": {
-    "max-lines": 1
-  },
-  "src/tests/ci/helpers/childProcessGate.js": {
-    "complexity": 1
-  },
-  "src/constants/runtime.js": {
-    "max-lines": 1
-  },
-  "src/services/forensicCaptureWal.js": {
-    "max-lines": 1
-  },
-  "src/services/privilegeGrantService.js": {
-    "max-lines": 1
-  },
-  "src/index.js": {
-    "max-lines": 1
-  },
-  "src/services/auditChainVerify.js": {
-    "max-lines": 1
+    "src/services/sessionService.js": 334,
+    "src/services/upgradeService.js": 528,
+    "src/utils/auditChain.js": 301,
+    "src/utils/errorCodes.js": 904,
+    "src/utils/metrics.js": 315
   }
 }

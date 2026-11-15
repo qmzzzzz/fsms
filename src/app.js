@@ -312,36 +312,6 @@ function installSecurityMiddlewareChain(app, corsOrigin) {
   // `/`、`/csp-report`、`/api-docs` 上每个未认证 TRACE 都不吃 429、却照样写一条链上审计。
   // 探针路径（`/health`、`/readyz`）由这两个限流器自己的 skip 放行，清单见
   // constants/probePaths：漏了这道 skip，门禁会以 127.0.0.1 的高频探测先把健康版本打成红。
-  app.use(ipLimiter);
-  app.use(generalLimiter);
-  // 静态前端面专用桶：静态面被上面两个「整体豁免」，而豁免的代价原本是零预算。这是把
-  // 「豁免」改成「换桶」——同一份判据（staticFrontend.isStaticSurfaceRequest），阈值推导见 rateLimit.js。
-  app.use(staticSurfaceLimiter);
-
-  // ================= 安全中间件（body 解析之前）=================
-  // protocolCompliance 必须早于 express.json()，否则「Content-Length
-  // 超限即拒绝、不读流」的设计意图被架空——原挂载顺序下 body 已完整解析完毕
-  applyPreBodySecurity(app);
-
-  // 请求体解析（上限 1mb：业务载荷均为小表单，收紧以降低内存滥用面）
-  app.use(express.json({ limit: '1mb' }));
-  app.use(express.urlencoded({ extended: true, limit: '1mb' }));
-
-  // ================= 安全中间件（依赖已解析 body/query）=================
-  applyPostBodySecurity(app);
-
-  // req.query 物化：Express 5 下 req.query 是原型 getter（每次访问重新解析 URL），
-  // 于是「清洗后再消费」不成立——sanitizeMongo / hpp 的 query 分支都是空操作。
-  // 本中间件读一次 → 清洗 → 物化成自有数据属性 → 回读自证身份，不等即拒绝请求。
-  // 必须早于下面三个 query 闸门（它们要读清洗后的形态）与 auditLog（落盘快照同源）。
-  // 见 middleware/security.js 的 materializeQuery 注释与
-  // src/tests/app/queryDefenseSingleSource.test.js（真实 express 实例上的行为门禁）。
-  app.use('/api/', materializeQuery());
-
-  // 响应压缩（gzip/deflate）：JSON 列表、报表、Swagger 文档等大体积响应显著降低带宽与首屏耗时；
-  // 默认仅压缩 ≥1kb 响应，/health 等最小响应不受影响
-  app.use(compression());
-
   // 日志记录
   // 不用内置的 'combined' 预设——它:url token 输出完整 originalUrl，
   // query string 里的令牌/口令会明文长期留存于 combined-*.log。
@@ -375,6 +345,37 @@ function installSecurityMiddlewareChain(app, corsOrigin) {
       })
     );
   }
+  // P1-2（2026-11-16）：morgan 前移到 ipLimiter 等早期闸门之前——早期被拒的
+  // 403/429 此前不进访问日志，SIEM 关联与排障少一半现场。审计链/指标不受影响。
+  app.use(ipLimiter);
+  app.use(generalLimiter);
+  // 静态前端面专用桶：静态面被上面两个「整体豁免」，而豁免的代价原本是零预算。这是把
+  // 「豁免」改成「换桶」——同一份判据（staticFrontend.isStaticSurfaceRequest），阈值推导见 rateLimit.js。
+  app.use(staticSurfaceLimiter);
+
+  // ================= 安全中间件（body 解析之前）=================
+  // protocolCompliance 必须早于 express.json()，否则「Content-Length
+  // 超限即拒绝、不读流」的设计意图被架空——原挂载顺序下 body 已完整解析完毕
+  applyPreBodySecurity(app);
+
+  // 请求体解析（上限 1mb：业务载荷均为小表单，收紧以降低内存滥用面）
+  app.use(express.json({ limit: '1mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+
+  // ================= 安全中间件（依赖已解析 body/query）=================
+  applyPostBodySecurity(app);
+
+  // req.query 物化：Express 5 下 req.query 是原型 getter（每次访问重新解析 URL），
+  // 于是「清洗后再消费」不成立——sanitizeMongo / hpp 的 query 分支都是空操作。
+  // 本中间件读一次 → 清洗 → 物化成自有数据属性 → 回读自证身份，不等即拒绝请求。
+  // 必须早于下面三个 query 闸门（它们要读清洗后的形态）与 auditLog（落盘快照同源）。
+  // 见 middleware/security.js 的 materializeQuery 注释与
+  // src/tests/app/queryDefenseSingleSource.test.js（真实 express 实例上的行为门禁）。
+  app.use('/api/', materializeQuery());
+
+  // 响应压缩（gzip/deflate）：JSON 列表、报表、Swagger 文档等大体积响应显著降低带宽与首屏耗时；
+  // 默认仅压缩 ≥1kb 响应，/health 等最小响应不受影响
+  app.use(compression());
 
   // CSRF 纵深：写操作 Origin/Referer 白名单校验（回应外部报告 CSRF 项）
   // 传入 createApp 求值得到的 corsOrigin 白名单（单一配置源）；无来源请求（curl/服务器间调用）放行，

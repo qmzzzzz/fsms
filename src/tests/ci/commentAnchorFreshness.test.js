@@ -304,15 +304,15 @@ const LIVE = [
   },
   {
     in: 'src/middleware/sentry.js',
-    at: 'app.js:587',
+    at: 'app.js:588',
     must: /sentryErrorHandler/,
-    why: 'Sentry 错误处理器挂载点（2026-11-02 攻击画像挂载点 +2 后由 :586 移至 :589；2026-11-03 i760 #22 删 transactionMarker 后迁 :568；2026-11-04 攻击告警挂载（app.js 导入 +1/挂载 +2 行）后迁 :571；2026-11-05 攻击检测面接线后迁 :576；同日审计整改（404 兜底内嵌 unmatchedRequestLimiter + 检测/取证改全站挂载）后为 :592；2026-11-15 dev 访问日志脱敏批（app.js 文件头 require +2、morgan dev 分支说明 +4 行）后迁 :598；同日密度裁剪批（app.js 注释压缩 −13 行）后迁 :585；2026-11-16 审计修复批后为 :587）',
+    why: 'Sentry 错误处理器挂载点（2026-11-02 攻击画像挂载点 +2 后由 :586 移至 :589；2026-11-03 i760 #22 删 transactionMarker 后迁 :568；2026-11-04 攻击告警挂载（app.js 导入 +1/挂载 +2 行）后迁 :571；2026-11-05 攻击检测面接线后迁 :576；同日审计整改（404 兜底内嵌 unmatchedRequestLimiter + 检测/取证改全站挂载）后为 :592；2026-11-15 dev 访问日志脱敏批（app.js 文件头 require +2、morgan dev 分支说明 +4 行）后迁 :598；同日密度裁剪批（app.js 注释压缩 −13 行）后迁 :585；2026-11-16 审计修复批后为 :587；同日 P1-2 morgan 前移批后为 :588）',
   },
   {
     in: 'src/middleware/sentry.js',
-    at: 'app.js:590',
+    at: 'app.js:591',
     must: /app\.use\(errorHandler/,
-    why: '通用 errorHandler 位置（口径是"在它之前"；2026-11-02 由 :590 移至 :592；2026-11-03 i760 #22 后迁 :571；2026-11-04 攻击告警挂载（app.js 导入 +1/挂载 +2 行）后迁 :574；2026-11-05 攻击检测面接线后迁 :579；同日审计整改（404 兜底内嵌 unmatchedRequestLimiter + 检测/取证改全站挂载）后为 :595；2026-11-15 dev 访问日志脱敏批（app.js 文件头 require +2、morgan dev 分支说明 +4 行）后迁 :601；同日密度裁剪批（app.js 注释压缩 −13 行）后迁 :588；2026-11-16 审计修复批后为 :590）',
+    why: '通用 errorHandler 位置（口径是"在它之前"；2026-11-02 由 :590 移至 :592；2026-11-03 i760 #22 后迁 :571；2026-11-04 攻击告警挂载（app.js 导入 +1/挂载 +2 行）后迁 :574；2026-11-05 攻击检测面接线后迁 :579；同日审计整改（404 兜底内嵌 unmatchedRequestLimiter + 检测/取证改全站挂载）后为 :595；2026-11-15 dev 访问日志脱敏批（app.js 文件头 require +2、morgan dev 分支说明 +4 行）后迁 :601；同日密度裁剪批（app.js 注释压缩 −13 行）后迁 :588；2026-11-16 审计修复批后为 :590；同日 P1-2 morgan 前移批后为 :591）',
   },
   {
     in: 'src/controllers/reportController.js',
@@ -457,23 +457,23 @@ const LIVE = [
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:509',
+    at: 'app.js:510',
     // 谓词必须带上处理器的形参：'/api/metrics'（同样以 app.get('/api' 开头），
     // 只写前缀会让锚点漂 5 行照样绿（3b 判据实测抓到），故绑定到根路径处理器本体。
     must: /app\.get\('\/api', \(req, res\)/,
-    why: '/api 根路径处理器（原写 :297-298，那是 CSRF 注释；2026-10-25 整改后为 :487；2026-10-26 P-1 整改 /readyz 后迁 :513；2026-11-03 i760 #22 响应体最小化删 transactionMarker 后迁 :499；2026-11-04 攻击挂载 :500；2026-11-05 攻击检测面接线后迁 :503；同日审计整改（404 兜底内嵌 unmatchedRequestLimiter + 检测/取证改全站挂载）后为 :514；2026-11-15 dev 访问日志脱敏批（app.js 文件头 require +2、morgan dev 分支说明 +4 行）后迁 :520；同日密度裁剪批（app.js 注释压缩 −13 行）后迁 :507；2026-11-16 审计修复批后为 :509）',
+    why: '/api 根路径处理器（原写 :297-298，那是 CSRF 注释；2026-10-25 整改后为 :487；2026-10-26 P-1 整改 /readyz 后迁 :513；2026-11-03 i760 #22 响应体最小化删 transactionMarker 后迁 :499；2026-11-04 攻击挂载 :500；2026-11-05 攻击检测面接线后迁 :503；同日审计整改（404 兜底内嵌 unmatchedRequestLimiter + 检测/取证改全站挂载）后为 :514；2026-11-15 dev 访问日志脱敏批（app.js 文件头 require +2、morgan dev 分支说明 +4 行）后迁 :520；同日密度裁剪批（app.js 注释压缩 −13 行）后迁 :507；2026-11-16 审计修复批后为 :509；同日 P1-2 morgan 前移批后为 :510）',
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:448-489',
+    at: 'app.js:449-490',
     must: /503[\s\S]*\.catch/,
-    why: '/readyz 的 503 双路径：then 里按 mongo.ok 定码 + catch 里硬 503（原写 :258-278 是 body-parser；2026-10-25 整改后为 :435-457；2026-11-03 i760 #22 后为 :438-478；2026-11-04 攻击告警挂载后迁 :439-479；2026-11-05 攻击检测面接线后迁 :442-482；同日审计整改（404 兜底内嵌 unmatchedRequestLimiter + 检测/取证改全站挂载）后为 :453-493；2026-11-15 dev 访问日志脱敏批（app.js 上方 +6 行）后迁 :459-499；同日密度裁剪批（app.js 注释压缩 −13 行）后迁 :446-487；2026-11-16 审计修复批后为 :448-489）',
+    why: '/readyz 的 503 双路径：then 里按 mongo.ok 定码 + catch 里硬 503（原写 :258-278 是 body-parser；2026-10-25 整改后为 :435-457；2026-11-03 i760 #22 后为 :438-478；2026-11-04 攻击告警挂载后迁 :439-479；2026-11-05 攻击检测面接线后迁 :442-482；同日审计整改（404 兜底内嵌 unmatchedRequestLimiter + 检测/取证改全站挂载）后为 :453-493；2026-11-15 dev 访问日志脱敏批（app.js 上方 +6 行）后迁 :459-499；同日密度裁剪批（app.js 注释压缩 −13 行）后迁 :446-487；2026-11-16 审计修复批后为 :448-489；同日 P1-2 morgan 前移批后为 :449-490）',
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:486',
+    at: 'app.js:487',
     must: /res\.status\(503\)\.json/,
-    why: '头注里点名"两条失败路径"的具体行段（catch 臂的硬 503；2026-10-25 整改后为 :460；2026-11-03 i760 #22 后为 :476；2026-11-04 攻击告警挂载（app.js 导入 +1/挂载 +2 行）后迁 :477；2026-11-05 攻击检测面接线后迁 :480；同日审计整改（404 兜底内嵌 unmatchedRequestLimiter + 检测/取证改全站挂载）后为 :491；2026-11-15 dev 访问日志脱敏批（app.js 上方 +6 行）后迁 :497；同日密度裁剪批（app.js 注释压缩 −13 行）后迁 :484；2026-11-16 审计修复批后为 :486）',
+    why: '头注里点名"两条失败路径"的具体行段（catch 臂的硬 503；2026-10-25 整改后为 :460；2026-11-03 i760 #22 后为 :476；2026-11-04 攻击告警挂载（app.js 导入 +1/挂载 +2 行）后迁 :477；2026-11-05 攻击检测面接线后迁 :480；同日审计整改（404 兜底内嵌 unmatchedRequestLimiter + 检测/取证改全站挂载）后为 :491；2026-11-15 dev 访问日志脱敏批（app.js 上方 +6 行）后迁 :497；同日密度裁剪批（app.js 注释压缩 −13 行）后迁 :484；2026-11-16 审计修复批后为 :486；同日 P1-2 morgan 前移批后为 :487）',
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
@@ -489,9 +489,9 @@ const LIVE = [
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:587',
+    at: 'app.js:588',
     must: /sentryErrorHandler/,
-    why: '三件套第三件（原写 :348-349，且那种"、:429"续写闸根本看不见；2026-11-02 由 :586 移至 :589；2026-11-03 i760 #22 后迁 :568；2026-11-04 攻击告警挂载（app.js 导入 +1/挂载 +2 行）后迁 :571；2026-11-05 攻击检测面接线后迁 :576；同日审计整改（404 兜底内嵌 unmatchedRequestLimiter + 检测/取证改全站挂载）后为 :592；2026-11-15 dev 访问日志脱敏批（app.js 文件头 require +2、morgan dev 分支说明 +4 行）后迁 :598；同日密度裁剪批（app.js 注释压缩 −13 行）后迁 :585；2026-11-16 审计修复批后为 :587）',
+    why: '三件套第三件（原写 :348-349，且那种"、:429"续写闸根本看不见；2026-11-02 由 :586 移至 :589；2026-11-03 i760 #22 后迁 :568；2026-11-04 攻击告警挂载（app.js 导入 +1/挂载 +2 行）后迁 :571；2026-11-05 攻击检测面接线后迁 :576；同日审计整改（404 兜底内嵌 unmatchedRequestLimiter + 检测/取证改全站挂载）后为 :592；2026-11-15 dev 访问日志脱敏批（app.js 文件头 require +2、morgan dev 分支说明 +4 行）后迁 :598；同日密度裁剪批（app.js 注释压缩 −13 行）后迁 :585；2026-11-16 审计修复批后为 :587；同日 P1-2 morgan 前移批后为 :588）',
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
@@ -813,7 +813,7 @@ describe('层 3 · 登记符号谓词（行号在范围内但指错地方：纯�
   });
 
   test('谓词有牙（正向命中 + 反向不命中），不许跟着行号走', () => {
-    const hit = citedRange('src/middleware/sentry.js', 'app.js:587');
+    const hit = citedRange('src/middleware/sentry.js', 'app.js:588');
     expect(/sentryErrorHandler/.test(hit.text)).toBe(true);
     expect(/绝不可能出现在这一行的符号ZZZ/.test(hit.text)).toBe(false);
     // 本轮之前的真实写法：auditController.js:38 是空行，同一条判据必须判它不含符号

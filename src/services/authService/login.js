@@ -27,6 +27,7 @@ const {
   LOCK_DURATION_MS,
   resolveFailedLoginCount,
 } = require('./failureAndMfa');
+const { applyLoginFailureCountAtomic } = require('./loginCounters');
 const { issueLoginSession } = require('./session');
 const { credentialShapeOf } = require('../../constants/credentialShape');
 
@@ -393,23 +394,7 @@ async function verifyPasswordOrTrackFailure(user, { password, username, ctx }) {
     // 并发失败（例如攻击者同时发 10 个请求）在锁定刚过期时会全部写 1，
     // 计数永远到不了 MAX_FAILED_LOGINS。条件写只让**第一个**请求重置，
     // 其余请求在 miss 后走 $inc，计数仍然逐次累加。
-    const now = new Date();
-    const lockExpired = user.lockUntil && user.lockUntil <= now;
-    let updated = null;
-    if (lockExpired) {
-      updated = await User.findOneAndUpdate(
-        { _id: user._id, lockUntil: { $lte: now } },
-        { $set: { failedLoginCount: 1, lockUntil: null } },
-        { new: true }
-      ).catch(() => null);
-    }
-    if (!updated) {
-      updated = await User.findByIdAndUpdate(
-        user._id,
-        { $inc: { failedLoginCount: 1 } },
-        { new: true }
-      ).catch(() => null);
-    }
+    const updated = await applyLoginFailureCountAtomic(User, user);
     // 计数不可观测时的取舍见 resolveFailedLoginCount 的定义处（fail-closed）
     const newCount = resolveFailedLoginCount(updated);
     if (newCount >= MAX_FAILED_LOGINS) {

@@ -12,6 +12,7 @@ const AuditLog = require('../../models/AuditLog');
 const { auditRequestContext } = require('../../models/auditLogWriteStatics');
 const { verifyTotpDetailed } = require('../../utils/totp');
 const { decryptMfaSecret } = require('../../utils/mfaSecret');
+const { applyLoginFailureCountAtomic } = require('./loginCounters');
 const {
   isMfaLocked,
   recordMfaFailure,
@@ -255,7 +256,7 @@ async function recordRecoveryFailure(
  *
  * $inc 由 DB 保证无丢失更新：读-算-写竞态会让并发请求基于陈旧计数互相覆盖，丢失更新导致锁定阈值被推迟，利于爆破。阈值判定可能并发重复触发，但 lockUntil 覆写幂等，审计重复仅产生冗余日志，可接受。
  *
- * 必须补 lockExpired 重置，与口令路径（verifyPasswordOrTrackFailure 内 :403-410）对齐：纯 $inc 时 10 分钟锁定刚过期、旧计数会继续累计——解锁后仅剩 1 次试错即再次锁定，对正常用户表现为「输错一次就锁」。
+ * 必须补 lockExpired 重置，与口令路径（verifyPasswordOrTrackFailure 内的共享 loginCounters 原子写）对齐：纯 $inc 时 10 分钟锁定刚过期、旧计数会继续累计——解锁后仅剩 1 次试错即再次锁定，对正常用户表现为「输错一次就锁」。
  * 已过期的 lockUntil 视为新一轮：重置计数从 1 起算并清空过期时间戳。走到本函数时 lockUntil 必为空或已过期（loginUser ③ 已在锁定期间提前返回），故该判断不会误伤「锁定仍生效」的场景。
  *
  * @returns {Promise<number>} 递增后的失败计数
@@ -265,23 +266,7 @@ async function incrementFailedLoginCount(user, { username, lockReason }) {
   // 其余并发请求 miss 后走 $inc，避免「并发失败全部写成 1、阈值永远到不了」。
   // 用 `$lte: now` 而不是精确快照：另一个请求已把 lockUntil 清空时也不命中，
   // 自然落到 $inc；若已被重新锁定（未来时间），同样不命中——保持逐次累加。
-  const now = new Date();
-  const lockExpired = user.lockUntil && user.lockUntil <= now;
-  let updated = null;
-  if (lockExpired) {
-    updated = await User.findOneAndUpdate(
-      { _id: user._id, lockUntil: { $lte: now } },
-      { $set: { failedLoginCount: 1, lockUntil: null } },
-      { new: true }
-    ).catch(() => null);
-  }
-  if (!updated) {
-    updated = await User.findByIdAndUpdate(
-      user._id,
-      { $inc: { failedLoginCount: 1 } },
-      { new: true }
-    ).catch(() => null);
-  }
+  const updated = await applyLoginFailureCountAtomic(User, user);
   const newCount = resolveFailedLoginCount(updated);
   if (newCount >= MAX_FAILED_LOGINS) {
     // 与 checkBruteForce 同一条纪律（本函数是第二条登录失败路径）：
