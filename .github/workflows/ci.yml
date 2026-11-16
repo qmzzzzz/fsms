@@ -593,6 +593,15 @@ jobs:
           MONGODB_URI: mongodb://127.0.0.1:27017/fsms_browser_e2e
           LOGIN_CAPTCHA_ENABLED: 'false'
           ALLOW_PUBLIC_REGISTRATION: 'false'
+          # 浏览器旅程是回环上的可信测试者：整套旅程（17×2 project）的请求量会
+          # 触顶通用/IP/严格限流桶（generalLimiter 300/15min、ipLimiter 1000/15min、
+          # strictLimiter 30/15min），把偶发 429 放大成后续旅程的连锁失败。
+          # CI 环境放宽；生产 compose 不设这些变量，默认阈值不受影响。
+          RATE_LIMIT_WINDOW_MS: '3600000'
+          RATE_LIMIT_MAX_REQUESTS: '100000'
+          RATE_LIMIT_IP_WINDOW_MS: '3600000'
+          RATE_LIMIT_IP_MAX_REQUESTS: '100000'
+          STRICT_RATE_LIMIT_MAX: '100000'
           # 浏览器旅程是回环上的可信测试者：错误口令旅程会刻意制造失败登录，而
           # 登录挑战的粘滞（LOGIN_CHALLENGE_STICKY_MS 默认 6h）会把一次偶发失败
           # 放大成后续 30+ 旅程的连锁红（challengeAfter 默认 3 + retries:0）。

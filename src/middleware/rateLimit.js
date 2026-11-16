@@ -333,7 +333,11 @@ const avatarReadUserLimiter = rateLimit({
  */
 const strictLimiter = rateLimit({
   windowMs: config.rateLimit.windowMs,
-  max: 30,
+  // STRICT_RATE_LIMIT_MAX：完整栈浏览器旅程（e2e-browser）会从单一回环 IP
+  // 高频探 testing 严格限流保护的端点（登录页每次挂载都探 captcha-status），
+  // 默认 30/15min 会被整套旅程耗尽 ⇒ 后续旅程拿 429 ⇒ 界面无法确认验证码
+  // 配置而连锁失败。CI 的 e2e-browser 作业显式放宽；生产不设此变量，默认 30 不变。
+  max: Number(process.env.STRICT_RATE_LIMIT_MAX) || 30,
   store: makeSharedStore('strict'),
   keyGenerator: (req) => ipKeyGenerator(normalizeRateLimitIp(clientIpForSecurityDecision(req))),
   skip: skipIfWhitelisted, // P3-35：资源型限流，可信 IP 豁免（口径同 generalLimiter）
