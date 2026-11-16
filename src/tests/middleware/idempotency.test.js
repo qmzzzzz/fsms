@@ -967,6 +967,9 @@ describe('第 15 轮补充：出口异常、鉴权前置、键上限（真实 HT
   test('(f2) 处理器自己回 403：键被释放，修正后同键重试能成功', async () => {
     const { waitFor } = require('../helpers/waitFor');
     const key = 'sup-denied-' + stamp16();
+    // 计数取相对值：同文件的其他用例（如 (g)）也会打 denied 端点，
+    // 随机顺序下绝对断言会把别处的执行计进自己头上（seed=20260917 实测）
+    const before = countOf('denied');
     const first = await post('denied', {}, key);
     expect(first.status).toBe(403);
     // 释放键是响应后的 fire-and-forget 删（(e2) 同判例）：立即数会读到残留，
@@ -978,7 +981,7 @@ describe('第 15 轮补充：出口异常、鉴权前置、键上限（真实 HT
     );
     const second = await post('denied', {}, key);
     expect(second.status).toBe(403);
-    expect(countOf('denied')).toBe(2); // 非 2xx 释放键：这是"可利用的重试"，不是卡死
+    expect(countOf('denied')).toBe(before + 2); // 非 2xx 释放键：这是"可利用的重试"，不是卡死
   });
 
   test('(g) 键长度上限是硬判据：64 位可用，65 位与 4KB 一律 400 且不落库', async () => {

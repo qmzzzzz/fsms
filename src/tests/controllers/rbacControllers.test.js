@@ -447,8 +447,8 @@ describe('RBAC 控制器全覆盖（批次 A）', () => {
     // 只留下 void goodBatch 死变量——标题「合法 → 200」因此零覆盖（N，2026-11-15 修复）。
     // 自包含前置：独立创建可删目标（无角色 ⇒ 层级低于操作者，非超管）。
     const batchVictim = await User.create({
-      username: `rauser${stamp}b`,
-      email: `rauser${stamp}b@example.com`,
+      username: `rauser${stamp}e`,
+      email: `rauser${stamp}e@example.com`,
       password: PASSWORD,
     });
     const goodBatch = await authed()

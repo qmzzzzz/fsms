@@ -593,6 +593,11 @@ jobs:
           MONGODB_URI: mongodb://127.0.0.1:27017/fsms_browser_e2e
           LOGIN_CAPTCHA_ENABLED: 'false'
           ALLOW_PUBLIC_REGISTRATION: 'false'
+          # 浏览器旅程是回环上的可信测试者：错误口令旅程会刻意制造失败登录，而
+          # 登录挑战的粘滞（LOGIN_CHALLENGE_STICKY_MS 默认 6h）会把一次偶发失败
+          # 放大成后续 30+ 旅程的连锁红（challengeAfter 默认 3 + retries:0）。
+          # CI 环境放宽触发阈值；生产 compose 不设此变量，默认 3 次的防爆破闸不受影响。
+          LOGIN_CHALLENGE_AFTER: '50'
         run: |
           E2E_TEST_PASSWORD="E2e!$(openssl rand -hex 12)Aa1"
           # 评价报告 #16：MFA 旅程固定种子（base32，RFC 4648 测试向量式占位）
