@@ -217,13 +217,19 @@ describe('sendNotification 投递矩阵（webhook 成熟化）', () => {
 
   test('首次失败自动重试，第二次成功（共 2 次调用）', async () => {
     process.env.SECURITY_ALERT_WEBHOOK = 'https://hooks.example.com/hook';
-    postJson
-      .mockRejectedValueOnce(new Error('ECONNRESET'))
-      .mockResolvedValueOnce({ ok: true, status: 200 });
+    // 用本地计数实现而非 once 队列：随机顺序下，先跑的用例遗留在共享 mock 上的
+    // 一次性返回值会被本用例的第一次调用消费掉（实测 seed=777001 即红）。
+    postJson.mockReset();
+    let calls = 0;
+    postJson.mockImplementation(async () => {
+      calls += 1;
+      if (calls === 1) throw new Error('ECONNRESET');
+      return { ok: true, status: 200 };
+    });
 
     await securityAlert.sendNotification('bulk_data_export', 'high', '批量导出');
 
-    expect(postJson).toHaveBeenCalledTimes(2);
+    expect(calls).toBe(2);
   });
 
   test('配置 SECURITY_ALERT_WEBHOOK_SECRET 时携带 HMAC 签名头（覆盖时间戳+随机数）', async () => {

@@ -405,12 +405,14 @@ describe('HttpShipperTransport', () => {
       fakeReq.end = () => {};
       fakeReq.destroy = () => {};
 
-      let capturedRes = null;
+      // 捕获全部 request 调用：随机顺序下，同文件先跑的用例可能留下迟到回调，
+      // 单变量捕获会被别的调用顶掉（seed=777001 实测），按「存在带 error 监听器的响应」断言
+      const capturedResponses = [];
       const spy = jest.spyOn(httpLib, 'request').mockImplementation((_opts, cb) => {
         const fakeRes = new EventEmitter();
         fakeRes.statusCode = 200;
         fakeRes.resume = () => {};
-        capturedRes = fakeRes;
+        capturedResponses.push(fakeRes);
         setImmediate(() => cb(fakeRes));
         return fakeReq;
       });
@@ -421,14 +423,15 @@ describe('HttpShipperTransport', () => {
 
         // 等响应回调被调用（此时应已注册 error 监听器）
         await flushEventLoop();
-        expect(capturedRes).not.toBeNull();
+        expect(capturedResponses.length).toBeGreaterThanOrEqual(1);
 
         // 核心断言：响应流必须注册 'error' 监听器。
         // EventEmitter 在无 'error' 监听器时 emit('error') 会**同步抛出**，
         // 在 Node 的 http 客户端里即表现为 uncaughtException → 进程退出。
         // 这正是缺陷的可观测形态，也是本测试的判据。
-        expect(capturedRes.listenerCount('error')).toBeGreaterThanOrEqual(1);
-        expect(() => capturedRes.emit('error', new Error('ECONNRESET'))).not.toThrow();
+        const withListener = capturedResponses.find((r) => r.listenerCount('error') >= 1);
+        expect(withListener).toBeDefined();
+        expect(() => withListener.emit('error', new Error('ECONNRESET'))).not.toThrow();
 
         // 允许已 settle（statusCode=200 时回调会先行 resolve），仅确保不悬挂
         await pending.catch(() => {});
