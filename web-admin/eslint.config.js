@@ -123,7 +123,9 @@ export default [
 
   {
     // 构建期配置文件运行在 Node 环境（vite.config.js 等）
-    files: ['*.config.js', 'vite.config.js', 'vitest.config.js', 'eslint.config.js'],
+    // 注：不列 vitest.config.js——仓库中不存在该文件（vitest 配置内联在
+    // vite.config.js 的 test 字段里），列了只是死配置
+    files: ['*.config.js', 'vite.config.js', 'eslint.config.js'],
     languageOptions: {
       sourceType: 'module',
       globals: {

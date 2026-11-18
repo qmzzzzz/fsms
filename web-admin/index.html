@@ -12,16 +12,20 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="消防管理" />
     <meta name="mobile-web-app-capable" content="yes" />
-    <!-- 资源一律走 BASE_URL：子路径部署（/admin/）下根绝对路径会 404；
-         manifest 链接由 vite-plugin-pwa 按 base 自动注入，此处不再手写（否则重复两个） -->
-    <link rel="icon" type="image/svg+xml" href="%BASE_URL%favicon.svg" />
-    <link rel="apple-touch-icon" href="%BASE_URL%favicon.svg" />
+    <!-- 资源一律用根绝对路径（/xxx）：Vite 会在 dev/build 统一拼接 base，本身就是
+         base 感知（--base=/admin/ 下产出 /admin/xxx）。勿改回「BASE_URL 占位符」写法：
+         占位符先被 htmlEnvHook 展开成绝对路径、dev 下再被 devHtmlHook 二次拼接 base，
+         子路径部署会变成 /admin/admin/... 而 404（vite 8.3.4 实测）。
+         manifest 链接由 vite-plugin-pwa 按 base 自动注入，此处不手写（否则重复两个） -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/favicon.svg" />
     <!-- 外链保证生产 CSP(script-src 'self') 也允许首帧主题脚本执行 -->
-    <script src="%BASE_URL%theme-bootstrap.js"></script>
+    <script src="/theme-bootstrap.js"></script>
     <title>消防安全管理系统</title>
   </head>
   <body>
     <div id="app"></div>
+    <!-- 入口脚本同上：根绝对路径由 Vite 按 base 重写，勿用 BASE_URL 占位符（见 head 注） -->
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

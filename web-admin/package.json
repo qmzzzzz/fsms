@@ -1,6 +1,7 @@
 {
   "name": "web-admin",
   "version": "1.0.0",
+  "private": true,
   "description": "基于权限管控的消防管理系统 · 前端管理端（web-admin）",
   "scripts": {
     "dev": "vite",

@@ -230,9 +230,9 @@ const isEditorEndpoint = (path) => {
   return path === route || path.startsWith(`${route}/`) || path.startsWith(`${route}.`)
 }
 
-const blockSensitiveFilesPlugin = () => ({
-  name: 'block-sensitive-files',
-  configureServer(server) {
+const blockSensitiveFilesPlugin = () => {
+  // dev 与 preview 共用同一套安装逻辑（见下方插件返回处的 configurePreviewServer）
+  const installSensitiveFileGuards = (server) => {
     // 归一化后的 Vite root（小写、正斜杠、去尾斜杠），用于 /@fs/ 越界判断
     const rootNorm = server.config.root.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
 
@@ -296,8 +296,16 @@ const blockSensitiveFilesPlugin = () => ({
         res.end('Internal Server Error')
       })
     }
-  },
-})
+  }
+
+  return {
+    name: 'block-sensitive-files',
+    configureServer: installSensitiveFileGuards,
+    // preview 复用同款拦截：vite preview 的静态产物面与 dev 同源（fs.deny 只是
+    // 文件系统层兜底），缺 URL 层闸等于给 preview 留下同类绕过面
+    configurePreviewServer: installSensitiveFileGuards,
+  }
+}
 
 // HMR WebSocket 崩溃防护（报告项 5：单个畸形请求可击杀 dev server，且无自动重启）
 //
@@ -650,6 +658,12 @@ export default defineConfig(({ command, mode }) => {
             https: readHttpsOptions('dev server'),
           }
         : {}),
+      // 【dev-only 取舍，审计 I 组注记】下面三个代理（/api、/client-errors、
+      // /socket.io/）都会把客户端自带的 x-forwarded-for 原样透传（有头用头、
+      // 无头回落 socket 对端）。客户端伪造 XFF 即可让后端审计/限流看到任意假 IP，
+      // 该风险只在「绕过反向代理直连 dev server」场景被接受：dev 面板仅绑定
+      // 回环地址（见上方 host），且生产流量经 nginx 终止并重写 XFF 后才到后端，
+      // 不会走本文件的代理；生产构建也不使用本配置。勿把该透传语义带到生产反代层。
       proxy: {
         '/api': {
           target: 'http://localhost:3000',
@@ -709,7 +723,17 @@ export default defineConfig(({ command, mode }) => {
       headers: buildSecurityHeaders(mode),
       fs: {
         strict: true,
-        deny: ['**/.env*', '**/*.pem', '**/*.{key,crt,pfx}', '**/package-lock.json', '**/.git/**'],
+        // 与 server.fs.deny 同口径：preview 静态面同样不能泄露锁文件与 npm 配置
+        // （此前比 server 少 pnpm-lock.yaml 与 .npmrc 两项，审计 I 组）
+        deny: [
+          '**/.env*',
+          '**/*.pem',
+          '**/*.{key,crt,pfx}',
+          '**/package-lock.json',
+          '**/pnpm-lock.yaml',
+          '**/.git/**',
+          '**/.npmrc',
+        ],
       },
       ...(process.env.HTTPS === 'true'
         ? {

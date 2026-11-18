@@ -4,18 +4,26 @@ Vue 3 + Vite + Element Plus + Pinia + vue-i18n 的管理端单页应用。
 
 ## 快速上手
 
+> 本仓库**不是** npm workspace：根目录只装后端依赖，前端依赖装在 `web-admin/`
+> 自己的 `node_modules`（两份独立 lockfile）。只在根目录 `npm install` 后直接
+> `npm run dev` 会因缺少 vite 而失败——前端依赖必须在前端目录单独安装。
+
 ```bash
-# 依赖安装（在仓库根目录执行，workspace 共享一份 lockfile）
-npm install
+# 0. 环境要求：Node >= 22.12.0（根目录与 web-admin 的 engines 同口径）
+#    后端需先配置 .env（cp .env.example .env），见根 README「快速开始」
 
-# 本地开发（默认端口见 vite.config.js；后端代理同文件底部 server.proxy）
-npm run dev            # 在 web-admin 目录下执行
+# 1. 安装前端依赖（必须在 web-admin 目录下执行；npm ci 严格按 lockfile 安装）
+cd web-admin
+npm ci                 # 本地开发也可用 npm install
 
-# 生产构建（构建后可跑 bundle 预算闸）
+# 2. 本地开发（默认端口见 vite.config.js；/api 等代理到后端 3000 端口）
+npm run dev            # 默认监听 127.0.0.1:3001，需先启动后端
+
+# 3. 生产构建（构建后可跑 bundle 预算闸）
 npm run build
 npm run build:budget
 
-# 本地预览构建产物
+# 4. 本地预览构建产物
 npm run preview
 ```
 
@@ -33,6 +41,20 @@ npm run preview
 
 单文件调试：`npx vitest run src/tests/views/userView.test.js`（路径可带 `-t "用例名"`）。
 提交前请只跑与改动面相关的测试文件，全量测试由集成阶段统一执行。
+
+## 依赖版本策略
+
+- `vue-i18n` 是唯一**精确锁定**的运行时依赖（`11.4.16`，不带 `^`）。原因：
+  它是全站文案渲染的单点依赖，且本仓用自定义 messageCompiler 替换了默认 JIT
+  编译器（`src/i18n/index.js`），对 vue-i18n 内部的编译/回退行为敏感；该依赖又是
+  从已 EOL 的 v9/v10 大版本跳跃升级而来（9.14.5 → 11.4.16，见 CHANGELOG 2026-10-30），
+  minor 区间内再漂移的风险收益比最差。精确锁定强制升级走「显式改版本号 → 复核
+  行为 → 重算锁文件锚」的流程，而不是被 `^` 区间静默带上。
+- 其余依赖用 `^` 区间 + lockfile 锁定实际解析版本。两份 lockfile（根目录与
+  `web-admin/`）的 semantic 哈希由 CI `dependency-policy` 闸比对
+  `deployment/lockfile-anchor.json`：任何 lockfile 变更（含手动编辑）都会在锚
+  校验时现形，改完依赖必须跑
+  `node scripts/check-lockfile-integrity.js --update` 并人工复核 diff。
 
 ## 目录结构速览
 
