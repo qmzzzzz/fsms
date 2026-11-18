@@ -20,7 +20,9 @@ let frozen = false;
 /** 进入链写入临界区前调用：冻结窗口内直接失败，由调用方回退（缓冲重试 / 无哈希降级） */
 const check = () => {
   if (frozen) {
-    throw new Error('审计链处于僵尸写入冻结窗口（上一批超时任务尚未落定），本批回退');
+    // 措辞覆盖两种冻结来源（持锁超时的僵尸 / 前驱等待超时），只陈述共同事实：
+    // 上一批还没落定。两种冻结都有唯一解冻归属（waitForZombie：落定→重同步→解冻）。
+    throw new Error('审计链处于僵尸写入冻结窗口（上一批尚未落定），本批回退');
   }
 };
 
@@ -98,4 +100,12 @@ const waitForZombie = (work, distLock, { ttlMs, resync }) => {
   work.then(settle, settle);
 };
 
-module.exports = { check, freeze, reset, isFrozen, waitForZombie };
+/** 冻结后继链写入并挂上唯一解冻归属（work 落定 → resync → 解冻）。
+ * 「本调用持锁超时」与「前驱等待超时」两处冻结共用这一入口：
+ * 冻结本身不产生解冻路径，解冻归属一律由这里的 waitForZombie 登记。 */
+const freezeAndWaitFor = (work, ttlMs, resync) => {
+  freeze();
+  waitForZombie(work, null, { ttlMs, resync });
+};
+
+module.exports = { check, freeze, reset, isFrozen, waitForZombie, freezeAndWaitFor };

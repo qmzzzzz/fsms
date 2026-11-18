@@ -101,10 +101,15 @@ const { getLatestHash } = require('./auditChainTail');
 let chainTail = null; // 内存中最新链尾 hash（含尚未落库的追加）
 let chainTailLoaded = false; // 是否已从 DB 初始化过链尾
 let chainLock = Promise.resolve();
-// B-L4/B-L5（改后审计）：链尾代际——锁超时（持有超时/前驱等待超时）递增代际，
-// 超时的「僵尸 fn」稍后调用 advanceChainTail 时因代际过期被跳过，
-// 不再用过期 hash 覆写已重同步的链尾；代价是下一次操作从 DB 重同步
+// B-L4/B-L5（改后审计）：链尾代际——锁**持有**超时递增代际（P1 修复后「前驱等待
+// 超时」不再递增：冻结窗内没有其他写入者，前驱的推进就是最新尾），超时的「僵尸 fn」
+// 稍后调用 advanceChainTail 时因代际过期被跳过，不再用过期 hash 覆写已重同步的链尾；
+// 代价是下一次操作从 DB 重同步
 let chainGeneration = 0;
+// P1（2026-11-17 审计）修复的支点：当前在飞临界区 fn 的 promise。turnstile 与围栏
+// 保证同一时刻至多一个 fn 在飞；「前驱等待超时」冻结围栏时以它为 waitForZombie 的
+// 观察对象——冻结的解冻归属是「该 fn 落定并重同步」，不再是无主的永久窗口。
+let inFlightWork = null;
 // 僵尸写入冻结窗口的状态机在 auditChainFence（本文件受体积棘轮约束）：
 // 超时后本地拒绝新写入、跨实例保持并续租锁，僵尸落定重同步后再解冻。
 /**
@@ -138,6 +143,16 @@ const chainLockTimeoutMs = () =>
   readPositiveNumberEnv('AUDIT_CHAIN_LOCK_TIMEOUT_MS', 15000, {
     onInvalid: invalidEnvWarning,
   });
+
+/**
+ * 僵尸 fn 落定后的强制重同步（「本调用持锁超时」与「前驱等待超时」两处冻结共用）：
+ * 先把共享尾标记为不可信（Redis 就绪时），再删共享链尾键——解冻后的第一批
+ * 一律从 DB 读权威尾，不信任僵尸在飞期间任何进程内/共享层的尾指针。
+ */
+async function resyncForZombie() {
+  if (sharedCache.isRedisEnabled()) sharedTailUntrusted = true;
+  await resyncChainTail();
+}
 
 /**
  * 互斥执行临界区（fn 内为「读链尾→计算→推进链尾」）：fn 完成前，后续
@@ -178,22 +193,25 @@ function withChainLock(fn) {
   // 把合法批次的 advanceChainTail 判成僵尸并跳过（实测：无争用两次调用后静置，
   // 告警"审计链尾推进被跳过（代际 0 已过期，当前 1）"）。
   let waitTimer = null;
-  const clearWaitTimer = () => {
-    if (waitTimer) clearTimeout(waitTimer);
-  };
+  const clearWaitTimer = () => waitTimer && clearTimeout(waitTimer);
   const waitPrev = Promise.race([
     prev,
     new Promise((resolve) => {
       waitTimer = setTimeout(() => {
-        // B-L5：前驱超时放行时同样标记链尾失效并递增代际——
-        // 重叠的后继与挂起的前驱，其 advanceChainTail 均因代际过期被跳过，
-        // 直到任一操作从 DB 重同步；代价是一次额外重同步。
-        // 前驱的 fn 可能仍在飞（它就是挂起本身）：冻结后继写入，等前驱落定。
-        // 通常情况下前驱自己的持锁超时先触发并负责解冻；这里兜住定时器调度乱序。
-        chainTailLoaded = false;
-        chainTail = null;
-        chainGeneration += 1;
-        fence.freeze();
+        // P1（2026-11-17 审计）：前驱等待超时 ≠ 前驱是僵尸——前驱往往只是
+        // 排队 + 慢批次，且随后会正常落定。仍要冻结后继写入：前驱 fn 落定前
+        // 进临界区会与其同父续链（分叉）；但冻结必须有唯一解冻归属——把在飞的
+        // fn 交给 waitForZombie，落定后重同步再解冻，与「本调用持锁超时」的
+        // 僵尸窗口同一套机制。原实现冻结后无人解冻（reset 仅测试用、waitForZombie
+        // 只由持锁超时分支触达），前驱正常完成也让本实例链写入永久停摆；原实现
+        // 这里的代际递增还会把前驱的合法 advanceChainTail 误判为僵尸跳过——
+        // 冻结窗内没有其他写入者，前驱的推进就是最新尾，故不再递增/作废链尾。
+        const budget = chainLockTimeoutMs();
+        fence.freezeAndWaitFor(inFlightWork || Promise.resolve(), budget, resyncForZombie);
+        logger.error(
+          `审计链前驱等待超时（${budget}ms）：上一批仍在执行（排队/慢批次），` +
+            '已冻结后续链写入，待其落定并重同步后解冻'
+        );
         resolve();
       }, chainLockTimeoutMs());
       if (waitTimer.unref) waitTimer.unref();
@@ -213,11 +231,8 @@ function withChainLock(fn) {
       // A-1：进程内锁已就绪后叠加跨实例分布式锁
       let distLock = null;
       if (sharedCache.isRedisEnabled()) {
-        distLock = await sharedCache.acquireLockBlocking(
-          CHAIN_LOCK_KEY,
-          chainLockTimeoutMs(),
-          chainLockTimeoutMs()
-        );
+        const lockTimeout = chainLockTimeoutMs();
+        distLock = await sharedCache.acquireLockBlocking(CHAIN_LOCK_KEY, lockTimeout, lockTimeout);
         if (!distLock) {
           // 拿不到跨实例锁：标记链尾失效 + 抛错走降级，绝不无锁推进链尾。
           // resyncChainTail 永不 reject（内部吞错），fire-and-forget 即可
@@ -230,8 +245,8 @@ function withChainLock(fn) {
         }
       }
 
-      let timer = null;
-      let timedOut = false;
+      let timer = null,
+        timedOut = false;
       const timeout = new Promise((_, reject) => {
         timer = setTimeout(() => {
           // 链尾可能已被 fn 部分推进，无法判断其状态 → 标记失效，下次从 DB 重同步；
@@ -255,28 +270,28 @@ function withChainLock(fn) {
       // advanceChainTail 因代际过期被跳过
       const gen = chainGeneration;
       const work = Promise.resolve().then(() => fn(gen));
+      // 登记「在飞」：前驱等待超时的冻结以此为解冻归属（见 waitPrev 定时器）
+      inFlightWork = work;
 
       try {
         return await Promise.race([work, timeout]);
       } finally {
         if (timer) clearTimeout(timer);
+        // fn 已落定（或本调用已超时放弃等待）：解除「在飞」登记。先于悬挂的
+        // distLock.release() 之前清——release 卡死不该让前驱等待超时的观察对象
+        // 继续指向一个早已完成的 fn
+        if (inFlightWork === work) inFlightWork = null;
         if (!timedOut) {
           if (distLock) {
-            try {
-              await distLock.release();
-            } catch (_) {
-              /* 锁会随 PX 到期，释放失败不致命 */
-            }
+            // 释放失败不致命（锁会随 PX 到期）：吞掉 rejection 即可，不加 try/catch 噪声
+            await distLock.release().catch(() => {});
           }
         } else {
           // 超时的是锁，不是 fn：work 仍在后台跑且随时可能提交。
           // 分布式锁不释放并续租，直到僵尸落定；重同步必须先于解冻。
           fence.waitForZombie(work, distLock, {
             ttlMs: chainLockTimeoutMs(),
-            resync: async () => {
-              if (sharedCache.isRedisEnabled()) sharedTailUntrusted = true;
-              await resyncChainTail();
-            },
+            resync: resyncForZombie,
           });
         }
       }
