@@ -188,12 +188,15 @@ describe('GET /api/metrics 合成快照面：形态 / 标签域 / 自洽 / 不�
       ...DETECTION_DIMENSIONS,
       UNKNOWN_DETECTION_DIMENSION,
     ]);
+    // 契约面注记：metrics._SERIES_STORES 是本门禁与 src/utils/metrics.js 之间的测试契约面
+    // （该导出旁有对应注释）。重命名/重构这个划线导出必须同步本文件，否则本判据静默失明。
     expect(Object.keys(body.series.dropped).sort()).toEqual([...metrics._SERIES_STORES].sort());
     expect(Object.keys(body.export.rejected).sort()).toEqual([...EXPORT_REJECT_REASONS].sort());
   });
 
   test('口径同源：series 上限 / 目标秒数 / 成功文案都从真实声明现算', () => {
     const body = bodyOf(3600);
+    // 契约面注记：metrics._MAX_SERIES 同为测试契约面（见 metrics.js 导出旁注释与上方注记）
     expect(body.series.limit).toBe(metrics._MAX_SERIES);
     const objectives = body.business.detection.dimensions.map((row) => row.objectiveSeconds);
     expect(objectives.slice(0, DETECTION_DIMENSIONS.length)).toEqual(

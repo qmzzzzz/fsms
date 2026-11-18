@@ -187,7 +187,7 @@ describe('单进程依赖清单：声称必须落到代码上', () => {
   test('反引号里写出的键前缀必须是模块代码里的真字面量', () => {
     expect(prefixOffenders(SINGLE_PROCESS_DEPENDENCIES)).toEqual([]);
     // 判据有牙，且自证走的是同一条接线：现网确实有一条真声称（`sesscache:` ⇒
-    // src/services/sessionService.js:219），编一个不存在的前缀必须被这套接线挑出来。
+    // src/services/sessionService.js:232），编一个不存在的前缀必须被这套接线挑出来。
     expect(
       prefixOffenders([{ module: 'services/sessionService.js', mechanism: '配 `zzzcache:` 广播' }])
     ).toHaveLength(1);

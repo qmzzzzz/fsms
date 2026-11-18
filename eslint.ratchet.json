@@ -123,7 +123,7 @@
     "src/constants/failOpenSites.js": 354,
     "src/constants/runtime.js": 333,
     "src/controllers/roleController.js": 304,
-    "src/docs/generate.js": 1603,
+    "src/docs/generate.js": 1619,
     "src/index.js": 316,
     "src/middleware/idempotency.js": 322,
     "src/middleware/rateLimit.js": 435,

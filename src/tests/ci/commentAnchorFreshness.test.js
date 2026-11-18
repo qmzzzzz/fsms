@@ -328,9 +328,9 @@ const LIVE = [
   },
   {
     in: 'src/services/reportExportService.js',
-    at: 'FireAlarm.js:273',
+    at: 'FireAlarm.js:278',
     must: /取值可重复/,
-    why: '"必须有同向 _id 次级键"不变式出处一（2026-11-16 审计修复批：FireAlarm processLog 封顶批后由 :242 顺移 :273）',
+    why: '"必须有同向 _id 次级键"不变式出处一（2026-11-16 审计修复批：FireAlarm processLog 封顶批后由 :242 顺移 :273；2026-11-17 审计修复批：$each 批量 push 补封顶再顺移 :278）',
   },
   {
     in: 'src/services/reportExportService.js',
@@ -447,7 +447,7 @@ const LIVE = [
     in: 'src/utils/loggerFlush.js',
     at: 'index.js:144',
     must: /logger\.warn\(`收到重复/,
-    why: '二次信号 handler 的 logger.warn（原写 :70，落在 docblock 的空续行上；2026-10-31 取证接线把 gracefulShutdown 的幂等守卫下移一行 ⇒ :122→:123；2026-11-03 入口顶部补 recordStartupAuditTrail 的 require ⇒ :123→:124；2026-11-04 并行 PROXY_PROTOCOL 接线预估 :147，实接后为 :144）',
+    why: '二次信号 handler 的 logger.warn（原写 :70，落在 docblock 的空续行上；2026-10-31 取证接线把 gracefulShutdown 的幂等守卫下移一行 ⇒ :122→:123；2026-11-03 入口顶部补 recordStartupAuditTrail 的 require ⇒ :123→:124；2026-11-04 并行 PROXY_PROTOCOL 接线预估 :147，实接后为 :144；2026-11-17 审计修复批先把入口 24h 轮询提具名常量（+3 行）后又在同批收口删去本地常量改用 deviceReminder 导出（净 −3 行），实测仍为 :144）',
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
@@ -567,15 +567,15 @@ const LIVE = [
   },
   {
     in: 'src/utils/transaction.js',
-    at: 'src/index.js:548',
+    at: 'src/index.js:549',
     must: /process\.on\('unhandledRejection'/,
-    why: '事务清理超时不得变成无人持有的拒绝（原写 :446，实为启动期监听区；2026-11-01 取证接线后处理器移至 :511-531，2026-11-03 入口瘦身后移至 :474-493，i760 #22 后为 :487，2026-11-04 并行 PROXY_PROTOCOL 接线预估 :533，实接后为 :541；f82418f（票据外置与出口守卫收口）后处理器实为 :526；2026-11-15 审计收敛批把崩溃收尾链抽到 utils/crashFlush.js（注册区净 −4 行）后处理器实为 :522；同日全树 prettier 规范化再 −2/+2 后为 :524；同日 PROXY 装配抽 helper（净 +9 行）后为 :533；同日取证/审计域修复批（P2-11 信号注册前移至模块加载期 + unhandledRejection 计数，净 +17 行）后为 :550；2026-11-16 审计修复批实测修正为 :548）',
+    why: '事务清理超时不得变成无人持有的拒绝（原写 :446，实为启动期监听区；2026-11-01 取证接线后处理器移至 :511-531，2026-11-03 入口瘦身后移至 :474-493，i760 #22 后为 :487，2026-11-04 并行 PROXY_PROTOCOL 接线预估 :533，实接后为 :541；f82418f（票据外置与出口守卫收口）后处理器实为 :526；2026-11-15 审计收敛批把崩溃收尾链抽到 utils/crashFlush.js（注册区净 −4 行）后处理器实为 :522；同日全树 prettier 规范化再 −2/+2 后为 :524；同日 PROXY 装配抽 helper（净 +9 行）后为 :533；同日取证/审计域修复批（P2-11 信号注册前移至模块加载期 + unhandledRejection 计数，净 +17 行）后为 :550；2026-11-16 审计修复批实测修正为 :548；2026-11-17 审计修复批先把入口 24h 轮询提具名常量（+3 行）后又在同批收口删去本地常量改用 deviceReminder 导出（净 −3 行），实测修正为 :549）',
   },
   {
     in: 'src/tests/utils/transactionTopology.test.js',
-    at: 'src/index.js:548',
+    at: 'src/index.js:549',
     must: /process\.on\('unhandledRejection'/,
-    why: '同一处处理器口径的第二个引用站点（2026-10-03 审计线登记的 :446 已随取证接线迁至 :511，2026-11-03 入口瘦身后迁至 :474，i760 #22 后为 :487，2026-11-04 并行接线预估 :533，实接后为 :541；f82418f（票据外置与出口守卫收口）后处理器实为 :526；2026-11-15 审计收敛批把崩溃收尾链抽到 utils/crashFlush.js（注册区净 −4 行）后处理器实为 :522；同日全树 prettier 规范化再 −2/+2 后为 :524；同日 PROXY 装配抽 helper（净 +9 行）后为 :533；同日取证/审计域修复批（P2-11 信号注册前移 + unhandledRejection 计数）后为 :550；2026-11-16 审计修复批实测修正为 :548）',
+    why: '同一处处理器口径的第二个引用站点（2026-10-03 审计线登记的 :446 已随取证接线迁至 :511，2026-11-03 入口瘦身后迁至 :474，i760 #22 后为 :487，2026-11-04 并行接线预估 :533，实接后为 :541；f82418f（票据外置与出口守卫收口）后处理器实为 :526；2026-11-15 审计收敛批把崩溃收尾链抽到 utils/crashFlush.js（注册区净 −4 行）后处理器实为 :522；同日全树 prettier 规范化再 −2/+2 后为 :524；同日 PROXY 装配抽 helper（净 +9 行）后为 :533；同日取证/审计域修复批（P2-11 信号注册前移 + unhandledRejection 计数）后为 :550；2026-11-16 审计修复批实测修正为 :548；2026-11-17 审计修复批先把入口 24h 轮询提具名常量（+3 行）后又在同批收口删去本地常量改用 deviceReminder 导出（净 −3 行），实测修正为 :549）',
   },
 ];
 
@@ -767,6 +767,7 @@ describe('层 2 · 无内容锚点（空行 / 只剩注释标记；豁免 = STAL
     expect(bare.length).toBe(1);
     expect(qualified.length).toBe(1);
     expect(occurrences('src/utils/loggerFlush.js', 'index.js:70').length).toBe(0);
+    expect(occurrences('src/utils/loggerFlush.js', 'index.js:147').length).toBe(0);
     expect(occurrences('src/utils/loggerFlush.js', 'index.js:144').length).toBe(1);
   });
 });

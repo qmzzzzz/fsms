@@ -23,7 +23,7 @@
  *   - `device:scrap`   → 已收口（P1）：`PUT /api/devices/:id/scrap` 现按 `device:scrap` 强制，
  *     不再借道 `device:update`；报废由此不再需要"顺带授予编辑权限"
  *   - `device:stats`   → `GET /api/devices/stats` 实为 `device:read`（routes/deviceRoutes.js:240）
- *   - `alarm:stats`    → `GET /api/alarms/stats` 实为 `alarm:read`（routes/alarmRoutes.js:131）
+ *   - `alarm:stats`    → `GET /api/alarms/stats` 实为 `alarm:read`（routes/alarmRoutes.js:138）
  *   - `user:assign_role` → `PUT /api/users/:id/roles` 实为 `role:assign`（routes/userRoutes.js:214）
  *
  * 扫描口径（三条都是必要的，缺一条就会得出错的差集）：

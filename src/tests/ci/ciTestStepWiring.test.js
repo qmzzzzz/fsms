@@ -105,6 +105,9 @@ const coverageCommandOf = (step) =>
 /**
  * 就地吞掉退出状态的形态。这跟「命令被换成 echo」是同一族：命令还在、也确实会跑，
  * 但「覆盖率没过阈值」不再让 job 非零退出 ⇒ 硬门变味成日志。
+ * 认得的形态（九种）：`|| true` / `|| :` / `|| exit 0`、`; true` / `; exit 0`、
+ * `| cat` / `| tee`，以及 `|| echo "..."` / `|| printf ...`——后两者的失败分支本身
+ * 退出码为 0（只打日志），与非零退出被就地抹平是同一效果，同判。
  * @param {object|null} step
  * @returns {string[]} 命中的命令行（空数组 = 干净）
  */
@@ -112,6 +115,7 @@ const swallowsExitCode = (step) => {
   const bad = [];
   for (const cmd of effectiveRunLinesOf(step)) {
     if (/\|\|\s*(?:true|:|exit\s+0)\s*$/.test(cmd)) bad.push(cmd);
+    else if (/\|\|\s*(?:echo|printf)\b/.test(cmd)) bad.push(cmd);
     else if (/;\s*(?:true|exit\s+0)\s*$/.test(cmd)) bad.push(cmd);
     else if (/\|\s*(?:cat|tee)\b/.test(cmd)) bad.push(cmd);
   }
@@ -272,6 +276,22 @@ describe('CI 测试步骤接线闸（删掉测试步骤不得让仓库全绿）'
     // 命令在、退出状态被就地吞掉（`|| true` / `; true`）同样是硬门失效，属同一族
     expect(swallowsExitCode(backend)).toEqual([]);
     expect(swallowsExitCode(frontend)).toEqual([]);
+  });
+
+  test('判据可失败：|| echo / || printf 这类"失败只打日志"的吞码形态必须被点名，干净命令不误伤', () => {
+    // 这两种形态此前漏识别：`cmd || echo "..."` / `cmd || printf ...` 的失败分支自身
+    // 退出码为 0，覆盖率不过阈值时 job 照样绿——与 `|| true` 同族，必须同判。
+    const stepOf = (run) =>
+      stepsOf(['      - name: Run tests with coverage', `        run: ${run}`].join('\n')).find(
+        (s) => /^Run tests with coverage$/.test(s.name)
+      );
+    const echoForm = 'npm run test:coverage || echo "coverage gate failed, continuing"';
+    expect(swallowsExitCode(stepOf(echoForm))).toEqual([echoForm]);
+    const printfForm = 'npm run test:coverage || printf "%s\\n" "coverage gate failed, continuing"';
+    expect(swallowsExitCode(stepOf(printfForm))).toEqual([printfForm]);
+    // 反向对照：正常命令、以及"链式但不禁退出"的写法不得误报（否则判据退化成"见 echo 就红"）
+    expect(swallowsExitCode(stepOf('npm run test:coverage -- --forceExit'))).toEqual([]);
+    expect(swallowsExitCode(stepOf('npm run test:coverage && echo "coverage ok"'))).toEqual([]);
   });
 
   test('判据可失败：覆盖率步骤的 run 被掏成 echo 必须被同一条判据抓到', () => {

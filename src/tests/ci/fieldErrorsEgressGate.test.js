@@ -32,6 +32,7 @@
 const fs = require('fs');
 const path = require('path');
 const { body } = require('express-validator');
+const { jsCodeOnlyKeepingLines } = require('../helpers/jsCodeOnly');
 
 const SRC_DIR = path.resolve(__dirname, '../..');
 
@@ -46,13 +47,16 @@ function listProdFiles(dir = SRC_DIR, out = []) {
   return out;
 }
 
-/** 行注释与块注释都剥掉——注释里提"errors.array()"是在讲口径，不是在出站 */
-const stripComments = (src) =>
-  src
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .split(/\r?\n/)
-    .filter((line) => !/^\s*(\/\/|\*)/.test(line))
-    .join('\n');
+/**
+ * 「只剩代码」视图：整行注释、行尾注释与块注释都剥掉——注释里提"errors.array()"
+ * 是在讲口径，不是在出站。
+ * 行尾注释必须一并剥：`const x = safeFieldErrors(e); // 旧写法：fieldErrors: …` 这类行
+ * 若把注释留在视图里，注释中的 `fieldErrors:` / `.array()` 会被下面的扫描器误当出站点
+ * ⇒ 全仓扫描判据假红。实现取共享 helper（单遍状态机，行号与原文对齐）：
+ * 字符串 / 模板 / 正则字面量里的 `//` 不是注释；naive 的 `line.replace(/\/\/.*$/, '')`
+ * 会把 `http://` 后面的真实代码一起吃掉，这里不走那条路。
+ */
+const stripComments = (src) => jsCodeOnlyKeepingLines(src);
 
 const relOf = (file) => path.relative(SRC_DIR, file).replace(/\\/g, '/');
 
@@ -315,6 +319,22 @@ describe('校验错误出站面：value 一律不出站', () => {
         { expr: 'errors.array()', line: '  fieldErrors: errors.array(),', span: 'errors.array()' },
       ]);
       expect(scanArrayCalls('const x = errors.array();')).toEqual(['errors']);
+
+      // 行尾注释同样不是出站点（增强前只剥整行/块注释：注释里的 fieldErrors:/errors.array()
+      // 会被误当出站点 ⇒ 全仓扫描假红）
+      expect(
+        scanEgress('const x = safeFieldErrors(errors); // 旧写法：fieldErrors: errors.array()')
+      ).toEqual([]);
+      expect(scanArrayCalls('const y = safe(errors); // 旧写法：errors.array()')).toEqual([]);
+      // 但行尾规则只许剥到"注释为止"：字符串里的 // 不是注释，真实出站点不得被误伤
+      // （防本增强将来被退化成 naive 的行尾 replace——那会把 http:// 后面的代码一起吃掉）
+      const withUrl = 'res.json({ fieldErrors: errors.array() }); // see http://example.com/policy';
+      const urlSites = scanEgress(withUrl);
+      expect(urlSites).toHaveLength(1);
+      expect(urlSites[0].expr).toBe('errors.array()');
+      expect(urlSites[0].span).toBe('errors.array()');
+      const tricky = "const u = 'http://x'; res.json({ fieldErrors: errors.array() });";
+      expect(scanEgress(tricky)).toHaveLength(1);
 
       // M2 的常驻对偶：值换行时 span 必须覆盖到下一行的 `value:`。
       // 按行取表达式的旧口径在这里 span 只剩 `[`，`value:` 因此隐身（变异实测 SURVIVED）
