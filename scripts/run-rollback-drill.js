@@ -24,10 +24,25 @@ require('dotenv').config();
 require('../src/config/secrets').hydrateSecretsFromFiles();
 
 const fs = require('fs/promises');
+const fsSync = require('fs');
 const path = require('path');
 const zlib = require('zlib');
 const crypto = require('crypto');
 const mongoose = require('mongoose');
+// 快照格式层拆到 rollbackSnapshot（体积棘轮批）：加解密流与 EJSON 编解码在彼处；
+// 直接操作集合的 backupCollection/restoreCollection 留在本文件（与护栏同文件过门禁）。
+const { pipeline } = require('stream/promises');
+const { Readable, Transform, Writable } = require('stream');
+const {
+  BACKUP_MAGIC,
+  GCM_IV_LEN,
+  GCM_TAG_LEN,
+  backupKey,
+  createSnapshotDecryptStream,
+  createSnapshotDocStream,
+  toSerializable,
+  fromSerializable,
+} = require('./rollbackSnapshot');
 
 // 破坏性操作护栏（fail-closed 库名白名单），与同族脚本共用同一份声明。
 // dbNameFromUri / hostFromUri 供"护栏前移"用：库名/主机必须从 URI 解析，
@@ -37,67 +52,9 @@ const { hardenPath } = require('../src/utils/filePermission');
 
 const COLLECTIONS = ['users', 'roles', 'permissions', 'auditlogs'];
 
-/**
- * 快照加密（2026-10-21）。
- *
- * 背景：快照含 `users`（口令哈希、手机号、邮箱）与 `auditlogs` 全量记录。
- * 原实现只做 gzip —— gzip **不是加密**，`0600` 只挡住同机其他用户，
- * 挡不住"备份被拷到共享盘 / 上传工单 / 留在 CI artifact"这条实际路径。
- * 审计结论（P1）：`COLLECTIONS` 含 PII 集合 + 明文落盘 = 一次演练即一次 PII 落地。
- *
- * 文件格式（自带魔数，便于与旧明文快照区分）：
- *   "FSMSBK1\n" (8) | iv (12) | authTag (16) | AES-256-GCM 密文
- * 密钥由 `AES_SECRET_KEY` 经 sha256 派生（与 `src/utils/encryption.js` 的
- * AESCipher 同一派生方式），因此运维只需要记住一把主密钥。
- *
- * **fail-closed**：缺主密钥时直接退出，绝不退回明文写出——
- * 「加密配置缺失就悄悄不加密」正是这条 P1 的成因。
- */
-const BACKUP_MAGIC = Buffer.from('FSMSBK1\n', 'utf8');
-const GCM_IV_LEN = 12;
-const GCM_TAG_LEN = 16;
-
-function backupKey() {
-  // 惰性取 config：require 期不碰 config 的校验逻辑，缺密钥时只在真正写/读备份时暴露
-  const secret = process.env.AES_SECRET_KEY || require('../src/config').aesSecret;
-  if (!secret) {
-    console.error(
-      '错误：缺少 AES_SECRET_KEY，拒绝写出/读取 PII 快照。\n' +
-        '  本脚本不再产出明文备份（gzip 不是加密）。请先配置 AES_SECRET_KEY（openssl rand -hex 32）。'
-    );
-    process.exit(2);
-  }
-  return crypto.createHash('sha256').update(String(secret)).digest();
-}
-
-/** gzip 后的明文 → 加密字节流（含魔数头） */
-function encryptBackup(plainGzip) {
-  const iv = crypto.randomBytes(GCM_IV_LEN);
-  const cipher = crypto.createCipheriv('aes-256-gcm', backupKey(), iv);
-  const ciphertext = Buffer.concat([cipher.update(plainGzip), cipher.final()]);
-  return Buffer.concat([BACKUP_MAGIC, iv, cipher.getAuthTag(), ciphertext]);
-}
-
-/**
- * 加密字节流 → gzip 明文。
- * 返回 `null` 表示"这不是加密快照"（无魔数），由调用方按旧明文格式处理，
- * 使改造前留下的快照仍可回灌。认不出魔数**不等于**可以直接当明文用——
- * 调用方必须显式走旧格式分支并告警，而不是在这里静默放行。
- */
-function decryptBackup(raw) {
-  if (raw.length < BACKUP_MAGIC.length + GCM_IV_LEN + GCM_TAG_LEN) return null;
-  if (!raw.subarray(0, BACKUP_MAGIC.length).equals(BACKUP_MAGIC)) return null;
-  const iv = raw.subarray(BACKUP_MAGIC.length, BACKUP_MAGIC.length + GCM_IV_LEN);
-  const tagStart = BACKUP_MAGIC.length + GCM_IV_LEN;
-  const tag = raw.subarray(tagStart, tagStart + GCM_TAG_LEN);
-  const ciphertext = raw.subarray(tagStart + GCM_TAG_LEN);
-  const decipher = crypto.createDecipheriv('aes-256-gcm', backupKey(), iv, {
-    authTagLength: GCM_TAG_LEN,
-  });
-  decipher.setAuthTag(tag);
-  // GCM 认证失败（密钥不对/密文被改）在这里抛出——不降级、不猜测，直接失败
-  return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-}
+// 快照加密/流式快照/回灌的实现整体在 ./rollbackSnapshot（体积棘轮批拆出）：
+// 文件格式、加解密流、EJSON 编解码与两个集合级操作都在那里；本文件只保留
+// 演练编排（参数解析、护栏、连接与报告）。
 
 function parseArgs(argv) {
   const args = {
@@ -158,76 +115,128 @@ function assertSourceDbAllowed(dbName, host) {
   });
 }
 
-// BSON 类型安全的快照编解码。驱动返回的文档里 _id/日期是原生 BSON 类型，
-// 但 JSON.stringify 会把 ObjectId 退化成 24 位 hex 字符串、Date 退化成 ISO 字符串，
-// 于是回灌端拿到 String `_id` 与 String `timestamp`：TTL 索引不再过期、
-// `timestamp: { $gte: new Date() }` 之类查询恒空（异常/暴破计数静默 0）。
-// ObjectId 用跨 bson 版本稳定的 `_bsontype` 标记识别，Date 用原生 instanceof。
-function toSerializable(value) {
-  if (value && typeof value === 'object' && value._bsontype === 'ObjectId') {
-    return { $oid: value.toString() };
-  }
-  if (value instanceof Date) {
-    return { $date: value.toISOString() };
-  }
-  if (Array.isArray(value)) return value.map(toSerializable);
-  if (value && typeof value === 'object') {
-    const out = {};
-    for (const [k, v] of Object.entries(value)) out[k] = toSerializable(v);
-    return out;
-  }
-  return value;
-}
-
-function fromSerializable(value) {
-  if (value && typeof value === 'object' && typeof value.$oid === 'string') {
-    return new mongoose.Types.ObjectId(value.$oid);
-  }
-  if (value && typeof value === 'object' && typeof value.$date === 'string') {
-    return new Date(value.$date);
-  }
-  if (Array.isArray(value)) return value.map(fromSerializable);
-  if (value && typeof value === 'object') {
-    const out = {};
-    for (const [k, v] of Object.entries(value)) out[k] = fromSerializable(v);
-    return out;
-  }
-  return value;
-}
+/** 回灌单批大小：流式解析下内存里有界的只是一批 replaceOne 操作 */
+const RESTORE_BATCH_DOCS = 1000;
 
 async function backupCollection(collection, file) {
-  const docs = await collection.find({}).toArray();
+  // 审计 P2（2026-11-17）：原实现 `find({}).toArray()` 把整集合一次性载入内存，
+  // 再经 JSON.stringify / gzipSync / AES 各复制一份，GB 级 users/auditlogs 的峰值
+  // 内存约为集合体积的数倍，OOM 即演练中断。改为 cursor 逐条序列化 → 流式 gzip →
+  // 流式 AES-256-GCM → 落盘：内存里有界的只是"一条文档 + 各段流缓冲"
+  // （驱动游标单批拉取另受服务端 16MB 消息上限约束）。
+  // 明文由「整体 JSON 数组」改为 NDJSON（每行一个 EJSON 文档），.ndjson.gz 后缀
+  // 从此名副其实；restoreCollection 同步流式消费，并兼容旧数组快照。
+  const iv = crypto.randomBytes(GCM_IV_LEN);
+  const cipher = crypto.createCipheriv('aes-256-gcm', backupKey(), iv);
+  const out = fsSync.createWriteStream(file, { mode: 0o600 });
+  // 文件布局与整块加密版完全一致（magic | iv | authTag(16) | 密文），独立按格式
+  // 校验的 ops-e2e journey 与旧快照都不受影响。流式加密的 authTag 要到 final()
+  // 才产出：先写 16 字节占位，落盘完成后回填（见本函数末尾）。
+  out.write(BACKUP_MAGIC);
+  out.write(iv);
+  out.write(Buffer.alloc(GCM_TAG_LEN));
   // 快照含 users / auditlogs 明文 PII：先 gzip（体积）再 AES-256-GCM（机密性 + 完整性）。
-  // 顺序不能反——先加密再压缩几乎压不动。
+  // 顺序不能反——先加密再压缩几乎压不动。两步都在流上，顺序由管道表达。
+  let count = 0;
+  await pipeline(
+    Readable.from(collection.find({})),
+    new Transform({
+      objectMode: true,
+      transform(doc, _enc, cb) {
+        count += 1;
+        cb(null, JSON.stringify(toSerializable(doc)) + '\n');
+      },
+    }),
+    zlib.createGzip(),
+    cipher,
+    // 末端落盘用 Writable 而不是无 yield 的 async generator（require-yield）：
+    // 「只消费不产出」的阶段本就是 Writable 的语义。
+    new Writable({
+      async write(chunk, _enc, cb) {
+        // 磁盘慢时不让上游无界堆积
+        if (!out.write(chunk)) await new Promise((resolve) => out.once('drain', resolve));
+        cb();
+      },
+      final(cb) {
+        out.end();
+        cb();
+      },
+    })
+  );
+  // 回填真实 authTag（覆盖占位）：管道结束时 cipher.final() 已执行，tag 可用
+  const handle = await fs.open(file, 'r+');
+  try {
+    await handle.write(cipher.getAuthTag(), 0, GCM_TAG_LEN, BACKUP_MAGIC.length + GCM_IV_LEN);
+  } finally {
+    await handle.close();
+  }
   // 文件必须是 0600（Windows 走 ACL 收紧）：mode 只在创建时生效，已有文件由 hardenPath 兜底。
-  const payload = encryptBackup(zlib.gzipSync(JSON.stringify(docs.map(toSerializable))));
-  await fs.writeFile(file, payload, {
-    mode: 0o600,
-  });
   hardenPath(file, { isDir: false, log: (m) => console.warn(m) });
-  return docs.length;
+  return count;
 }
 
 async function restoreCollection(collection, file) {
-  const raw = await fs.readFile(file);
-  const decrypted = decryptBackup(raw);
+  // 流式回灌，与流式快照对称。旧实现整文件读入 → 整段解密 → gunzipSync →
+  // JSON.parse → 整表建 bulkWrite 操作数组，GB 级快照会把回灌段同样打爆——
+  // 而回灌发生在 deleteMany **之后**，这里的 OOM 是真正丢数据的方向，不是演练中断。
+  // 改为：流式解密 → gunzip → 逐条解析 → 每满 RESTORE_BATCH_DOCS 条 bulkWrite 一批。
+  //
+  // 「认证失败不落库」必须保留：GCM 的认证只在流末 final() 完成，若边解密边写库，
+  // 被篡改的快照会先落库、后报错。因此两遍走——第一遍只解密+解压（吞掉明文，
+  // 不写库）把认证跑完；第二遍在认证通过后才真正回灌。内存两遍都有界，
+  // 代价只是多一次 CPU 解密/解压，对演练脚本可以接受。
+  let plain = false;
+  await pipeline(
+    fsSync.createReadStream(file),
+    createSnapshotDecryptStream(() => {
+      plain = true;
+    }),
+    zlib.createGunzip(),
+    // 只为把流走完：GCM 认证在解密流的 flush/final() 里完成。
+    // 用 Writable 表达「只消费不产出」的吞流段（见 backupCollection）。
+    new Writable({
+      write(_chunk, _enc, cb) {
+        cb();
+      },
+    })
+  );
   // 无魔数 ⇒ 改造前留下的明文快照。仍允许回灌（否则存量备份直接作废），
   // 但必须显式告警：这类文件意味着 PII 曾经以明文落过盘，属于需要处置的遗留物。
-  if (decrypted === null) {
+  if (plain) {
     console.warn(
       `⚠ 快照「${path.basename(file)}」是改造前的**未加密**格式（无 FSMSBK1 魔数），` +
         '本次按明文回灌。回灌完成后请立即删除该文件并核查其历史副本。'
     );
   }
-  const payload = decrypted === null ? raw : decrypted;
-  const docs = JSON.parse(zlib.gunzipSync(payload).toString('utf8')).map(fromSerializable);
-  if (docs.length === 0) return 0;
-  const prepared = docs.map((doc) => {
-    const { _id, ...rest } = doc;
-    return { replaceOne: { filter: { _id }, replacement: rest, upsert: true } };
-  });
-  await collection.bulkWrite(prepared, { ordered: false });
-  return docs.length;
+
+  let count = 0;
+  let batch = [];
+  const flushBatch = async () => {
+    if (batch.length === 0) return;
+    const ops = batch.map(({ _id, ...rest }) => ({
+      replaceOne: { filter: { _id }, replacement: rest, upsert: true },
+    }));
+    await collection.bulkWrite(ops, { ordered: false });
+    count += ops.length;
+    batch = [];
+  };
+  await pipeline(
+    fsSync.createReadStream(file),
+    createSnapshotDecryptStream(() => {}),
+    zlib.createGunzip(),
+    createSnapshotDocStream(),
+    // 逐条攒批的回灌段：同样是「只消费不产出」的 Writable 语义。
+    new Writable({
+      objectMode: true,
+      async write(doc, _enc, cb) {
+        batch.push(doc);
+        if (batch.length >= RESTORE_BATCH_DOCS) await flushBatch();
+        cb();
+      },
+    })
+  );
+  await flushBatch();
+  return count;
 }
 
 /**
