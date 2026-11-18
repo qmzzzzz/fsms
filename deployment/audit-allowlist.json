@@ -19,6 +19,15 @@
       "noPatch": true,
       "exitPlan": "eslint / jest / nodemon 任一上游放开 minimatch≥11.0.1 后本条自动判陈旧，删行。",
       "reviewBy": "2027-02-01"
+    },
+    {
+      "id": "GHSA-fc5q-39xc-vjpf",
+      "package": "picomatch",
+      "reason": "dev 工具链公告，来源 jest@30.5.2（jest-haste-map / jest-message-util / jest-util / @parcel/watcher）与 nodemon@3.1.14，全部 dev=true、生产树 0 条。npm 无修复版本（latest 4.0.7 即落在受影响区间 <=4.0.7），升级属假选项。",
+      "reachability": "仅 dev 工具链可达：引入边全部位于 devDependencies（jest 测试链与 nodemon 热重载链），生产依赖树无任何引入边，npm audit --omit=dev 实测 0 条（RC=0）。",
+      "noPatch": true,
+      "exitPlan": "picomatch 发布 >4.0.7 的修复版且 jest / nodemon 放开后本条自动判陈旧，删行。",
+      "reviewBy": "2027-02-01"
     }
   ]
 }
