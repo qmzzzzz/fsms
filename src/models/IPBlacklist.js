@@ -15,8 +15,7 @@ const {
   entryCovers,
   normalizeIP,
   normalizeCIDR,
-  // 严格形态判据住在 ipUtils（四个解析漏斗共用同一把尺子），
-  // 过渡模块 utils/ipCanonical 已并入并删除
+  // 严格形态判据住在 ipUtils（四个解析漏斗共用同一把尺子）；过渡模块 utils/ipCanonical 已并入并删除
   isAmbiguousIpText,
 } = require('../utils/ipUtils');
 
@@ -175,7 +174,13 @@ const findMatchingEntries = async function (clientIp, type) {
   if (expiredIds.length > 0) {
     // 快照内已过期的记录需同时清出缓存，避免 TTL 未到期前反复触发删除
     invalidateSnapshot(type);
-    this.deleteMany({ _id: { $in: expiredIds } }).catch(() => {});
+    // fire-and-forget 语义不变（不阻塞、不上抛），但删除失败必须留痕：静默吞掉时清理失败外部零感知
+    this.deleteMany({ _id: { $in: expiredIds } }).catch((err) => {
+      logger.warn(
+        `IP 名单过期记录惰性清理失败（${expiredIds.length} 条，TTL 索引兜底前会反复重试）：` +
+          `${(err && err.message) || err}`
+      );
+    });
   }
 
   const expiryOf = (entry) => (entry.expiresAt ? entry.expiresAt.getTime() : Infinity);

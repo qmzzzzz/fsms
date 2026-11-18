@@ -24,10 +24,10 @@ const { USER_STATUS } = require('../../utils/constants');
 const {
   verifyMfaChallenge,
   MAX_FAILED_LOGINS,
-  LOCK_DURATION_MS,
+  // LOCK_DURATION_MS 已随落锁块收口进 loginCounters.applyAccountTempLock，本文件不再直接使用
   resolveFailedLoginCount,
 } = require('./failureAndMfa');
-const { applyLoginFailureCountAtomic } = require('./loginCounters');
+const { applyLoginFailureCountAtomic, applyAccountTempLock } = require('./loginCounters');
 const { issueLoginSession } = require('./session');
 const { credentialShapeOf } = require('../../constants/credentialShape');
 
@@ -398,50 +398,16 @@ async function verifyPasswordOrTrackFailure(user, { password, username, ctx }) {
     // 计数不可观测时的取舍见 resolveFailedLoginCount 的定义处（fail-closed）
     const newCount = resolveFailedLoginCount(updated);
     if (newCount >= MAX_FAILED_LOGINS) {
-      // 锁定这条更新本身也可能写不进库。修法与 mfaService.js:142-164 同源：
-      // 修复前是 `.catch(() => {})` 吞掉后照常写下「账户临时锁定」，并追加一条
-      // action=account_temp_locked 的审计——日志与审计双双宣称一道**并不存在**的防线，
-      // 而故障窗口内该账户的口令仍可被无限次在线尝试。观测不到时要如实记录，
-      // 不能"记不上就算成功了"。
-      let lockApplied = true;
-      await User.findByIdAndUpdate(user._id, {
-        lockUntil: new Date(Date.now() + LOCK_DURATION_MS),
-      }).catch((err) => {
-        lockApplied = false;
-        logger.error(`账户临时锁定写入失败（防爆破防线未生效）：${err.message}`, { username });
-      });
-      if (lockApplied) {
-        // 锁定生效后必须失效认证缓存：authenticate 读的是缓存快照（TTL 60s），
-        // 不失效则已签发的 access token 在窗口内仍能带着旧 lockUntil 通过校验。
-        const { invalidateUserCache } = require('../../middleware/auth');
-        invalidateUserCache(user._id);
-      }
-      // 阈值如今只能被"能连续通过人机验证"的一方触达（见 loginChallenge），不再是被动可触发的 DoS 面。
-      logger.warn('账户临时锁定', {
+      // 锁定这条更新本身也可能写不进库。落锁、缓存失效、日志与
+      // action=account_temp_locked 审计收口到共享 helper（loginCounters.applyAccountTempLock），
+      // 与 MFA/恢复码路径逐字段同构。锁定写失败时 helper 以 error 级日志与审计
+      // reason 如实记录「防线未生效」——观测不到时要如实记录，不能"记不上就算成功了"。
+      await applyAccountTempLock(User, user, {
         username,
         failedCount: newCount,
-        lockMinutes: 10,
-        // 锁到底有没有落库：读日志的人据此判断防线是否还在，而不是信一句断言
-        lockApplied,
+        lockReason: '口令错误累计',
+        ctx,
       });
-      // 评价报告 #8：暴力破解信号审计写入显式挂 catch（同上口径）
-      AuditLog.record({
-        action: 'account_temp_locked',
-        category: 'auth',
-        userId: user._id,
-        username,
-        // 请求上下文补采（见 auditRequestContext）：机器触发的锁定事件也带上发起请求的溯源
-        ...auditRequestContext(ctx.req),
-        ip,
-        userAgent,
-        fingerprint,
-        success: false,
-        riskLevel: 'high',
-        riskFactors: ['excessive_failed_logins'],
-        reason: lockApplied
-          ? `连续登录失败 ${newCount} 次，账户临时锁定 10 分钟`
-          : `连续登录失败 ${newCount} 次，但锁定未能写入数据库，防爆破防线当前未生效`,
-      }).catch(() => {});
     }
     return { outcome: 'INVALID_CREDENTIALS' };
   }

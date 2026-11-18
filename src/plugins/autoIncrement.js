@@ -74,7 +74,9 @@ module.exports = function autoIncrementPlugin(schema, options = {}) {
    * 必须按**数值**取最大：编号是补零定宽字符串，跨宽度时字典序会骗人
    * （'ZZP-9999' 逐字符大于 'ZZP-10000'），按字符串取最大会算出已被占用的号。
    * `$match` 的前缀是锚定的字面量，走 field 上的 unique 索引；且只数
-   * 形如 `前缀-数字` 的编号——外部写入的其它形态不参与对齐。
+   * 形如 `前缀-` + **至少 seqPadding（默认 4）位**数字的定宽编号——位数不足的
+   * 短序号与外部写入的其它形态一样不参与对齐（对齐的目标就是本插件
+   * formatCode 产出的形态，padStart 保证序号永远不会短于 seqPadding 位）。
    */
   async function maxPersistedSeq(model, prefix) {
     const shape = `^${escapeRegExp(prefix)}${prefix ? '-' : ''}\\d{${seqPadding},}$`;

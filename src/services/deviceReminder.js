@@ -21,10 +21,17 @@ let lastScanAt = null;
 // 修复：isScanning 声明移至顶部，避免函数定义中引用未声明变量（可读性与 TDZ 安全）
 let isScanning = false;
 
+// 扫描参数缺省值（窗口 30 天 / 单次上限 200 条）：缓存键与扫描解构共用这一份，
+// 两处各写一份时改其一即静默漂移——缓存键与实际扫描口径不一致会互吃错误窗口的缓存。
+const DEFAULT_EXPIRING_DAYS = 30;
+const DEFAULT_RESULT_LIMIT = 200;
+
 /** 扫描缓存键：与 scanDeviceReminders 的解构缺省同口径（undefined 才落缺省值） */
 const scanCacheKeyOf = (options = {}) => {
-  const expiringDays = options.expiringDays === undefined ? 30 : options.expiringDays;
-  const resultLimit = options.resultLimit === undefined ? 200 : options.resultLimit;
+  const expiringDays =
+    options.expiringDays === undefined ? DEFAULT_EXPIRING_DAYS : options.expiringDays;
+  const resultLimit =
+    options.resultLimit === undefined ? DEFAULT_RESULT_LIMIT : options.resultLimit;
   return `${expiringDays}|${resultLimit}`;
 };
 
@@ -121,7 +128,11 @@ const scanDeviceReminders = async (options = {}) => {
   isScanning = true;
 
   try {
-    const { expiringDays = 30, scopeFilter = null, resultLimit = 200 } = options;
+    const {
+      expiringDays = DEFAULT_EXPIRING_DAYS,
+      scopeFilter = null,
+      resultLimit = DEFAULT_RESULT_LIMIT,
+    } = options;
     const base = scopeFilter || {};
     // 判定时刻取一次，四档共用（跨秒会让同一响应的两档用两个 now）
     const alert = deviceAlertFilters(new Date(), expiringDays);
@@ -265,11 +276,14 @@ const getDeviceReminders = async (options = {}) => {
 // 模块级持有调度句柄：防止意外二次调用泄漏旧定时器（stop 无法引用旧 timer）
 let activeScheduler = null;
 
+/** 设备到期/维护提醒的周期扫描间隔（每日一次）：单位与意图在此单源表达 */
+const REMINDER_SCAN_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
 /**
  * 启动周期性到期扫描（默认每日一次）
  * @param {number} intervalMs 扫描间隔毫秒
  */
-const startReminderScheduler = (intervalMs = 24 * 60 * 60 * 1000) => {
+const startReminderScheduler = (intervalMs = REMINDER_SCAN_INTERVAL_MS) => {
   // 幂等保护：重复启动直接返回既有句柄，避免泄漏旧 timer
   if (activeScheduler) {
     logger.warn('设备到期提醒调度已在运行，忽略重复启动');
@@ -335,4 +349,5 @@ module.exports = {
   markOverdueInspections,
   startReminderScheduler,
   stopReminderScheduler,
+  REMINDER_SCAN_INTERVAL_MS,
 };

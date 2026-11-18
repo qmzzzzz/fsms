@@ -12,7 +12,9 @@
  * （写错一列就会让整份合规材料的列错位），故这里的中文文案不随语言改造而变。
  */
 
-const EXPORT_COLUMN_DEFS = {
+// 声明处 Object.freeze（同目录 attackEvents/audit 的冻结纪律）：列定义是导出表头的
+// 契约（exportColumnDefsPinned.test.js 逐列锁定），被调用方原地增删列会让契约悄悄失效。
+const EXPORT_COLUMN_DEFS = Object.freeze({
   alarms: [
     { header: '报警编号', key: 'alarmCode', width: 15 },
     { header: '报警时间', key: 'occurredAt', width: 18 },
@@ -58,6 +60,6 @@ const EXPORT_COLUMN_DEFS = {
     { header: '执行人', key: 'assignedTo', width: 15 },
     { header: '备注', key: 'remark', width: 30 },
   ],
-};
+});
 
 module.exports = { EXPORT_COLUMN_DEFS };

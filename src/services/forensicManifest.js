@@ -10,11 +10,16 @@ const { errText } = require('../utils/auditWriteFailure');
 const { toEpochMs } = require('../utils/helpers');
 const { businessDateParts } = require('../constants/timezone');
 const { withLock } = require('./forensicManifestLock');
+const {
+  GENESIS,
+  readTailForAppend,
+  recordAppendedTail,
+  clearTailCache,
+} = require('./forensicManifestTailCache');
 const retry = require('./forensicManifestRetry');
 
 const MANIFEST_VERSION = 1;
 const MANIFEST_DIR = path.join(path.resolve(__dirname, '..', '..'), 'logs', 'forensic-manifest');
-const GENESIS = 'genesis';
 const WARN_INTERVAL_MS = 60000;
 
 const state = { writeFailures: 0, written: 0, lastError: null, lastWarnAt: 0 };
@@ -74,39 +79,21 @@ const recomputeOf = (entry) =>
     ].join('|')
   );
 
-/** 读当日清单最后一行拿 prevChainHash（文件不存在 ⇒ genesis；末行坏掉 ⇒ 报错而不是猜） */
-const readLastChainHash = (filePath) => {
-  let content;
-  try {
-    content = fs.readFileSync(filePath, 'utf8');
-  } catch (e) {
-    if (e?.code === 'ENOENT') return GENESIS;
-    throw e;
-  }
-  const lines = content.split('\n').filter(Boolean);
-  if (lines.length === 0) return GENESIS;
-  let last;
-  try {
-    last = JSON.parse(lines[lines.length - 1]);
-  } catch {
-    throw new Error(`清单末行解析不出（${filePath}），拒绝在其后继续接链`); // 末行损坏时**不猜**：宁可让本批起链失败并留下可复核的痕迹，也不悄悄接上一个读不懂的哈希
-  }
-  if (!last || typeof last.chainHash !== 'string')
-    throw new Error(`清单末行缺少 chainHash（${filePath}）`);
-  return last.chainHash;
-};
-
 /** 追加一批（落库成功后调用）。失败只计数 + 限频 warn，**绝不抛**：取证是尽力而为的增强证据，清单写不进去不能反过来卡住请求或回滚落库。 / */
 async function writeLocked(batch) {
   const filePath = filePathOf(batch.dir, batch.now);
-  // 锁内重读末行：抢锁前读到的末行可能已被别的进程推进，必须以锁内为准
+  // 锁内取末行：抢锁前读到的末行可能已被别的进程推进，必须以锁内为准；
+  // 末行走进程内缓存（readTailForAppend），本进程连续追加时不再整读整个文件
   const locked = await withLock(batch.dir, {}, async () => {
-    const prevChainHash = readLastChainHash(filePath);
+    const { chainHash: prevChainHash, size: prevSize } = readTailForAppend(filePath);
     const entry = batchEntryOf({ prevChainHash, ...batch });
-    await fs.promises.appendFile(filePath, JSON.stringify(entry) + '\n', {
+    const line = JSON.stringify(entry) + '\n';
+    await fs.promises.appendFile(filePath, line, {
       encoding: 'utf8',
       mode: 0o600,
     });
+    // 追加成功 ⇒ 末行必是刚写的 entry，按追加字节数推进缓存，下一批免整读。
+    recordAppendedTail(filePath, entry.chainHash, prevSize + Buffer.byteLength(line, 'utf8'));
     return entry;
   });
   if (!locked.ok) {
@@ -327,6 +314,8 @@ function resetManifestState() {
   state.anchorFailures = 0;
   state.lastError = null;
   state.lastWarnAt = 0;
+  // 末行缓存一并清空：重置语义是"回到未写过"的干净态（缓存按路径隔离，这里清掉只为语义完整）
+  clearTailCache();
 }
 
 module.exports = {

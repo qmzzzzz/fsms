@@ -109,6 +109,12 @@ const handleReasonValidation = [
 // :id 路径参数必须是合法 ObjectId，防止非法 id 触发 CastError → 500
 const mongoIdParamValidation = [param('id').isMongoId().withMessage('无效的报警记录ID')];
 
+// 校验消费统一口径：凡挂了校验器的路由一律接 consumeValidation()，
+// 不再依赖各控制器自行读 validationResult 兜底——双口径下新增路由容易漏一侧，
+// 非法输入会绕过 400 直接流进 Service。控制器内的既有消费保留（双保险），
+// 两者错误形态相同（VALIDATION_FAILED + fieldErrors），先拦后拦不改变响应契约。
+const consume = consumeValidation();
+
 // 路由定义
 /**
  * @route   GET /api/alarms
@@ -141,6 +147,7 @@ router.get(
   authenticate,
   checkPermission('alarm:read'),
   mongoIdParamValidation,
+  consume,
   alarmController.getAlarmById
 );
 
@@ -155,6 +162,7 @@ router.post(
   checkPermission('alarm:create'),
   idempotency({ scope: 'alarm:report' }), // 请求级幂等（一-1）：连点会产出两条互不相干的警情
   reportAlarmValidation,
+  consume,
   alarmController.reportAlarm
 );
 
@@ -168,6 +176,7 @@ router.put(
   authenticate,
   checkPermission('alarm:dispatch'),
   [...mongoIdParamValidation, ...dispatchValidation],
+  consume,
   alarmController.dispatchAlarm
 );
 
@@ -181,6 +190,7 @@ router.put(
   authenticate,
   checkPermission('alarm:handle'),
   mongoIdParamValidation,
+  consume,
   alarmController.arriveAtScene
 );
 
@@ -194,6 +204,7 @@ router.put(
   authenticate,
   checkPermission('alarm:handle'),
   [...mongoIdParamValidation, ...resolveValidation],
+  consume,
   alarmController.resolveAlarm
 );
 
@@ -207,6 +218,7 @@ router.put(
   authenticate,
   checkPermission('alarm:handle'),
   [...mongoIdParamValidation, ...handleReasonValidation],
+  consume,
   alarmController.markAsFalseAlarm
 );
 
@@ -220,6 +232,7 @@ router.put(
   authenticate,
   checkPermission('alarm:handle'),
   [...mongoIdParamValidation, ...handleReasonValidation],
+  consume,
   alarmController.cancelAlarm
 );
 

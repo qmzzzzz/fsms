@@ -104,6 +104,18 @@ const noteTrimFailure = (msg) => {
   return `${msg}（累计 ${walTrimFailures} 次）`;
 };
 
+/** durable 行候选可能多达数万条：一次性 `push(...arr)` 会撞 V8 参数上限
+ * （RangeError），异常冒泡会跳过下面的归档与回写，导致本轮超限裁剪整体
+ * 失效、walTrimFailures 也不计数。按块展开（块长远低于参数上限）保证
+ * 裁剪始终生效、失败计数口径不被绕过。 */
+const pushDurableTrimIndices = (dropIdx, durableIdx, shortfall) => {
+  const durablePushChunk = 4096;
+  const durableLimit = Math.min(shortfall, durableIdx.length);
+  for (let i = 0; i < durableLimit; i += durablePushChunk) {
+    dropIdx.push(...durableIdx.slice(i, Math.min(i + durablePushChunk, durableLimit)));
+  }
+};
+
 /**
  * WAL 大小硬上限保护：超过 getWalMaxBytes() 丢弃最旧一半行并告警。
  * 串行化在宿主的 walChain 上（与追加/裁剪互斥）。
@@ -175,7 +187,7 @@ async function enforceWalLimit({ walPath, readWalRecords, atomicReplaceWal }) {
       );
       if (!dropIdx.length) return; // 一条普通行都没有：本轮不动文件，避免空归档
     } else {
-      dropIdx.push(...durableIdx.slice(0, shortfall));
+      pushDurableTrimIndices(dropIdx, durableIdx, shortfall);
       durableDropped = shortfall;
     }
   }

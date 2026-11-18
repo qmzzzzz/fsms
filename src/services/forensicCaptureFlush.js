@@ -5,6 +5,42 @@ const { validateOne, docsNotYetStored } = require('./forensicCaptureCodec');
 const { incSecurityAlert } = require('../utils/metrics');
 const forensicManifest = require('./forensicManifest');
 
+// 单次 insertMany 的字节预算（16MB）：远低于 MongoDB 单消息 ~48MB 的硬上限，
+// 给 BSON 编码与驱动封装留足余量。预算是防毒批的兜底而非容量承诺。
+const FLUSH_CHUNK_BYTES = 16 * 1024 * 1024;
+// 单条大小估算失败的兜底值：按"超预算"处理 ⇒ 该条独立成批，失败也不拖累其他记录。
+const DOC_SIZE_ESTIMATE_FALLBACK = FLUSH_CHUNK_BYTES;
+
+const serializedBytesOf = (doc) => {
+  try {
+    return Buffer.byteLength(JSON.stringify(doc), 'utf8');
+  } catch {
+    return DOC_SIZE_ESTIMATE_FALLBACK;
+  }
+};
+
+/**
+ * 按估算序列化字节把待插文档切成每批 ≤ FLUSH_CHUNK_BYTES。
+ * 单条本身超预算时独立成批（恒有进展），不与后续记录合并。
+ */
+const splitBySerializedBytes = (docs) => {
+  const chunks = [];
+  let current = [];
+  let currentBytes = 0;
+  for (const doc of docs) {
+    const bytes = serializedBytesOf(doc);
+    if (current.length > 0 && currentBytes + bytes > FLUSH_CHUNK_BYTES) {
+      chunks.push(current);
+      current = [];
+      currentBytes = 0;
+    }
+    current.push(doc);
+    currentBytes += bytes;
+  }
+  if (current.length > 0) chunks.push(current);
+  return chunks;
+};
+
 /** 依赖全部由编排层注入：本模块不持有状态，也不自己决定容量口径 */
 const createFlusher = ({ state, noteError, warnRateLimited, errText, bufferHardLimit }) => {
   const anchorStored = async (docs) => {
@@ -38,7 +74,17 @@ const createFlusher = ({ state, noteError, warnRateLimited, errText, bufferHardL
     }
     try {
       if (valid.length > 0) {
-        await ForensicCapture.insertMany(valid, { ordered: false, throwOnValidationError: true });
+        // 防毒批：单条载荷有封顶，但封顶值可经 env 放大，且 UTF-8 多字节会让字符数
+        // 远小于字节数；满批（bufferHardLimit 条）在最坏情况下能逼近/越过 MongoDB
+        // 单消息 ~48MB 上限——那会退化成「整批失败 → 整批回填 → 同一批再次超限」
+        // 的毒批循环。按估算字节分批 insertMany；分批不改变语义：仍 ordered:false，
+        // 全部成功才裁 WAL/锚清单，部分批失败走下方既有的回填与补锚路径。
+        for (const chunk of splitBySerializedBytes(valid)) {
+          await ForensicCapture.insertMany(chunk, {
+            ordered: false,
+            throwOnValidationError: true,
+          });
+        }
         wal.trimBySeqs(valid.map((d) => d.__walSeq).filter(Boolean));
         // 落库成功后才锚进清单（顺序不能反：先记清单后落库，落库失败就会留下"证明一条不存在的记录"的锚点）。写失败只计数告警、不外抛（appendBatch 自己兜），绝不让清单问题回滚已成功的落库。
         await anchorStored(valid);

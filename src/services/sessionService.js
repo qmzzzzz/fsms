@@ -21,6 +21,7 @@ const UserSession = require('../models/UserSession');
 const { computeFingerprint } = require('../utils/fingerprint');
 const { sessionClientIp } = require('../utils/ipUtils');
 const { durationToMs } = require('../utils/cookie');
+const { shallowSessionCopy, toSessionSnapshot } = require('../utils/helpers');
 const config = require('../config');
 const { onSessionRevoked, notifySessionRevoked } = require('./sessionRevocationEvents');
 const { MAX_ACTIVE_SESSIONS_PER_USER, enforceSessionCap } = require('./sessionCap');
@@ -351,7 +352,7 @@ const validateSession = async (sid) => {
     // （`isUsable()` 对没有 expiresAt 的文档也给 false），两侧一致才不会
     // 出现"缓存比直查更宽松"这种最难查的偏差。
     const notExpired = expiresAt instanceof Date && expiresAt.getTime() > now;
-    return { usable: !!cached.usable && notExpired, session: cached.session };
+    return { usable: !!cached.usable && notExpired, session: shallowSessionCopy(cached.session) };
   }
 
   // 查库前取号：见文件头 sessionCacheGeneration 的说明
@@ -368,6 +369,8 @@ const validateSession = async (sid) => {
 
   const usable = !!doc && doc.isUsable();
   guardCacheSize();
+  // 缓存前摊平成普通对象快照：不再把同一份 Mongoose 文档按引用交给所有调用方
+  const snapshot = toSessionSnapshot(doc);
   // 不可用的结论同样缓存：被吊销的会话往往会持续重试（前端定时轮询、
   // 未感知掉线的客户端），不缓存等于让失效会话反复打库
   //
@@ -375,13 +378,11 @@ const validateSession = async (sid) => {
   // 写回去会把手刚删掉的条目重新种回来，吊销被静默撤销到 TTL 到期。
   // 跳过的代价只是下一次请求再查一次库，方向上不会放行任何旧结论。
   if (sessionCacheGeneration === genAtRead) {
-    sessionCache.set(key, {
-      usable,
-      session: doc || null,
-      expireAt: now + SESSION_CACHE_TTL,
-    });
+    sessionCache.set(key, { usable, session: snapshot, expireAt: now + SESSION_CACHE_TTL });
   }
-  return { usable, session: doc || null };
+  // 出栈交浅拷贝：缓存体是同 sid 全部请求共享的单一对象，返回原引用等于
+  // 把缓存体暴露给调用方（与 reportDashboardService 的「出栈必拷贝」同纪律）
+  return { usable, session: shallowSessionCopy(snapshot) };
 };
 
 /**

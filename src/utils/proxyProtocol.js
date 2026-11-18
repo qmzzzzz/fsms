@@ -37,14 +37,6 @@ const V2_FIXED_HEADER_BYTES = 16;
 const V2_MAX_TOTAL_BYTES = V2_FIXED_HEADER_BYTES + 0xffff;
 
 /**
- * 两签名中较长者（v2 的 12 字节）：「完全不是 PROXY 头」的最长判定窗口。
- * 少于该长度且仍是某签名的**真前缀**时必须继续等（首段常被 TCP 分段拆开）；
- * 一旦越出真前缀，立即判 not-proxy，不给等待窗口留悬挂连接。
- * （刻意**不**用 16 字节当嗅探窗口：HTTP 请求可能短于 16 字节，判定只依赖签名。）
- */
-const SNIFF_LIMIT_BYTES = Math.max(V1_SIGNATURE.length, V2_SIGNATURE.length);
-
-/**
  * 头阶段默认超时（毫秒）：从 accept 到「透传判定完成或头解析完成」的硬上限。
  * 设计对照：内层 headersTimeout=85s 是慢速 loris 的 HTTP 层防线，但它的计时起点
  * 在解析器收到首字节之后；头阶段在这之前，若不另设上限，「连接了但不发完整头」
@@ -459,7 +451,6 @@ module.exports = {
   V1_MAX_LINE_BYTES,
   V2_FIXED_HEADER_BYTES,
   V2_MAX_TOTAL_BYTES,
-  SNIFF_LIMIT_BYTES,
   DEFAULT_HEADER_TIMEOUT_MS,
   parseProxyProtocolHeader,
   createProxyProtocolFrontServer,

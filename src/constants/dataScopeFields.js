@@ -17,7 +17,9 @@
  * 而不是二选一（选任何一个都会让另一类人丢失本该可见的数据）。
  */
 
-const DATA_SCOPE_FIELDS = {
+// 声明处 Object.freeze（同目录 attackEvents/audit 的冻结纪律）：ownerField/departmentField
+// 是所有数据范围判定的唯一声明，被调用方原地改写会让各资源的可见范围口径悄悄分叉。
+const DATA_SCOPE_FIELDS = Object.freeze({
   device: {
     // createdBy：建档人；maintenanceRecord.operator：维护过该设备的人（数组字段）
     ownerField: ['createdBy', 'maintenanceRecord.operator'],
@@ -46,6 +48,6 @@ const DATA_SCOPE_FIELDS = {
     ownerField: 'createdBy',
     departmentField: 'department',
   },
-};
+});
 
 module.exports = { DATA_SCOPE_FIELDS };

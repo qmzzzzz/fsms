@@ -23,7 +23,8 @@
  * 【ip 口径】一律先 normalizeIP()：调用方应传 clientIpForSecurityDecision(req) 的结果；
  * 未识别/空 IP 一律判 false / 拒绝标记并计数——绝不把不可解析文本当键。
  *
- * env（模块内直读 + 默认值，不新增 config 注册）：
+ * env（判据时现读 + 默认值，不新增 config 注册；与 forensicCapture 同口径，
+ * 改开关不必重启、测试可逐用例改 env）：
  *   FORENSIC_TRIGGER_ENABLED  仅精确 'false' 关闭；其余值（含未配置）都为开；
  *   FORENSIC_TRIGGER_TTL_MS   滑动窗口时长，默认 1800000（30 分钟）；
  *   FORENSIC_TRIGGER_MAX_IPS  容量上限，默认 4096，超限按 LRU 淘汰。
@@ -39,16 +40,23 @@ const DEFAULT_TTL_MS = 30 * 60 * 1000; // 滑动窗口默认 30 分钟（env 可
 const DEFAULT_MAX_IPS = 4096; // 容量默认 4096（env 可覆盖）；超容按 LRU 淘汰
 const FAILURE_LOG_INTERVAL_MS = 60 * 1000; // 异常日志限频：单点异常不得把日志刷爆
 
-const ENABLED = process.env.FORENSIC_TRIGGER_ENABLED !== 'false'; // 仅精确 'false' 关（见文件头）
-const TTL_MS = readPositiveNumberEnv('FORENSIC_TRIGGER_TTL_MS', DEFAULT_TTL_MS, {
-  onInvalid: (name, raw, fallback) =>
-    logger.error(`取证触发 TTL 配置非法（${name}=${raw}），本次进程回落 ${fallback}ms`),
-});
-const MAX_IPS = readPositiveNumberEnv('FORENSIC_TRIGGER_MAX_IPS', DEFAULT_MAX_IPS, {
-  integer: true,
-  onInvalid: (name, raw, fallback) =>
-    logger.error(`取证触发容量配置非法（${name}=${raw}），本次进程回落 ${fallback}`),
-});
+// 开关与参数一律判据时现读（与 forensicCapture.isCaptureEnabled 同口径）：
+// 模块加载时一次性读死，测试无法逐用例改 env，运维改开关也必须重启进程。
+/** 每次判据现读开关：仅精确 'false' 关（见文件头） */
+const isEnabled = () => process.env.FORENSIC_TRIGGER_ENABLED !== 'false';
+/** 现读滑动窗口时长；非法配置当场回落默认并记错误日志 */
+const resolveTtlMs = () =>
+  readPositiveNumberEnv('FORENSIC_TRIGGER_TTL_MS', DEFAULT_TTL_MS, {
+    onInvalid: (name, raw, fallback) =>
+      logger.error(`取证触发 TTL 配置非法（${name}=${raw}），本次回落 ${fallback}ms`),
+  });
+/** 现读容量上限；非法配置当场回落默认并记错误日志 */
+const resolveMaxIps = () =>
+  readPositiveNumberEnv('FORENSIC_TRIGGER_MAX_IPS', DEFAULT_MAX_IPS, {
+    integer: true,
+    onInvalid: (name, raw, fallback) =>
+      logger.error(`取证触发容量配置非法（${name}=${raw}），本次回落 ${fallback}`),
+  });
 
 // 键 = normalizeIP 后的地址；值 = { ip, reason, source, evidence, ttlMs, markedAt, lastMarkedAt, expiresAt, seq }
 const marksByIp = new Map();
@@ -103,9 +111,9 @@ function evictOldest() {
   return true;
 }
 
-/** 单笔标记 TTL：显式传入须为正有限数，否则回落模块默认（非法入参不抛错） */
+/** 单笔标记 TTL：显式传入须为正有限数，否则回落现读默认（非法入参不抛错） */
 function pickTtl(ttlMs) {
-  return Number.isFinite(ttlMs) && ttlMs > 0 ? ttlMs : TTL_MS;
+  return Number.isFinite(ttlMs) && ttlMs > 0 ? ttlMs : resolveTtlMs();
 }
 
 /** 标记一个取证目标（命中即续期）。ip 须为 clientIpForSecurityDecision(req) 的结果；
@@ -117,7 +125,7 @@ function markForensicTarget(ip, options = {}) {
       counters.rejected += 1;
       return false;
     }
-    if (!ENABLED) return false;
+    if (!isEnabled()) return false;
     const now = Date.now();
     const ttlMs = pickTtl(options.ttlMs);
     const reason = typeof options.reason === 'string' ? options.reason : 'unspecified';
@@ -138,7 +146,7 @@ function markForensicTarget(ip, options = {}) {
     }
     if (existing) marksByIp.delete(key); // 已过期：按全新标记处理，不算续期
     pruneExpired(now);
-    while (marksByIp.size >= MAX_IPS) {
+    while (marksByIp.size >= resolveMaxIps()) {
       if (!evictOldest()) break;
     }
     seq += 1;
@@ -175,7 +183,7 @@ function isForensicTarget(ip) {
       counters.rejected += 1;
       return false;
     }
-    if (!ENABLED) return false;
+    if (!isEnabled()) return false;
     const rec = marksByIp.get(key);
     return !!rec && rec.expiresAt > Date.now();
   } catch (err) {
@@ -191,7 +199,7 @@ function isForensicTarget(ip) {
 function getForensicTarget(ip) {
   try {
     const key = normalizeIP(ip);
-    if (!key || !ENABLED) return null;
+    if (!key || !isEnabled()) return null;
     const rec = marksByIp.get(key);
     if (!rec) return null;
     if (rec.expiresAt <= Date.now()) {
@@ -243,9 +251,9 @@ function getForensicTriggerStats() {
     noteFailure(err); // 统计失败也必须可见，但绝不外抛
   }
   return {
-    enabled: ENABLED,
-    ttlMs: TTL_MS,
-    maxIps: MAX_IPS,
+    enabled: isEnabled(),
+    ttlMs: resolveTtlMs(),
+    maxIps: resolveMaxIps(),
     markedIps: countLive(now),
     marks: counters.marks,
     renewals: counters.renewals,

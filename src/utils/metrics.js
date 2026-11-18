@@ -447,6 +447,12 @@ module.exports = {
   _droppedSeries: droppedSeries,
   _auditDrops: auditDropMetrics._auditDrops,
   _seriesLimitWarned: seriesLimitWarned,
+  // —— 测试契约面（只读引用，勿改形状）——
+  // 以下两项被 src/tests/ci/honeypotDecoyMetricsShapeParity.test.js 作为门禁判据引用：
+  //   · _SERIES_STORES → 「标签域对拍」用例拿它对拍合成快照 series.dropped 的键域；
+  //   · _MAX_SERIES   → 「口径同源」用例拿它核对合成快照 series.limit 的上限口径。
+  // 重命名 / 移除 / 改语义都必须同步该门禁测试（该测试文件内亦有对应契约注记），
+  // 否则门禁会静默失明。
   _MAX_SERIES: MAX_SERIES,
   _SERIES_STORES: SERIES_STORES,
 };

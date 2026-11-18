@@ -178,6 +178,11 @@ const capProcessLogPush = (update) => {
   if (!update || typeof update !== 'object' || !update.$push || !update.$push.processLog) return;
   const entry = update.$push.processLog;
   if (entry && typeof entry === 'object' && !Array.isArray(entry) && Array.isArray(entry.$each)) {
+    // 批量 $push 与单条路径同口径收口：同样套 $slice 封顶，并按实际条数累加
+    // processLogCount。此前直接 return，$each 路径既不封顶也不计数，
+    // 未来调用方可借此绕过 200 条留痕上限。
+    update.$push.processLog = { $each: entry.$each, $slice: -PROCESS_LOG_CAP };
+    update.$inc = { ...(update.$inc || {}), processLogCount: entry.$each.length };
     return;
   }
   update.$push.processLog = {

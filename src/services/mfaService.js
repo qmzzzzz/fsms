@@ -37,10 +37,23 @@ const getRecoveryPepper = () => {
   }
 };
 
+// 退化必须可见（审计 2026-11-17 P3）：pepper 缺失时恢复码退化为无盐 sha256，
+// 「库泄露后离线枚举被 pepper 挡住」这层保护整个消失。按本仓纪律
+// （constants/failOpenSites.js：降级只写日志等于没有可告警信号），这里至少要留下
+// 可检索的运行时 warn；本进程只发一次，避免每个恢复码都刷一条同文日志。
+let pepperFallbackWarned = false;
+
 const hashRecoveryCode = (code) => {
   const pepper = getRecoveryPepper();
   if (pepper) {
     return crypto.createHmac('sha256', pepper).update(code, 'utf8').digest('hex');
+  }
+  if (!pepperFallbackWarned) {
+    pepperFallbackWarned = true;
+    logger.warn('恢复码摘要 pepper 缺失，退化为无盐 sha256（安全控制降级：HMAC_SECRET 未配置）', {
+      site: 'services/mfaService.js hashRecoveryCode',
+      degradation: 'recovery_pepper_missing',
+    });
   }
   return crypto.createHash('sha256').update(code, 'utf8').digest('hex');
 };

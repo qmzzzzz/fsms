@@ -518,6 +518,19 @@ const sanitizeSpreadsheetCell = (value) => {
   return /^[=+\-@\t\r\n]/.test(value) ? `'${value}` : value;
 };
 
+/** 缓存体统一摊平成普通对象：Mongoose 文档按引用共享时，任何调用方原地改写
+ * 返回值都会在 TTL 内污染该 sid 的全部后续请求。toObject 摊平后是纯数据
+ * （Date 保留为 Date），再经 shallowSessionCopy 逐请求分发。
+ * （测试可能注入无 toObject 的纯对象桩，这里兼容两种形态。） */
+const toSessionSnapshot = (doc) => {
+  if (!doc) return null;
+  return typeof doc.toObject === 'function' ? doc.toObject() : { ...doc };
+};
+
+/** 出栈浅拷贝：保护缓存体顶层字段不被调用方改写。嵌套对象当前无调用方触碰，
+ * 为认证热路径省去深拷贝成本——若未来调用方需要改嵌套结构，应自行拷贝。 */
+const shallowSessionCopy = (snapshot) => (snapshot ? { ...snapshot } : null);
+
 module.exports = {
   escapeRegExp,
   normalizePagination,
@@ -550,4 +563,6 @@ module.exports = {
   PASSWORD_MAX_LENGTH,
   BREACHED_PASSWORD_STEMS,
   normalizePasswordForBreachCheck,
+  toSessionSnapshot,
+  shallowSessionCopy,
 };

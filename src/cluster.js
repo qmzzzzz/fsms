@@ -12,8 +12,16 @@ hydrateSecretsFromFiles();
 
 const CLUSTER_WORKERS_MAX = 16;
 
+/** 严格整数解析：非纯整数格式（"3abc"、"3.7"、空白）一律 NaN。parseInt 的宽松
+ * 截断会把错配配置静默吞成看似合法的值（"3abc"→3 且不触发任何告警），
+ * 审计要求非法配置必须出声回落，不得带病采用。 */
+const parseStrictInt = (raw) => {
+  if (typeof raw !== 'string' || !/^[+-]?\d+$/.test(raw.trim())) return NaN;
+  return parseInt(raw, 10);
+};
+
 const resolveWorkerCount = () => {
-  const configured = parseInt(process.env.CLUSTER_WORKERS, 10);
+  const configured = parseStrictInt(process.env.CLUSTER_WORKERS);
   if (Number.isFinite(configured) && configured > 1) {
     return Math.min(configured, CLUSTER_WORKERS_MAX);
   }
@@ -26,7 +34,7 @@ const workerCount = resolveWorkerCount();
 const workerCountWarning = () => {
   const raw = process.env.CLUSTER_WORKERS;
   if (raw === undefined || String(raw).trim() === '') return null;
-  const configured = parseInt(raw, 10);
+  const configured = parseStrictInt(raw);
   if (!Number.isFinite(configured)) {
     return `CLUSTER_WORKERS="${raw}" 不是合法整数，已回落为单进程（1 个 worker）`;
   }
@@ -97,7 +105,7 @@ if (workerCount === 1) {
     setTimeout(() => {
       // 等待期间可能收到关停信号——不检查的话退避定时器会逆着 shutdown 再 fork 一个
       if (!shuttingDown) cluster.fork();
-    }, delayMs);
+    }, delayMs).unref(); // 与下方关停兜底定时器同口径：关停后不得拖住 primary 事件循环
   });
 
   const shutdown = (signal) => {
@@ -110,7 +118,14 @@ if (workerCount === 1) {
       worker.kill(signal);
     }
     // primary 自身不等 worker 排空完成（worker 的 gracefulShutdown 各自决定退出时机；等全部退出再退 primary 会把总关停时间拖成最慢 worker 的尾巴，且容器编排器的宽限期只看进程树是否结束）。留一个兜底定时器，防止个别 worker 卡死时 primary 永久驻留。
-    const graceMs = parseInt(process.env.CLUSTER_SHUTDOWN_GRACE_MS, 10);
+    // 与 CLUSTER_WORKERS 同口径：非纯整数格式出声回落默认宽限，不静默截断
+    const rawGrace = process.env.CLUSTER_SHUTDOWN_GRACE_MS;
+    const graceMs = parseStrictInt(rawGrace);
+    if (rawGrace !== undefined && String(rawGrace).trim() !== '' && !Number.isFinite(graceMs)) {
+      console.error(
+        `[cluster] 警告：CLUSTER_SHUTDOWN_GRACE_MS="${rawGrace}" 不是合法整数，已回落默认 10000ms`
+      );
+    }
     setTimeout(
       () => process.exit(0),
       Number.isFinite(graceMs) && graceMs > 0 ? graceMs : 10000

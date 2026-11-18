@@ -28,20 +28,30 @@ const { clientIpForSecurityDecision } = require('../utils/ipUtils');
 const { captureException, isSentryInitialized } = require('../middleware/sentry');
 
 /**
+ * 上报/发现端点的专属限流器工厂：三个限流器只有「共享 store 的命名空间」与「配额」不同，
+ * store/keyGenerator/handler 三份逐字复制正是「改一处漏两处」的温床（例如给 handler
+ * 补安全头时漏掉一个端点）。抽成单一工厂，产出与原先逐字一致。
+ * @param {string} name 共享 store 与限流键的命名空间（每端点独立计数）
+ * @param {number} max 窗口内允许的请求数
+ */
+const reportLimiterOf = (name, max) =>
+  rateLimit({
+    windowMs: 5 * 60 * 1000,
+    max,
+    store: makeSharedStore(name),
+    keyGenerator: (req) =>
+      `${name}:${ipKeyGenerator(normalizeRateLimitIp(clientIpForSecurityDecision(req)))}`,
+    standardHeaders: false,
+    legacyHeaders: false,
+    handler: (req, res) => setNoStore(res).status(429).end(),
+  });
+
+/**
  * CSP 上报专用限流：单 IP 5 分钟 60 条。
  * 上报由浏览器自动发起，一次页面加载可能连带多条违规，配额不能太紧；
  * 但该端点无认证且可被任意构造，必须限流以免成为日志放大器。
  */
-const cspReportLimiter = rateLimit({
-  windowMs: 5 * 60 * 1000,
-  max: 60,
-  store: makeSharedStore('csp-report'),
-  keyGenerator: (req) =>
-    `csp-report:${ipKeyGenerator(normalizeRateLimitIp(clientIpForSecurityDecision(req)))}`,
-  standardHeaders: false,
-  legacyHeaders: false,
-  handler: (req, res) => setNoStore(res).status(429).end(),
-});
+const cspReportLimiter = reportLimiterOf('csp-report', 60);
 
 /**
  * 上报体解析器：浏览器用 application/csp-report（Level 2）或
@@ -125,16 +135,7 @@ router.post('/csp-report', cspReportLimiter, cspReportParser, (req, res) => {
  * 前端每批最多 10 条、10 秒一轮节流，正常使用远达不到该配额；
  * 端点无认证，限流防日志放大与刷量。
  */
-const clientErrorLimiter = rateLimit({
-  windowMs: 5 * 60 * 1000,
-  max: 30,
-  store: makeSharedStore('client-errors'),
-  keyGenerator: (req) =>
-    `client-errors:${ipKeyGenerator(normalizeRateLimitIp(clientIpForSecurityDecision(req)))}`,
-  standardHeaders: false,
-  legacyHeaders: false,
-  handler: (req, res) => setNoStore(res).status(429).end(),
-});
+const clientErrorLimiter = reportLimiterOf('client-errors', 30);
 
 /** 上报条目类型白名单（与前端 errorReporter/webVitals 的 kind 对齐） */
 const CLIENT_ERROR_KINDS = new Set(['vue', 'window', 'resource', 'promise', 'vitals']);
@@ -226,6 +227,16 @@ const securityTxtCanonical = (req) => {
   return `${req.protocol}://${firstAllowed}/.well-known/security.txt`;
 };
 
+// 未配置 SECURITY_CONTACT_EMAIL 时，Contact 字段静默回落到占位符 security@example.com：
+// 占位地址收不到任何真实漏洞报告，等于对外宣告"没有联络渠道"。RFC 9116 里 Contact
+// 必填，行不能缺，所以保留回落；但启动期必须 warn 一次提醒生产显式配置。
+// 放在模块加载而非 buildSecurityTxt 内：按请求 warn 会把限流后的每次扫描都变成日志噪音。
+if (!securityTxtFieldValue(process.env.SECURITY_CONTACT_EMAIL)) {
+  logger.warn(
+    'SECURITY_CONTACT_EMAIL 未配置：security.txt 的 Contact 字段回落到占位符 security@example.com，生产环境应显式配置真实联络邮箱'
+  );
+}
+
 /**
  * security.txt 内容按请求动态生成（G10）
  *
@@ -258,16 +269,7 @@ const buildSecurityTxt = (req) => {
   return lines.join('\n');
 };
 
-const securityTxtLimiter = rateLimit({
-  windowMs: 5 * 60 * 1000,
-  max: 30,
-  store: makeSharedStore('security-txt'),
-  keyGenerator: (req) =>
-    `security-txt:${ipKeyGenerator(normalizeRateLimitIp(clientIpForSecurityDecision(req)))}`,
-  standardHeaders: false,
-  legacyHeaders: false,
-  handler: (req, res) => setNoStore(res).status(429).end(),
-});
+const securityTxtLimiter = reportLimiterOf('security-txt', 30);
 
 const serveSecurityTxt = (req, res) => {
   res.type('text/plain; charset=utf-8');

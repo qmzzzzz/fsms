@@ -8,7 +8,7 @@ const DEFAULT_LIMIT = 50;
 // 取证面板是按需点查（forensicController，挂 strictLimiter），不是常驻定时任务；30s 足够完成 24h 窗口聚合，超过即说明集合规模/索引出了问题，该报错而不是等。
 const AGGREGATE_MAX_TIME_MS = 30000;
 
-const state = { runs: 0, lastError: null };
+const state = { runs: 0, lastError: null }; // lastError=最近一次聚合失败的 {message,at}，覆盖式不累积、成功清零，getClusterStats 对外
 
 const cidrOf = (segment) => {
   if (typeof segment !== 'string' || !segment) return null;
@@ -33,25 +33,35 @@ async function clusterIpPools({
 } = {}) {
   const since = new Date(now.getTime() - windowMs);
   // 聚合预算（P3 收口）：$addToSet 全量指纹/IP 在热网段上是内存放大器，必须给 maxTimeMS 硬闸；allowDiskUse 显式为 false——跑飞的分析宁可大声失败（MaxTimeMSExpired）也不悄悄往磁盘溢写（与 auditChainVerify 的预算口径同族）。
-  const rows = await model.aggregate(
-    [
-      { $match: { createdAt: { $gte: since }, ipSegment: { $ne: '' } } },
-      {
-        $group: {
-          _id: '$ipSegment',
-          hits: { $sum: 1 },
-          ips: { $addToSet: '$ip' },
-          fps: { $addToSet: '$fingerprint' },
-          firstSeen: { $min: '$createdAt' },
-          lastSeen: { $max: '$createdAt' },
+  let rows;
+  try {
+    rows = await model.aggregate(
+      [
+        { $match: { createdAt: { $gte: since }, ipSegment: { $ne: '' } } },
+        {
+          $group: {
+            _id: '$ipSegment',
+            hits: { $sum: 1 },
+            ips: { $addToSet: '$ip' },
+            fps: { $addToSet: '$fingerprint' },
+            firstSeen: { $min: '$createdAt' },
+            lastSeen: { $max: '$createdAt' },
+          },
         },
-      },
-      { $match: { hits: { $gte: minHits } } },
-      { $sort: { hits: -1 } },
-      { $limit: limit },
-    ],
-    { maxTimeMS: AGGREGATE_MAX_TIME_MS, allowDiskUse: false }
-  );
+        { $match: { hits: { $gte: minHits } } },
+        { $sort: { hits: -1 } },
+        { $limit: limit },
+      ],
+      { maxTimeMS: AGGREGATE_MAX_TIME_MS, allowDiskUse: false }
+    );
+  } catch (e) {
+    state.lastError = {
+      message: String((e && e.message) || e).slice(0, 200),
+      at: new Date().toISOString(),
+    };
+    throw e;
+  }
+  state.lastError = null;
   state.runs += 1;
   const segments = rows.map((r) => {
     const cidr = cidrOf(r._id);

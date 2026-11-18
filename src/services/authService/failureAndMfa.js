@@ -12,7 +12,7 @@ const AuditLog = require('../../models/AuditLog');
 const { auditRequestContext } = require('../../models/auditLogWriteStatics');
 const { verifyTotpDetailed } = require('../../utils/totp');
 const { decryptMfaSecret } = require('../../utils/mfaSecret');
-const { applyLoginFailureCountAtomic } = require('./loginCounters');
+const { applyLoginFailureCountAtomic, applyAccountTempLock } = require('./loginCounters');
 const {
   isMfaLocked,
   recordMfaFailure,
@@ -137,7 +137,7 @@ async function verifyTotpChallenge(user, { mfaCode, mfaUser, username, ctx }) {
   if (!totpResult.valid || replayed) {
     logger.warn(`登录失败 - 两步验证码${replayed ? '重放' : '错误'}`, { username });
     // 原子递增 + 阈值锁定（与口令失败路径同口径；抽为共用 helper）
-    await incrementFailedLoginCount(user, { username, lockReason: 'MFA 失败累计' });
+    await incrementFailedLoginCount(user, { username, lockReason: 'MFA 失败累计', ctx });
     // 独立防爆破计数（6 位码空间小，必须有独立阈值）
     await recordMfaFailure(user);
     await AuditLog.record({
@@ -171,8 +171,6 @@ async function verifyRecoveryCodeChallenge(user, { mfaCode, username, ctx }) {
   const { ip, userAgent, fingerprint } = ctx;
   // 备用恢复码路径：格式 XXXX-XXXX，命中即消费（一次性）
   const normalized = mfaCode.toUpperCase().replace(/\s/g, '');
-  // 辅助函数：恢复码失败时统一记录（增量 failedLoginCount + MFA 独立计数），
-  // 与上方 6 位 TOTP 错误路径保持口径一致，消除"恢复码爆破不触发账户锁定"的逻辑漏洞
   // 恢复码失败统一记录（增量 failedLoginCount + MFA 独立计数 + 审计），
   // 与 6 位 TOTP 错误路径保持口径一致，消除「恢复码爆破不触发账户锁定」的漏洞
   const handleRecoveryFailure = (riskFactors, reason) =>
@@ -233,7 +231,7 @@ async function recordRecoveryFailure(
   riskFactors,
   reason
 ) {
-  await incrementFailedLoginCount(user, { username, lockReason: '恢复码验证失败累计' });
+  await incrementFailedLoginCount(user, { username, lockReason: '恢复码验证失败累计', ctx });
   await recordMfaFailure(user);
   await AuditLog.record({
     action: 'mfa_verify_failed',
@@ -261,7 +259,7 @@ async function recordRecoveryFailure(
  *
  * @returns {Promise<number>} 递增后的失败计数
  */
-async function incrementFailedLoginCount(user, { username, lockReason }) {
+async function incrementFailedLoginCount(user, { username, lockReason, ctx }) {
   // 与口令主路径同一条条件写：锁定刚过期时只允许第一个请求把计数重置为 1，
   // 其余并发请求 miss 后走 $inc，避免「并发失败全部写成 1、阈值永远到不了」。
   // 用 `$lte: now` 而不是精确快照：另一个请求已把 lockUntil 清空时也不命中，
@@ -271,24 +269,10 @@ async function incrementFailedLoginCount(user, { username, lockReason }) {
   if (newCount >= MAX_FAILED_LOGINS) {
     // 与 checkBruteForce 同一条纪律（本函数是第二条登录失败路径）：
     // 锁定写不进库时不得照常写下「账户临时锁定」——读日志的人会以为防线还在。
-    let lockApplied = true;
-    await User.findByIdAndUpdate(user._id, {
-      lockUntil: new Date(Date.now() + LOCK_DURATION_MS),
-    }).catch((err) => {
-      lockApplied = false;
-      logger.error(`账户临时锁定写入失败（防爆破防线未生效）：${err.message}`, { username });
-    });
-    if (lockApplied) {
-      // 与口令主路径同口径：锁定写入后失效认证缓存，避免旧 access token
-      // 在缓存 TTL（60s）内继续通过 lockUntil 校验。
-      const { invalidateUserCache } = require('../../middleware/auth');
-      invalidateUserCache(user._id);
-    }
-    logger.warn(`账户临时锁定（${lockReason}）`, {
-      username,
-      failedCount: newCount,
-      lockApplied,
-    });
+    // 落锁、缓存失效、日志与 account_temp_locked 审计收口到共享 helper，
+    // 与口令主路径（verifyPasswordOrTrackFailure）逐字段同构：此前本路径
+    // 漏写审计，合规检索会系统性漏掉 MFA/恢复码通道触发的锁定。
+    await applyAccountTempLock(User, user, { username, failedCount: newCount, lockReason, ctx });
   }
   return newCount;
 }

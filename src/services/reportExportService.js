@@ -102,7 +102,7 @@ const getExportSheetName = (type, lang) =>
 // 模型 + 排序 + populate + 字段裁剪配置（选择投影在查询阶段生效）
 //
 // 排序必须是**全序**，且与对应列表接口同序——这是仓库既有不变式，不是新约定：
-// FireAlarm.js:273 / Inspection.js:187 / AuditLog.js:343-350 三处都写明"排序键取值可重复
+// FireAlarm.js:278 / Inspection.js:187 / AuditLog.js:343-350 三处都写明"排序键取值可重复
 // ⇒ 必须有同向 `_id` 次级键"，并为此建了 `{key:-1,_id:-1}` 索引；列表侧
 // AlarmService.js:121、InspectionService.js:146、auditQueryService.js:156 用的就是它。
 // 导出原先只写 `{occurredAt:-1}` / `{planStartTime:-1}` / `{timestamp:-1}`，于是：

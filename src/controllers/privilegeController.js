@@ -9,8 +9,13 @@ const { safeFieldErrors } = require('../utils/validationRules');
 const ApiResponse = require('../utils/apiResponse');
 const { asyncHandler } = require('../middleware/errorHandler');
 const { normalizePagination } = require('../utils/helpers');
+const { PRIVILEGE_GRANT_STATUSES } = require('../constants/privilegeGrant');
 const privilegeGrantService = require('../services/privilegeGrantService');
 const accessReviewService = require('../services/accessReviewService');
+
+// ObjectId 形态（24 位十六进制）：PrivilegeGrant.userId 是 ObjectId 引用，
+// 命中才允许进服务层拼 Mongo 查询
+const OBJECT_ID_SHAPE_RE = /^[0-9a-fA-F]{24}$/;
 
 const failValidation = (req, res) => {
   const errors = validationResult(req);
@@ -83,9 +88,19 @@ const revokeGrant = asyncHandler(async (req, res) => {
 
 const listGrants = asyncHandler(async (req, res) => {
   const { page, limit } = normalizePagination(req.query.page, req.query.limit);
+  // 审计 2026-11-17 P3：status/userId 此前原样透传给服务层拼 Mongo 查询，唯一的
+  // 防线是路由层校验闸——闸被移除或本控制器被复用，`status[$ne]=`、`userId[$gt]=`
+  // 这类操作符注入就能直达 find()。这里在控制器层显式收敛：status 限定枚举白名单、
+  // userId 限定 ObjectId 形态；白名单/形态之外一律按「未传该筛选项」处理（undefined），
+  // 合法输入的行为不变。宁丢一个筛选项，不透传一个不可信形状。
+  const status = PRIVILEGE_GRANT_STATUSES.includes(req.query.status) ? req.query.status : undefined;
+  const userId =
+    typeof req.query.userId === 'string' && OBJECT_ID_SHAPE_RE.test(req.query.userId)
+      ? req.query.userId
+      : undefined;
   const { items, total } = await privilegeGrantService.listGrants({
-    status: req.query.status,
-    userId: req.query.userId,
+    status,
+    userId,
     page,
     limit,
   });

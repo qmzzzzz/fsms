@@ -102,8 +102,11 @@ const buildOutcomeUpdate = ({
     return IdempotencyRecord.deleteOne({ keyHash, state: 'in_progress', expiresAt });
   }
   if (!replayable) {
+    // 与上方非 2xx 的 deleteOne 同一道守卫：(keyHash, state='in_progress', expiresAt)
+    // 唯一指向「本次受理自己的认领」。本请求挂起超租约后同键请求可能已原子接管并收尾，
+    // 迟到的 2xx 收尾不得覆盖他人已完成的判据行（expiresAt 在接管时必然被重写，必不匹配）。
     return IdempotencyRecord.updateOne(
-      { keyHash },
+      { keyHash, state: 'in_progress', expiresAt },
       {
         $set: {
           state: 'completed',
@@ -117,7 +120,7 @@ const buildOutcomeUpdate = ({
     );
   }
   return IdempotencyRecord.updateOne(
-    { keyHash },
+    { keyHash, state: 'in_progress', expiresAt },
     {
       $set: {
         state: 'completed',
@@ -197,14 +200,17 @@ function captureOutcome(res, keyHash, replayBodyFilter = null, expiresAt) {
     streamed = true;
     return originalWrite(chunk, ...rest);
   };
-  res.end = (chunk, encoding) => {
+  // 首参命名、其余实参整体透传（与上方 write/send 同口径）：原生 end 的第三参数是
+  // 完成回调，拆成 (chunk, encoding) 两个形参会把它静默丢掉——依赖方传入的
+  // callback 永不执行，请求侧就此挂起。
+  res.end = (chunk, ...rest) => {
     if (streamed)
       settle('none'); // 流过 res.write 的响应体不可知 ⇒ 只记"已完成"，不假装能回放
     else if (chunk === null || chunk === undefined || typeof chunk === 'function')
       settle('text', '');
     else if (typeof chunk === 'string' || Buffer.isBuffer(chunk)) settle('text', chunk);
     else settle('none');
-    return originalEnd(chunk, encoding);
+    return originalEnd(chunk, ...rest);
   };
   // 最后一道保险：上面任何包装都没接住（例如框架内部直接交付）时，响应真的完成也必须留下结论
   res.once('finish', () => settle('none'));

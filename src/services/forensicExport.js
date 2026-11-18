@@ -13,14 +13,17 @@ const secretOf = (env = process.env) => env.FORENSIC_EXPORT_SECRET || env.AUDIT_
 
 const digestOf = (records) => sha256(canonicalJson(records));
 
-/** 签名材料把清单锚点也算进去：只签记录的话，把清单删了再重签就自洽了 */
-const materialOf = ({ version, exportedAt, count, digest, manifestRef }) =>
+/** 签名材料把清单锚点与导出归属（operator）都算进去：只签记录的话，把清单删了再重签就自洽了；
+ * 不签 operator 的话，任何持包者都能把导出归属改写成别人而签名照常通过（审计 2026-11-17 P3）。 */
+const materialOf = ({ version, exportedAt, count, digest, manifestRef, operator }) =>
   [
     String(version),
     exportedAt,
     String(count),
     digest,
     manifestRef && manifestRef.chainHash ? String(manifestRef.chainHash) : '-',
+    // 归属缺位统一落 '-'，避免 String(undefined) 这类字面量混进材料
+    operator === undefined || operator === null || operator === '' ? '-' : String(operator),
   ].join('|');
 
 function buildExport({
@@ -37,7 +40,14 @@ function buildExport({
   const exportedAt = now.toISOString();
   const count = records.length;
   const digest = digestOf(records);
-  const material = materialOf({ version: EXPORT_VERSION, exportedAt, count, digest, manifestRef });
+  const material = materialOf({
+    version: EXPORT_VERSION,
+    exportedAt,
+    count,
+    digest,
+    manifestRef,
+    operator,
+  });
   const signature = crypto.createHmac('sha256', secret).update(material, 'utf8').digest('hex');
   const keyId = sha256(secret).slice(0, 16);
   return {
@@ -74,6 +84,7 @@ function verifyExport({ pkg, secret = secretOf() } = {}) {
     count: pkg.count,
     digest,
     manifestRef: pkg.manifestRef,
+    operator: pkg.operator,
   });
   const expect = crypto.createHmac('sha256', secret).update(material, 'utf8').digest('hex');
   const a = Buffer.from(expect, 'utf8');

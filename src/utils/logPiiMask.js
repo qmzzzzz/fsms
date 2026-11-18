@@ -88,7 +88,9 @@ const STRUCTURAL_KEYS = new Set([
 /** 深拷贝的最大深度：日志 meta 再深就没有排障价值，而深递归会拖慢每条日志 */
 const MAX_DEPTH = 4;
 
-const MAX_NESTED_CHARS = 1024; // 与 logger.js 的 MAX_LOG_FIELD_CHARS 同值：嵌套字段也是字段
+// 日志字段长度上限的单一来源：logger.js 的普通字段封顶（MAX_LOG_FIELD_CHARS）与
+// 本模块的嵌套字段封顶共用此值——嵌套字段也是字段，两处各写一份必然漂移。
+const MAX_NESTED_CHARS = 1024;
 
 /**
  * 后缀判定（在闭合集之外补的一层）：覆盖 `x-api-key`、`dbPassword`、 `client_api_key` 这类带前缀的写法。
@@ -215,6 +217,7 @@ module.exports = {
   SENSITIVE_KEYS,
   STRUCTURAL_KEYS,
   TOKEN_SUFFIX_ALLOWLIST,
+  MAX_NESTED_CHARS, // 日志字段长度上限单一来源（logger.js 的字段封顶由此取值）
   isSensitiveKey,
   isMaskEnabled,
   maskPiiText,

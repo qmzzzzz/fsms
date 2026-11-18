@@ -261,7 +261,7 @@ const auditLogSchema = new mongoose.Schema(
       type: String,
       default: null,
       index: true,
-      sparse: true, // 同 prevHash：稀疏不省空间——写入点恒写 null（auditLogWriteStatics.js:62/64/145），实测 4000 行 null 32768B vs 缺键 8192B
+      sparse: true, // 同 prevHash：稀疏不省空间——写入点恒写 null（models/auditLogHooks.js 的 pre('save') 钩子里链计算失败兜底分支显式置 hash=null，其余经 schema 的写入走本字段的 default:null），实测 4000 行 null 32768B vs 缺键 8192B
     },
     hmac: {
       type: String,

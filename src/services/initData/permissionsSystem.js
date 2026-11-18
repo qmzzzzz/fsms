@@ -19,6 +19,10 @@ const systemPermissions = [
     // #9：查看他人敏感信息（手机号/邮箱全文）所需权限。本人查看免鉴权
     // （/api/security/view-sensitive 路由层 checkViewSensitivePermission 已按
     //  targetUserId 分派）；本权限授予 SECURITY_ADMIN 等需跨用户查看的角色。
+    // ⚠ 语义警示（审计 2026-11-17 P3）：code 字面上的 "read" 极易被当成普通的
+    // 「系统读取」权限批量授予，实际它授出的是「查看他人 PII 全文」这一高敏能力
+    // （唯一接口 /api/security/view-sensitive，需二次验证 + 层级闸 + 审计留痕）。
+    // 角色编辑页勾选本项前，请确认该角色确有跨用户查看他人手机号/邮箱全文的合规依据。
     name: '查看敏感信息',
     code: 'system:read',
     type: 'api',

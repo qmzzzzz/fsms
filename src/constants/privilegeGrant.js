@@ -2,7 +2,15 @@
 
 /** 临时权限授予（C-08）与特权操作双人复核（C-09）的取值与阈值 —— 单一事实来源。状态机单向：pending → active | rejected；active → revoked | expired；到期判定只认 expiresAt（读侧过滤），定时任务停摆时授权不会因此延长。 */
 
-const PRIVILEGE_GRANT_STATUSES = ['pending', 'active', 'rejected', 'revoked', 'expired'];
+// 共享取值/白名单按同目录冻结纪律（attackEvents/audit）在声明处 Object.freeze：
+// 这些数组被多个模块共同消费，任一调用方原地 push/splice 都会改掉全仓的判定口径。
+const PRIVILEGE_GRANT_STATUSES = Object.freeze([
+  'pending',
+  'active',
+  'rejected',
+  'revoked',
+  'expired',
+]);
 
 const MIN_GRANT_HOURS = 1;
 const MAX_GRANT_HOURS = 168; // 单次授予有效期上限（小时）= 7 天：超上限按上限裁剪，不报错也不静默放行
@@ -11,15 +19,29 @@ const MAX_GRANT_CODES = 20; // 单次授予条数上限：授予是例外通道�
 
 /** 高敏模块前缀：命中即需双人复核（两人不得同为申请人，且互不相同）。`pii` 于 2026-10-31（审计二-1）移入：通配 `pii:*` 覆盖 `pii:export`（未脱敏 PII 导出），按低敏走即单人签批、与 `system:read` 双人口径不自洽；
  * 粒度是**模块**：不为单条码开动作级例外，例外一开口，下一个 `pii:*` 动作码自动落回单人档。 */
-const HIGH_RISK_MODULES = ['user', 'role', 'permission', 'security', 'system', 'privilege', 'pii'];
+const HIGH_RISK_MODULES = Object.freeze([
+  'user',
+  'role',
+  'permission',
+  'security',
+  'system',
+  'privilege',
+  'pii',
+]);
 
 // 目录（services/initData）登记过的模块前缀 = 高敏 ∪ 低敏业务模块；A2 起高敏判定 fail-closed：模块取不到（`*:*` 的 `*`、空模块）或不在本清单（管理员自建模块）一律按高敏，不得降级成单人签批。
-const KNOWN_MODULES = [...HIGH_RISK_MODULES, 'device', 'alarm', 'inspection', 'report']; // 新增模块须同批登记到本清单（privilegeGrantFlow 的目录对账用例会红）
+const KNOWN_MODULES = Object.freeze([
+  ...HIGH_RISK_MODULES,
+  'device',
+  'alarm',
+  'inspection',
+  'report',
+]); // 新增模块须同批登记到本清单（privilegeGrantFlow 的目录对账用例会红）
 
 const REQUIRED_APPROVALS_HIGH_RISK = 2;
 const REQUIRED_APPROVALS_NORMAL = 1;
 
-const GRANT_LIST_FIELDS = [
+const GRANT_LIST_FIELDS = Object.freeze([
   '_id',
   'userId',
   'username',
@@ -39,7 +61,7 @@ const GRANT_LIST_FIELDS = [
   'revokeReason',
   'revokedAt',
   'revokedByName',
-]; // 列表/复核清单对外字段白名单：.select() 显式投影，模型加字段不会自动下发，要下发必须改这一行并同步契约用例；decidedByName/decidedAt/expiredAt 不进白名单（lead 裁决）：前端对三键零命中，时间线读的是 requestedAt/approvals[].at/grantedAt/revokedAt/expiresAt，「谁在何时决定」由 approvals[] 承载，真需要展示时必须同步加契约用例
+]); // 列表/复核清单对外字段白名单：.select() 显式投影，模型加字段不会自动下发，要下发必须改这一行并同步契约用例；decidedByName/decidedAt/expiredAt 不进白名单（lead 裁决）：前端对三键零命中，时间线读的是 requestedAt/approvals[].at/grantedAt/revokedAt/expiresAt，「谁在何时决定」由 approvals[] 承载，真需要展示时必须同步加契约用例
 
 /** 定期复核：生效超过该天数仍未复核 ⇒ 计入超期（季度口径） */
 const REVIEW_OVERDUE_DAYS = 90;

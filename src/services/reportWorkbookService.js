@@ -246,7 +246,15 @@ const writeExportWorkbook = async (
     'Content-Type',
     'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
   );
-  res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
+  // 中文表名只写 `filename=`（百分号编码）时，不识别编码的下载端会把 %E8%AE%BE… 当成
+  // 文件名本体展示成乱码；按 RFC 5987 补 `filename*=UTF-8''` 形态供现代浏览器取 UTF-8 名，
+  // 同时保留 ASCII `filename=` 兼容旧客户端。
+  res.setHeader(
+    'Content-Disposition',
+    `attachment; filename="${encodeURIComponent(filename)}"; filename*=UTF-8''${encodeURIComponent(
+      filename
+    )}`
+  );
 
   // 表头样式由写入器按 columns 自动施加：表头不再是"第 1 行的一个特例"，而是列定义的一部分。
   const workbook = createWorkbook({

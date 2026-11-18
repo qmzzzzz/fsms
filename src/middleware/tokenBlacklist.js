@@ -14,6 +14,10 @@ const { invalidateUserCache } = require('./userAuthCache');
 // 使用 SHA-256 哈希存储 token，防止数据库泄露后 token 被直接复用
 const hashToken = (token) => crypto.createHash('sha256').update(token).digest('hex');
 
+// exp 未知时的兜底入列窗口：MongoDB TTL 监控约每 60s 扫一轮，给足一个完整
+// 扫描周期，保证「无法确知有效期」的令牌至少在一个周期内被 isTokenBlacklisted 拒绝。
+const UNKNOWN_EXP_WINDOW_MS = 60 * 1000;
+
 /**
  * 将令牌加入黑名单（持久化到 MongoDB，存储哈希而非明文）
  *
@@ -32,6 +36,15 @@ const hashToken = (token) => crypto.createHash('sha256').update(token).digest('h
  * @throws {Error} code=BLACKLIST_PERSIST_FAILED 写入未确认
  */
 const blacklistToken = async (token, exp, reason = 'logout') => {
+  // exp 必须是有限数值（JWT 的 exp 为秒级数字）。缺失/NaN 时旧代码会放行下去：
+  // `NaN <= Date.now()` 恒 false 使过期守卫失效，`new Date(NaN)` 的 Invalid Date
+  // 又让 upsert 抛错，把「调用方传错参数」放大成 BLACKLIST_PERSIST_FAILED 告警
+  // 甚至登出失败。这里按 fail-closed 方向兜底：无法确知有效期的令牌以短窗入列
+  //（窗口到点由 TTL 回收），吊销意图至少生效一个扫描周期，而不是既不吊销、又误报告警。
+  if (!Number.isFinite(exp)) {
+    logger.debug(`blacklistToken 收到非有限 exp（${String(exp)}），按短窗入列兜底`, { reason });
+    exp = (Date.now() + UNKNOWN_EXP_WINDOW_MS) / 1000;
+  }
   const expiryMs = exp * 1000;
   // 已过期的令牌无需入库：它本身已不可用，写入只会徒增集合体积
   if (expiryMs <= Date.now()) return;

@@ -228,6 +228,12 @@ async function ticketJudgementRefusal({
   return null;
 }
 
+// 出票的受限并发度：requestBan 每张票要走 refusalOf 的数次串行 DB/快照往返，
+// MAX_BATCH=20 时逐条 await 最坏约 80 次往返，出票窗口被无谓拉长。各簇的判据与
+// 出票相互独立（票按 cidr 绑定、无共享写状态，仅模块级计数器累加），可安全并发；
+// 分块并发把在飞请求压在这个数内，结果仍按下标归位、保持入参顺序。
+const POOL_BAN_CONCURRENCY = 4;
+
 async function banRecommended({
   clusters,
   operator,
@@ -239,17 +245,26 @@ async function banRecommended({
   // 只认 recommendBan + rotate_pool：verdict=shared_egress 的簇照样拿票会误伤整栋楼
   const targets = (clusters || []).filter((c) => c.recommendBan && c.verdict === 'rotate_pool');
   if (!targets.length) return { ok: false, reason: null, empty: true };
-  const requested = [];
-  for (const c of targets.slice(0, MAX_BATCH)) {
-    const r = await requestBan({
-      cidr: c.cidr,
-      reason: reason || `ip_pool:${c.verdict}`,
-      operator,
-      operatorUsername,
-      operatorIp,
-      now,
+  const picked = targets.slice(0, MAX_BATCH);
+  const requested = new Array(picked.length);
+  for (let start = 0; start < picked.length; start += POOL_BAN_CONCURRENCY) {
+    const chunk = picked.slice(start, start + POOL_BAN_CONCURRENCY);
+    const settled = await Promise.all(
+      chunk.map(async (c) => {
+        const r = await requestBan({
+          cidr: c.cidr,
+          reason: reason || `ip_pool:${c.verdict}`,
+          operator,
+          operatorUsername,
+          operatorIp,
+          now,
+        });
+        return { segment: c.segment, ...r };
+      })
+    );
+    settled.forEach((item, i) => {
+      requested[start + i] = item;
     });
-    requested.push({ segment: c.segment, ...r });
   }
   return { ok: true, requested };
 }

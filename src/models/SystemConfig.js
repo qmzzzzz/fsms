@@ -20,7 +20,9 @@ const systemConfigSchema = new mongoose.Schema(
     // 布尔开关的可读性由 toConfigBoolean 负责，不要指望这里。
     valueType: {
       type: String,
-      enum: ['boolean', 'string', 'number', 'json'],
+      // 'null' 单列：set(null) 若落进 'string' 兜底，元数据会谎报值形态，
+      // 误导后台配置列表的展示与排查（读取侧仍不依赖本字段反序列化）
+      enum: ['boolean', 'string', 'number', 'json', 'null'],
       default: 'string',
     },
     // 配置描述
@@ -115,14 +117,18 @@ const findOneAndUpdateWithRetry = async (model, filter, update) => {
 
 // 静态方法：设置配置值
 systemConfigSchema.statics.set = async function (key, value, userId = null) {
+  // null 显式派生为 'null'，不得落进末尾的 'string' 兜底——把「无值」标成
+  // 「字符串」是元数据失真，后台配置列表会按错误形态展示
   const valueType =
     typeof value === 'boolean'
       ? 'boolean'
       : typeof value === 'number'
         ? 'number'
-        : typeof value === 'object' && value !== null
-          ? 'json'
-          : 'string';
+        : value === null
+          ? 'null'
+          : typeof value === 'object'
+            ? 'json'
+            : 'string';
 
   const update = { value, valueType };
   // 未传 userId 时从 $set 中剔除 updatedBy 键：

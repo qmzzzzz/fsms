@@ -11,7 +11,8 @@ const DEPTHS = { 0: [1, 2, 4, 8, 16], 2: [8, 16], 3: [1, 2, 4, 8], 4: [8, 16], 6
 const CHANNELS = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 };
 const AUX_LENGTHS = {
   sBIT: { 0: 1, 2: 3, 3: 3, 4: 2, 6: 4 },
-  bKGD: { 0: 2, 2: 6, 3: 1, 4: 2, 6: 6 },
+  // bKGD 调色板图（色型 3）按 PNG 规范是 2 字节背景索引（原写 1 字节，会把合法图拒掉）
+  bKGD: { 0: 2, 2: 6, 3: 2, 4: 2, 6: 6 },
   tRNS: { 0: 2, 2: 6, 3: 0 },
 };
 const SINGLE_CHUNKS = ['PLTE', 'tRNS', 'bKGD', 'sBIT', 'sRGB', 'gAMA', 'cHRM', 'pHYs', 'acTL'];
@@ -71,8 +72,28 @@ function absorbChunk(state, type, payload) {
     state.seen.add(type);
   }
   if (type === 'acTL') state.isAnimated = true;
-  if (type === 'PLTE') state.hasPalette = true;
+  // PLTE 条目数与 tRNS/bKGD 载荷先记账：三者与色型定长是两回事，交叉边界在
+  // assertPaletteAuxBounds 统一裁（tRNS 可能先于 PLTE 出现，逐 chunk 判会漏）
+  if (type === 'PLTE') {
+    state.hasPalette = true;
+    state.plteEntries = payload.length / 3;
+  }
+  if (type === 'tRNS') state.trnsLength = payload.length;
+  if (type === 'bKGD') state.bkgdPayload = payload;
   if (type === 'IDAT') state.idat.push(payload);
+}
+
+/** 调色板图 tRNS/bKGD 与 PLTE 条目数的交叉边界（审计 2026-11-17 P3）。
+ * PNG 规范语义：tRNS 每字节对应一个调色板条目的透明度，长度超过条目数即畸形；
+ * bKGD 是 2 字节背景索引，索引值落在调色板之外同样畸形。此前只查各自定长/字节上限，
+ * 畸形图放行后全靠下游解码器兜底。 */
+function assertPaletteAuxBounds(state) {
+  if (state.trnsLength !== undefined && state.trnsLength > state.plteEntries) {
+    throw new AvatarImageError('PNG tRNS 长度超出调色板条目数', 'PNG_MALFORMED');
+  }
+  if (state.bkgdPayload !== undefined && state.bkgdPayload.readUInt16BE(0) >= state.plteEntries) {
+    throw new AvatarImageError('PNG bKGD 背景索引越界', 'PNG_MALFORMED');
+  }
 }
 
 function scanChunks(buffer, colorType) {
@@ -150,6 +171,7 @@ function readPngMeta(buffer) {
   if (colorType === 3 && !state.hasPalette) {
     throw new AvatarImageError('PNG 调色板图缺少 PLTE（或 PLTE 在 IDAT 之后）', 'PNG_MALFORMED');
   }
+  if (colorType === 3) assertPaletteAuxBounds(state);
   assertIdatDecodable(state.idat, expectedRawSize(width, height, depth, colorType));
   return { width, height, hasMetadata: state.hasMetadata, isAnimated: state.isAnimated };
 }

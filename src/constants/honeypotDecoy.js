@@ -31,6 +31,7 @@ const { matchRoute, segmentsOf, TRAP_HANDLING } = require('./honeypotRouteTable'
 const { isReauthGated, reauthPayload } = require('./honeypotTicketGate'); // 缺票闸的声明与拒绝体单一来源：本文件被 errorCodePlaceholderDefault 的码槽现采点名（parts:['code']），字面量放这里会破闭，改由该叶给出调用（马甲的两个面共用同一份冻结体）
 const { ALARM_OPEN_STATUSES } = require('./honeypotDecoyListShape'); // 列表端点形状单一来源：S1 的「未终结档」从这里派生，别处不再抄一份枚举
 const { listPageOf, listQueryRejection } = require('./honeypotDecoyListQuery'); // 列表查询面（校验/过滤/分页）：非法查询必须回真实路由同一个 400 体，合法查询必须回真实控制器的分页信封
+const { MIN } = require('./honeypotDecoyShape'); // 分钟→毫秒换算与同族 honeypotDecoyShape 共用一份（纯函数叶子，无环）
 
 const countByStatus = (rows, status) => rows.filter((row) => row.status === status).length;
 
@@ -132,7 +133,7 @@ const materializeRow = (row, at) => {
     }
     const offset = offsetMinutesOf(value);
     out[key.slice(0, -OFFSET_SUFFIX.length)] =
-      offset === null ? null : new Date(base - offset * 60000).toISOString();
+      offset === null ? null : new Date(base - offset * MIN).toISOString();
   }
   return out;
 };

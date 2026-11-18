@@ -157,7 +157,9 @@ const noteCapReached = (scope) => {
  * 验证码条目写入共享层失败时的统一信号出口（log + 安全告警计数）。
  *
  * `sharedCache.set` 返回 false = 共享层没收到（未就绪/命令抛错），条目此刻只落在本进程
- * 内存回退里——本实例的 verify 仍可用，但 LB 把校验请求派到其他实例时条目查无此物
+ * 内存回退里——**仅在 Redis 停机窗口内**本实例的 verify 可用（窗口内 getDel 降级读内存
+ * 回退）；Redis 恢复后 getDel 走共享层 GETDEL、查无此键，**旧码即作废**。而 LB 把校验
+ * 请求派到其他实例时条目查无此物
  * ⇒ 用户拿着一张本实例才能过的验证码（降级方向：本实例 fail-open、跨实例 fail-closed）。
  * 门面在这条路径上只有 debug 日志（生产 info 不落盘），不留声就等于降级不可见——
  * 与上方 noteActiveBoundLost 同一条纪律。台账登记见 constants/failOpenSites.js
@@ -251,7 +253,14 @@ const generate = async ({ ip } = {}) => {
       entry,
       sharedCache.jitterTtl(CAPTCHA_TTL_MS)
     );
-    if (landed === false) noteIssueStoreDegraded();
+    if (landed === false) {
+      // 标记条目来源：只落在内存回退里的条目可能从未在 Redis 侧预占配额（生成时
+      // Redis 已不可用 ⇒ reserveRedisCapacity 走降级放行、没有 incr）。verify 据此
+      // 跳过 Redis 侧递减——否则 Redis 恢复后消费这类条目会误减其他用户的活跃配额。
+      // memStore 按引用存值，此处的后置标记对 verify 的降级读取可见。
+      entry.memOnly = true;
+      noteIssueStoreDegraded();
+    }
   } else {
     localStore.set(captchaId, { ...entry, expiresAt: Date.now() + CAPTCHA_TTL_MS });
     localIpCounts.set(ipKey, (localIpCounts.get(ipKey) || 0) + 1);
@@ -279,9 +288,15 @@ const verify = async (captchaId, inputText) => {
     // 评价报告低危项：原 get→del 两步在并发下同一验证码可被消费两次（双花）。改用原子取删 GETDEL（sharedCache.getDel）：取值与删除在同一命令内完成。
     const entry = await sharedCache.getDel(entryKey(captchaId)).catch(() => null);
     if (!entry) return false;
-    // 条目已离开存储 ⇒ 无论比对结果如何，都要归还它占用的双配额
-    await sharedCache.decrWithFloorZero(COUNT_KEY);
-    if (entry.ipKey) await sharedCache.decrWithFloorZero(entry.ipKey);
+    // 条目已离开存储 ⇒ 无论比对结果如何，都要归还它占用的双配额。
+    // 但只归还**确从 Redis 共享层取回**的条目：memOnly 条目来自生成期的内存回退，
+    // 递减的是别人的预占计数（floor 0 + TTL 只是缓解，护栏已被实际削弱）。
+    // 对「先 incr 成功、后 set 失败」抖动窗口里的 memOnly 条目，这里放弃递减、
+    // 让那一格预占交给 TTL 自愈——宁可短暂多计，不可误减他人。
+    if (!entry.memOnly) {
+      await sharedCache.decrWithFloorZero(COUNT_KEY);
+      if (entry.ipKey) await sharedCache.decrWithFloorZero(entry.ipKey);
+    }
     if (typeof entry.text !== 'string') return false;
     return String(inputText).trim().toLowerCase() === entry.text.toLowerCase();
   }

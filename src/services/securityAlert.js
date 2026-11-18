@@ -166,8 +166,11 @@ const checkBruteForce = async (username, ip, attribution = null) => {
     // `brute_force_user_<username>`（与下方 IP 维度路径的账户键同族、同一张表节流）：
     // 5 分钟窗口内同一账号只投一条，攻击持续也不放大投递量。payload 带
     // accountDimension:true，让接收端能把两个维度的撞库分开归因。
+    // 频控键用 usernameKey（cleanAuditUsername 归一）而不是原始 username：
+    // 大小写/前后空白变体若各占一个节流桶，同一账户的变体攻击可放大 webhook 投递量；
+    // 与上方计数键同尺（审计 2026-11-17 P3）。
     if (ipFailures < THRESHOLDS.bruteForceAttempts) {
-      if (shouldSendAlert(`brute_force_user_${username}`)) {
+      if (shouldSendAlert(`brute_force_user_${usernameKey}`)) {
         dispatchNotification(
           ALERT_TYPES.BRUTE_FORCE,
           ALERT_LEVELS.CRITICAL,
@@ -207,12 +210,14 @@ const checkBruteForce = async (username, ip, attribution = null) => {
     //     而 :279 照打「第 N 次」——运维以为阶梯在工作。
     // 通知是给人看的，处置是对系统做的，两者不该共用一个开关。
     //
-    // 键**内联**而非中间变量：键里同时含 username 与归一化 IP，两处各内联一次
+    // 键**内联**而非中间变量：键里同时含归一化 username 与归一化 IP，两处各内联一次
     // 才能保证"构造方式"只有一种（抽成变量反而要再抽一个函数，本文件 max-lines 已贴上限）。
+    // 账户键用 usernameKey 与上方账户维度路径同尺：原始 username 的大小写/空白变体
+    // 不得各占一个节流桶（同审计 2026-11-17 P3）。
     // `||` 的短路是有意的：账户维度 key 放行时不消费 IP 维度 key，两个维度各自计频，
     // 与修复前"任一放行即投递"的语义一致（改 `|` 会多消费一个 key ⇒ 抑制变强 ⇒ 行为回归）。
     if (
-      shouldSendAlert(`brute_force_user_${username}`) ||
+      shouldSendAlert(`brute_force_user_${usernameKey}`) ||
       shouldSendAlert(`brute_force_ip_${normalizedIp}`)
     ) {
       dispatchNotification(

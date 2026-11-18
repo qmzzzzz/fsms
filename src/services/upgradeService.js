@@ -363,6 +363,11 @@ function normalizeJob(raw, fallback = {}) {
 }
 
 function readJob(id) {
+  // 纵深防御（审计 2026-11-17 P3）：id 会被直接拼进文件路径。当前唯一外部入口
+  // （securityController/upgrade.js）已先过 isJobId 闸，但本函数是文件读取的最终边界
+  // ——一旦未来新增调用方漏校验，`../../etc/passwd` 这类 id 就成了任意文件读。
+  // 非法 id 按「查无此任务」快速失败（与 normalizeJob 的 null 语义一致）。
+  if (!isJobId(id)) return null;
   const fromStatus = normalizeJob(readJsonFile(path.join(upgradeConfig.statusDir, `${id}.json`)));
   if (fromStatus) return fromStatus;
 
@@ -370,10 +375,8 @@ function readJob(id) {
   const processing = normalizeJob(readJsonFile(processingFile), { id, state: 'running' });
   if (processing) return processing;
 
-  return normalizeJob(readJsonFile(path.join(upgradeConfig.requestsDir, `${id}.json`)), {
-    id,
-    state: 'queued',
-  });
+  const requestsFile = path.join(upgradeConfig.requestsDir, `${id}.json`);
+  return normalizeJob(readJsonFile(requestsFile), { id, state: 'queued' });
 }
 
 /**

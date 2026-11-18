@@ -23,7 +23,16 @@ const isHoneypotEnabled = (raw = process.env[HONEYPOT_ENABLED_ENV]) =>
 const isReservedHoneypotName = (normalized) =>
   normalized !== null && normalized === normalizeHoneypotUsername(getSuperAdminUsername()); // 超管名判据（安全不变量，先于运维意图）：生效名单永不含当前超管名——占用它等于把最高权限账户变成陷阱（其口令会被当诱饵判据、且在枚举面隐藏）
 
+// 解析结果按「env 原文 + 当前超管名」缓存：matchHoneypotName 的默认参数会调用本函数，
+// 而它在画像汇总等热路径被逐行调用（一次画像最多数千行），逐行重解析等于把同一份
+// 名单重复解析数千次。名单来自静态常量或 env，超管名判据又依赖 SUPER_ADMIN_USERNAME，
+// 缓存键必须同时含两者——任一变化自然落到新键，无需手工失效。
+const parseCache = new Map();
+
 function parseHoneypotUsernames(raw = process.env[HONEYPOT_USERNAMES_ENV]) {
+  const cacheKey = `${typeof raw === 'string' ? raw : ''}\u0000${getSuperAdminUsername()}`;
+  const cached = parseCache.get(cacheKey);
+  if (cached) return cached;
   const source = typeof raw === 'string' ? raw : ''; // 解析入口：默认名单、env 整份覆盖、空项记 errors、全无效回退默认，一律先过超管名判据
   const fromEnv = source.trim() !== '';
   const errors = [];
@@ -46,13 +55,22 @@ function parseHoneypotUsernames(raw = process.env[HONEYPOT_USERNAMES_ENV]) {
       names.push(normalized);
     }
   };
+  let usedFallback = false;
   collect(fromEnv ? source.split(',') : DEFAULT_HONEYPOT_USERNAMES);
   if (names.length === 0) {
+    usedFallback = true;
     errors.push('HONEYPOT_USERNAMES 无有效条目，已回退默认名单（不静默停用诱饵账户）');
     collect(DEFAULT_HONEYPOT_USERNAMES); // 回退路径同样过判据：否则「env 只写 admin」会绕开超管名剔除
-    return { names: Object.freeze(names), fromEnv: false, errors, dropped };
   }
-  return { names: Object.freeze(names), fromEnv, errors, dropped };
+  // 冻结返回值：缓存后多个调用方共享同一对象，防变异污染缓存（调用方现均只读）
+  const result = Object.freeze({
+    names: Object.freeze(names),
+    fromEnv: !usedFallback && fromEnv,
+    errors: Object.freeze(errors),
+    dropped: Object.freeze(dropped),
+  });
+  parseCache.set(cacheKey, result);
+  return result;
 }
 
 const matchHoneypotName = (username, names = parseHoneypotUsernames().names) => {

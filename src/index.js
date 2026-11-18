@@ -492,7 +492,8 @@ const startServer = async () => {
             `canaryWatch.init 意外拒绝（契约声明永不 reject，属双重保险层兜底）：${e && e.message ? e.message : e}`
           )
         );
-      reminderScheduler = startReminderScheduler(24 * 60 * 60 * 1000);
+      // 每日一次的到期扫描周期由 startReminderScheduler 的缺省值单源定义
+      reminderScheduler = startReminderScheduler();
 
       const secure = process.env.ENABLE_HTTPS === 'true';
       logger.info(`================================`);

@@ -211,7 +211,9 @@ const getDashboardData = async (userId) => {
   };
 
   if (dataScope.type === 'none') {
-    return { data: EMPTY_DASHBOARD, message: '获取仪表盘统计成功' };
+    // 空仪表盘同样遵守「出栈必拷贝」：EMPTY_DASHBOARD 是模块级共享常量，
+    // 原引用返回会让调用方对返回体的任何装饰改写永久污染这份缓存
+    return { data: cloneDashboardData(EMPTY_DASHBOARD), message: '获取仪表盘统计成功' };
   }
 
   const cacheKey = getDashboardCacheKey(userId, filters);

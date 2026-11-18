@@ -56,12 +56,21 @@ const productionSemantics = requiresProductionSemantics();
 // 生产走 json，JSON.stringify 会转义 \n 但**不转义** U+2028-U+202E / U+2066-U+2069
 // （Bidi 类，可篡改终端显示顺序），所以两种模式都需要这条，不是只补 dev。
 const MAX_LOG_MESSAGE_CHARS = 8192;
-const MAX_LOG_FIELD_CHARS = 1024;
+// 普通字段长度上限不在此处写死：与嵌套字段封顶共用 logPiiMask 的同一常量
+// （下方 require 处取值）——两处各写一份必漂移，掩码口径与截断口径会各说各话。
+// 崩溃堆栈例外：uncaughtException/unhandledRejection 落盘时，winston 会把 err.stack
+// 作为字符串字段（stack）传入本清洗器。若按普通字段的 1024 封顶，深调用栈
+// （async 链 + 中间件层）会被截掉大半，exceptions-*.log 只剩半截现场——与文件头
+// 「崩溃现场可追」的承诺相悖。放宽到 32KB：足以容纳远超常规深度的堆栈，同时仍
+// 封顶防单条日志无限膨胀；message 维持 8KB 截断防注入洪水，不受此放宽影响。
+const MAX_LOG_STACK_CHARS = 32768;
 // O-1（2026-10-26）：PII 掩码与凭据脱敏。判据与"哪些键算凭据"的完整理由见
 // utils/logPiiMask.js 头部注释——那里同时写明了**为什么不能**把掩码加到审计库上。
 // 位置在 stripControlChars **之后**：先按原长度截断再掩码，掩码后的文本只会更短，
 // 不会出现"截断把半掩的号码切成两截、正则再也认不出"的形状。
-const { maskLogInfo, isMaskEnabled } = require('./logPiiMask');
+const { maskLogInfo, isMaskEnabled, MAX_NESTED_CHARS } = require('./logPiiMask');
+// 字段长度上限的单一来源在 utils/logPiiMask.js：普通字段与嵌套字段同值同源
+const MAX_LOG_FIELD_CHARS = MAX_NESTED_CHARS;
 // 纯函数形态：winston format 只是它的一层包装。
 // 单独导出是为了能被确定性单元测试直接调用——走"真写文件再读回来"的断言
 // 依赖 daily-rotate 的异步落盘时序与本地时区文件名，实测在同机其它套件并发时
@@ -72,7 +81,9 @@ const sanitizeLogInfo = (info) => {
   }
   for (const [key, value] of Object.entries(info)) {
     if (key === 'message' || typeof value !== 'string') continue;
-    info[key] = stripControlChars(value, MAX_LOG_FIELD_CHARS);
+    // 堆栈字段用放宽后的上限（见 MAX_LOG_STACK_CHARS 的注释），其余字段照常 1024 封顶
+    const limit = key === 'stack' ? MAX_LOG_STACK_CHARS : MAX_LOG_FIELD_CHARS;
+    info[key] = stripControlChars(value, limit);
   }
   return maskLogInfo(info);
 };

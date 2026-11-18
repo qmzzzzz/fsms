@@ -193,8 +193,7 @@ const buildComplianceSection = async () => {
         typeof honeypotChainWatch.getHealth === 'function' ? honeypotChainWatch.getHealth() : null, // 蜜罐事件链巡检（services/honeypotChainWatch.js）的"每轮真在跑吗"读数：同 monitorHealth 口径的只读快照
       walEnabled:
         typeof auditBuffer.isWalEnabled === 'function' ? auditBuffer.isWalEnabled() : false,
-      // 审计导出没有运行期开关（路由恒挂载），所以这个键不携带信息量；
-      // 保留是为了不打破既有消费方，读它的人应当知道它恒为 true。
+      // 审计导出没有运行期开关（路由恒挂载），此键不携带信息量；保留只为不打破既有消费方（恒为 true）。
       exportEnabled: true,
       // F-215：原先写 `!!process.env.LOG_SHIPPING_URL`。那个表达式回答的是
       // "配过这么个变量"，不是"日志正在往 SIEM 送"：变量写成不可解析的串时
@@ -251,6 +250,10 @@ const buildComplianceSection = async () => {
       })(),
     };
   } catch (e) {
+    // 降级形态不变（面板不因单个子项故障整体 500），但必须留痕到能定位是哪个子查询出错
+    logger.error(
+      `合规指标块构建失败（compliance 降级为 {error}）：${(e && e.stack) || (e && e.message) || e}`
+    );
     return { error: '合规指标获取失败' };
   }
 };
@@ -293,8 +296,7 @@ const getSecurityOverview = asyncHandler(async (req, res) => {
     overview.compliance = await buildComplianceSection();
     return ApiResponse.success(res, overview, '获取成功');
   } catch (error) {
-    // 数据范围不可用（403 DATA_SCOPE_DENIED）必须原样上冒，理由同 getRecentAlerts：
-    // 包成 500 会把"这个账号没有可见范围"表现为"服务端故障"。
+    // 数据范围不可用（403 DATA_SCOPE_DENIED）必须原样上冒，理由同 getRecentAlerts：包成 500 会把"这个账号没有可见范围"表现为"服务端故障"。
     if (error.isApiError) throw error;
     logger.error(`安全概览查询失败: ${error.message}`);
     return ApiResponse.codeError(res, 'SECURITY_OVERVIEW_QUERY_FAILED');

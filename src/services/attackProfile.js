@@ -14,6 +14,9 @@ const AuditLog = require('../models/AuditLog');
 const ipListService = require('./ipListService');
 const { normalizeIP, ipQueryCondition, isPrivateOrLoopback } = require('../utils/ipUtils');
 const { summarizeRows } = require('./attackProfileSummary');
+// 与 attackEventQueryService / auditQueryService 同一预算口径：画像的 find + count
+// 扫的是同一张 AuditLog 大表，条件恶化到 COLLSCAN 时必须有明确超时，不能无限占用连接池。
+const { withListBudget, listCountOptions } = require('../utils/queryBudget');
 const {
   DEFAULT_WINDOW_HOURS,
   MAX_WINDOW_HOURS,
@@ -103,7 +106,7 @@ async function buildAttackProfile({
   };
 
   const [rows, containment] = await Promise.all([
-    AuditLog.find(condition)
+    withListBudget(AuditLog.find(condition))
       .select(PROFILE_FIELDS)
       .sort({ timestamp: -1, _id: -1 })
       .limit(MAX_PROFILE_ROWS)
@@ -118,7 +121,9 @@ async function buildAttackProfile({
 
   // 没打满行数上限时，取回条数就是命中总数：省掉一次 count 扫描
   const total =
-    rows.length < MAX_PROFILE_ROWS ? rows.length : await AuditLog.countDocuments(condition);
+    rows.length < MAX_PROFILE_ROWS
+      ? rows.length
+      : await AuditLog.countDocuments(condition, listCountOptions());
 
   const chronological = rows.reverse();
   const summary = summarizeRows({
