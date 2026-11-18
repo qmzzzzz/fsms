@@ -189,7 +189,16 @@ const secrets = {
   // 文件权限由写入循环统一收成 0600；容器内还会再复制到 tmpfs 并收紧到 0400
   // （MongoDB 拒绝 group/world 可读的 keyfile，而 docker secret 挂载是 0444）。
   mongo_keyfile: b64(512),
-  admin_initial_password: b64(24),
+  // 2026-11-17 审计（P2）：此值经 ADMIN_INITIAL_PASSWORD_FILE 注入后，生产语义下要过
+  // 应用侧口令强度闸（resolveInitialAdminPassword → validatePasswordStrength：
+  // ≥12 位且含大小写/数字/特殊字符）。旧口径 b64(24) 字符集仅 [A-Za-z0-9+/]，
+  // "特殊字符"只能靠 '+'/'/' 撞运气（约 36% 概率一个都没有）⇒ 标准部署约 1/3 概率
+  // 首启初始化即失败，模板自相矛盾。新口径（与 docker-compose.yml 头注释手抄配方同款）：
+  //   <base64(24) 主体 = 32 字符 / 192 位熵> + 'Aa1!' + <hex(8) = 16 字符 / 32 位熵>
+  // 'Aa1!' 借用应用侧 generateInitialAdminPassword 的四类字符标记，但放在**尾部**：
+  // 四类字符由它保证必然存在，随机主体在前，整串不以可预测前缀开头；
+  // 固定后缀不稀释熵（随机材料共 32 字节 = 224 位，高于 24 字节等效熵门槛）。
+  admin_initial_password: `${b64(24)}Aa1!${hex(8)}`,
   // Grafana 初始管理员口令：docker-compose.yml 的 grafana 服务经
   // GF_SECURITY_ADMIN_PASSWORD__FILE 指向 ./secrets/grafana_admin_password。
   // 此前本脚本不产出该文件，而 compose 的 secrets 段声明了它——
@@ -213,12 +222,23 @@ secrets.mongodb_uri =
   '@mongo:27017/fire_safety_db?authSource=fire_safety_db';
 
 // ================= 自检：全部满足 config/validate.js 的强度门槛 =================
+// admin 初始口令按应用侧口令策略自检：判据与 src/utils/helpers.js 的 PASSWORD_RULES
+// 保持同款（≥12 位 + 大小写/数字/特殊字符四类，特殊字符集 = PASSWORD_SPECIAL_REGEX
+// 的全部 ASCII 可打印标点；泄露表命中由随机性天然规避）。这是**冗余自检**——权威闸门
+// 在消费点 resolveInitialAdminPassword（src/services/initData/adminAccount.js）；
+// 策若变更两处需同步（与下方长度阈值对 config/validate.js 的关系同理）。
+// 刻意内联而非 require helpers：本脚本必须保持「拷出仓库、只配桩文件仍可运行」
+// 的自证能力（filePermissionEnforcementAndVerify 的前世版副本依赖这一点）。
+const adminPassword = secrets.admin_initial_password;
+const adminPasswordOk =
+  adminPassword.length >= 12 &&
+  [/[A-Z]/, /[a-z]/, /[0-9]/, /[!-/:-@[-`{-~]/].every((re) => re.test(adminPassword));
 const strengthChecks = [
   ['jwt_secret', secrets.jwt_secret.length >= 32],
   ['jwt_refresh_secret', secrets.jwt_refresh_secret.length >= 32],
   ['aes_secret_key', secrets.aes_secret_key.length >= 32],
   ['hmac_secret', secrets.hmac_secret.length >= 32],
-  ['admin_initial_password', secrets.admin_initial_password.length >= 16],
+  ['admin_initial_password', adminPasswordOk],
   ['grafana_admin_password', secrets.grafana_admin_password.length >= 16],
   ['redis_password', secrets.redis_password.length >= 16],
   ['mongo_app_password', secrets.mongo_app_password.length >= 32],

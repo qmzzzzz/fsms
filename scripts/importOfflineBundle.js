@@ -204,17 +204,20 @@ function resolveBundleDir(input, bundleRoot) {
   }
   let st;
   try {
-    st = fs.statSync(dir);
+    // lstat 不跟随符号链接（对齐 resolvePayload 的拒链，纵深防御）：包目录本身若是软链，
+    // statSync 会把「包外目录」当成包来验——manifest/payload 的路径判据虽都钉在
+    // resolve 后的目录上，但「包」这个根绝不该被换到别处。
+    st = fs.lstatSync(dir);
   } catch (err) {
     fail(`离线包目录不存在：${input}（${err.message}）`);
   }
-  if (!st.isDirectory()) {
+  if (st.isSymbolicLink()) fail(`离线包目录是符号链接（拒绝继续）：${input}——链接指向包外目录`);
+  if (!st.isDirectory())
     fail(
       `离线包必须是已解压的目录，而不是文件：${input}\n` +
         '  本导入器不自己解包——在升级链路上再实现一次安全解包，等于再开一条路径穿越面。\n' +
         '  请先解压，再对解压出来的目录执行导入。'
     );
-  }
   const manifestPath = path.join(dir, 'manifest.json');
   if (!fs.existsSync(manifestPath)) {
     fail(`离线包里没有 manifest.json：${path.join(input, 'manifest.json')}`);

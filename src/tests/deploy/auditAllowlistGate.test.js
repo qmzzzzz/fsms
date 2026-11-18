@@ -24,6 +24,7 @@
  */
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..', '..', '..');
@@ -206,7 +207,10 @@ describe('含 dev 审计门禁：判据可证伪且与允许清单一致', () =>
   });
 
   test('fail-closed：清单缺字段 / 日期格式错必须抛错，不得静默放行', () => {
-    const tmp = path.join(ROOT, '.audit-zzq-bad.json');
+    // 夹具写进每次独立的 mkdtemp 目录：仓库根固定文件名会污染工作区，
+    // 且并发 jest 进程下同名临时文件互相覆盖会偶发红
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-gate-'));
+    const tmp = path.join(dir, 'bad-allowlist.json');
     const write = (o) => fs.writeFileSync(tmp, JSON.stringify(o));
     try {
       write({ threshold: 'moderate', entries: [{ id: 'GHSA-x', reviewBy: '2027-01-31' }] });
@@ -219,7 +223,7 @@ describe('含 dev 审计门禁：判据可证伪且与允许清单一致', () =>
       write({ threshold: 'nope', entries: [] });
       expect(() => loadAllowlist(tmp)).toThrow(/threshold/);
     } finally {
-      fs.unlinkSync(tmp);
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 
@@ -280,7 +284,9 @@ describe('含 dev 审计门禁：判据可证伪且与允许清单一致', () =>
   // 变异实测：把 readReport 的 `if (!allowMissingDetails) throw` 改成无条件 return，
   // 或删掉 run() 里的 `report.detailsAcknowledgedMissing` 分支 ⇒ 下面两条同时红。
   test('CLI：缺明细的报告必须非 0（红先绿后的"红"就是这条）', () => {
-    const tmp = path.join(ROOT, '.audit-zzq-missing.json');
+    // 夹具写进每次独立的 mkdtemp 目录，避免仓库根固定文件名污染工作区/并发互撞
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-gate-'));
+    const tmp = path.join(dir, 'missing-details.json');
     fs.writeFileSync(tmp, JSON.stringify({ metadata: { vulnerabilities: { high: 3, total: 3 } } }));
     try {
       const r = spawnSync(process.execPath, [SCRIPT, '--report', tmp], {
@@ -292,7 +298,7 @@ describe('含 dev 审计门禁：判据可证伪且与允许清单一致', () =>
       // 修复前的形态是这一行；它是反向判据，必须消失
       expect(r.stdout).not.toContain('✅ 含 dev 依赖审计通过');
     } finally {
-      fs.unlinkSync(tmp);
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 
@@ -300,9 +306,10 @@ describe('含 dev 审计门禁：判据可证伪且与允许清单一致', () =>
     // 清单必须用空夹具而非现网文件：本条判的是「降级≠通过」，与现网登记了哪些条目无关。
     // 现网清单非空时，合成报告里没有对应公告 ⇒ 登记项被判「已陈旧」提前返回，
     // 走不到 WARN 分支，测试就会随登记状态漂移而误红（2026-11-03 实测）。
-    const tmpAllow = path.join(ROOT, '.audit-zzq-empty-allowlist.json');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-gate-'));
+    const tmpAllow = path.join(dir, 'empty-allowlist.json');
     fs.writeFileSync(tmpAllow, JSON.stringify({ threshold: 'moderate', entries: [] }));
-    const tmp = path.join(ROOT, '.audit-zzq-missing2.json');
+    const tmp = path.join(dir, 'missing2.json');
     fs.writeFileSync(tmp, JSON.stringify({ metadata: { vulnerabilities: { high: 3, total: 3 } } }));
     try {
       const r = spawnSync(
@@ -317,16 +324,16 @@ describe('含 dev 审计门禁：判据可证伪且与允许清单一致', () =>
       expect(r.stderr).toContain('WARN: --allow-missing-details');
       expect(r.stdout).toContain('计数自洽：否');
     } finally {
-      fs.unlinkSync(tmp);
-      fs.unlinkSync(tmpAllow);
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 
   test('CLI：自洽且无洞的真实形状仍判绿（防"堵假绿把真绿也堵了"）', () => {
     // 同上：清单用空夹具——本条判的是「零公告报告必须能绿」，不应随现网登记状态漂移。
-    const tmpAllow = path.join(ROOT, '.audit-zzq-empty-allowlist.json');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-gate-'));
+    const tmpAllow = path.join(dir, 'empty-allowlist.json');
     fs.writeFileSync(tmpAllow, JSON.stringify({ threshold: 'moderate', entries: [] }));
-    const tmp = path.join(ROOT, '.audit-zzq-clean.json');
+    const tmp = path.join(dir, 'clean.json');
     fs.writeFileSync(
       tmp,
       JSON.stringify({ metadata: { vulnerabilities: { total: 0 } }, vulnerabilities: {} })
@@ -340,8 +347,79 @@ describe('含 dev 审计门禁：判据可证伪且与允许清单一致', () =>
       expect(r.stdout).toContain('✅ 含 dev 依赖审计通过');
       expect(r.stdout).toContain('计数自洽：是');
     } finally {
-      fs.unlinkSync(tmp);
-      fs.unlinkSync(tmpAllow);
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // 2026-11-17 审计 P2：值旗标缺值原先静默取 undefined，`--today` 漏敲日期时
+  // `reviewBy < undefined` 恒 false，过期豁免整体 fail-open（实证：过期项被放行退出 0）。
+  test('CLI：--today/--report/--allowlist 缺值必须报用法错误退出 2（缺值绝不静默判定）', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-gate-'));
+    try {
+      // 夹具：一条已过期的登记项 + 与之对应的达阈值公告。
+      // 若缺值仍被静默放行，第一个用例会以 exit 0 通过（即被修掉的 fail-open 形态）。
+      const rep = path.join(dir, 'rep.json');
+      const al = path.join(dir, 'al.json');
+      fs.writeFileSync(
+        rep,
+        JSON.stringify({
+          metadata: { vulnerabilities: { moderate: 1, total: 1 } },
+          vulnerabilities: {
+            zzpkg: {
+              severity: 'moderate',
+              via: [
+                {
+                  source: 1,
+                  name: 'zzpkg',
+                  dependency: 'zzpkg',
+                  title: 't',
+                  url: 'https://github.com/advisories/GHSA-expired-test',
+                  severity: 'moderate',
+                  range: '<1',
+                },
+              ],
+            },
+          },
+        })
+      );
+      fs.writeFileSync(
+        al,
+        JSON.stringify({
+          threshold: 'moderate',
+          entries: [
+            {
+              id: 'GHSA-expired-test',
+              reviewBy: '2026-01-01',
+              reason: '临时夹具：已过期登记项，用于验证缺值不得放行',
+              reachability: '临时夹具',
+            },
+          ],
+        })
+      );
+      // 带值时同一夹具必须判红（证明红来自过期判据，而不是夹具无效）
+      const dated = spawnSync(
+        process.execPath,
+        [SCRIPT, '--report', rep, '--allowlist', al, '--today', '2026-11-18'],
+        { cwd: ROOT, encoding: 'utf8' }
+      );
+      expect(dated.status).toBe(1);
+      // 三种缺值形态：旗标在末尾 / 后跟另一面旗标 / 空内联值；--report 与 --allowlist 同查
+      const cases = [
+        ['--report', rep, '--allowlist', al, '--today'],
+        ['--report', rep, '--allowlist', al, '--today', '--allow-missing-details'],
+        ['--report', rep, '--allowlist', al, '--today='],
+        ['--report', rep, '--allowlist'],
+        ['--allowlist'],
+      ];
+      for (const args of cases) {
+        const r = spawnSync(process.execPath, [SCRIPT, ...args], { cwd: ROOT, encoding: 'utf8' });
+        expect(r.status).toBe(2);
+        expect(r.stderr).toContain('缺少值');
+        // 报错必须点名用户写的开关，而不是把 undefined 拼进文案
+        expect(r.stderr).not.toContain('undefined');
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 

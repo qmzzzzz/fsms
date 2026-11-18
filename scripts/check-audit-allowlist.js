@@ -280,6 +280,18 @@ function run({ reportFile, allowlistFile, today, allowMissingDetails = false }) 
 
 const registered = (r, a) => !r.offenders.includes(a);
 
+/** 值旗标缺值一律报用法错误（退出码 2），绝不静默按 undefined 判定：
+ * --today 缺值时 `reviewBy < undefined` 恒为 false，过期豁免整体 fail-open
+ * （2026-11-17 审计实证：过期项被放行、退出 0）。三种缺值形态都要拦：
+ * 旗标在末尾（value===undefined）、下一个 token 是另一面旗标（value 以 -- 开头）、
+ * `--flag=` 空内联值（value===''）。返回 null 表示不缺值。 */
+const missingValueError = (flag, value, inline) => {
+  if (flag !== '--report' && flag !== '--allowlist' && flag !== '--today') return null;
+  if (value === undefined || value === '' || (inline === undefined && value.startsWith('--')))
+    return `参数 ${flag} 缺少值：请写成 ${flag} <值>（如 --today 2026-11-18、--report .audit-all.json）。缺值会静默改变判定方向，拒绝执行`;
+  return null;
+};
+
 function parseArgs(argv) {
   const opts = {
     reportFile: '.audit-all.json',
@@ -295,6 +307,8 @@ function parseArgs(argv) {
     const flag = eq === -1 ? argv[i] : argv[i].slice(0, eq);
     const inline = eq === -1 ? undefined : argv[i].slice(eq + 1);
     const value = inline !== undefined ? inline : argv[++i];
+    const missing = missingValueError(flag, value, inline);
+    if (missing) return { error: missing };
     // 报错时要点名**用户写的那个开关**：`++i` 之后 argv[i] 已是下一个参数（或 undefined），
     // 用它拼消息会打出「未知参数：undefined」——一条读了也不知道该改哪里的错误。
     const written = inline !== undefined ? flag : argv[i - 1];

@@ -89,13 +89,20 @@ describe('高熵密钥必须判强（防「修完反而起不来」）', () => {
   // 样本取自 scripts/generate-secrets.js 的实际生成方式：
   //   jwt/refresh = randomBytes(48).toString('base64')  → 64 字符
   //   aes/hmac    = randomBytes(32).toString('hex')     → 64 字符
-  //   admin 初始口令 = randomBytes(24).toString('base64') → 32 字符
+  //   admin 初始口令 = base64(24) 主体 + 'Aa1!' + hex(8) → 52 字符、保证大小写/
+  //     数字/特殊字符四类齐全。旧口径 randomBytes(24).toString('base64') 仅 32 字符
+  //     且缺特殊字符，过不了应用侧口令策略，已被该脚本弃用；base64 主体本身仍是
+  //     高熵样本，「无特殊字符但熵足须放行」的边界由 jwt 的 b64(48) 采样继续覆盖。
   // 与 .env.example 注释给出的 `openssl rand -hex 16`（32 字符）——
   // 这是本函数必须放行的最弱合法形式，阈值 2.0 bit/char 就是按它定的。
   const generators = [
     ['randomBytes(48).base64（JWT 默认）', () => crypto.randomBytes(48).toString('base64')],
     ['randomBytes(32).hex（AES/HMAC 默认）', () => crypto.randomBytes(32).toString('hex')],
-    ['randomBytes(24).base64（初始口令）', () => crypto.randomBytes(24).toString('base64')],
+    [
+      'base64(24)+Aa1!+hex(8)（admin 初始口令，generate-secrets.js 现行配方）',
+      () =>
+        `${crypto.randomBytes(24).toString('base64')}Aa1!${crypto.randomBytes(8).toString('hex')}`,
+    ],
     ['randomBytes(16).hex（openssl rand -hex 16）', () => crypto.randomBytes(16).toString('hex')],
   ];
 

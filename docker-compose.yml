@@ -1008,7 +1008,12 @@ services:
 #   # '/' ':' '#' '?' 直接抛 "Password contains unescaped characters" ⇒ 应用启动即退出。
 #   # 熵不变（两者都是 32 字节随机数），只是编码换 URL 安全集。
 #   openssl rand -hex 32     | tr -d '\n' > ./secrets/mongo_app_password
-#   openssl rand -base64 24 | tr -d '\n' > ./secrets/admin_initial_password
+#   # admin_initial_password（2026-11-17 审计 P2）：该值经 ADMIN_INITIAL_PASSWORD_FILE
+#   # 注入后要过应用侧口令强度闸（≥12 位且含大小写/数字/特殊字符）。纯 base64 约
+#   # 36% 概率不含任何特殊字符、过不了闸 ⇒ 首启初始化失败。与 generate-secrets.js
+#   # 同口径：base64(24) 主体（192 位熵）在前，'Aa1!' 四类标记与 hex(8) 随机段在后。
+#   printf '%sAa1!%s' "$(openssl rand -base64 24 | tr -d '\r\n')" \
+#     "$(openssl rand -hex 8 | tr -d '\r\n')" > ./secrets/admin_initial_password
 #   openssl rand -base64 32 | tr -d '\n' > ./secrets/grafana_admin_password
 #   # /metrics 鉴权令牌（2026-10-24 审计）：app 侧 METRICS_TOKEN_FILE，
 #   # Prometheus 侧 bearertoken 读取同一份文件。
