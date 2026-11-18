@@ -139,7 +139,7 @@ const ensureIndex = async (db, { coll, name, key }, label) => {
       );
     }
   }
-  await db.collection(coll).createIndex(key, { name, background: true });
+  await db.collection(coll).createIndex(key, { name });
   console.log(`${coll}.${name} 已创建${label ? `（${label}）` : ''}`);
 };
 
@@ -165,13 +165,13 @@ module.exports = {
   async down(db) {
     for (const { coll, name, oldKey } of DROP_ONLY) {
       if (!(await getIndex(db, coll, name))) {
-        await db.collection(coll).createIndex(oldKey, { name, background: true });
+        await db.collection(coll).createIndex(oldKey, { name });
         console.log(`${coll}.${name} 已按旧形态建回`);
       }
     }
     for (const { coll, name, oldName, oldKey } of REPLACE_SINGLE) {
       if (!(await getIndex(db, coll, oldName))) {
-        await db.collection(coll).createIndex(oldKey, { name: oldName, background: true });
+        await db.collection(coll).createIndex(oldKey, { name: oldName });
         console.log(`${coll}.${oldName} 已按旧形态建回`);
       }
       await dropIndexIfExists(db, coll, name);

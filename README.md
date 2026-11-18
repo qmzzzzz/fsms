@@ -455,7 +455,7 @@ npm run validate         # 独立校验环境配置（读当前 shell 的 env；
                          #   docker compose exec -T app npm run validate——compose 只往容器注入 *_FILE，
                          #   宿主机 shell 里这些变量是空的，在宿主机跑会得到"缺密钥"的红）
 npm run lint:ratchet     # ESLint 棘轮（复杂度/行数只许降不许升）；format:check 为 Prettier 检查——均为 CI 硬门禁
-npm run security:audit   # 后端/前端生产依赖审计（high 及以上）+ 含 dev 的根目录审计 + strict 合规检查
+npm run security:audit   # 后端/前端生产依赖审计（moderate 及以上，--audit-level=moderate）+ 含 dev 的根目录审计 + strict 合规检查
 npm run security:audit:backend:prod   # 仅后端生产依赖（忽略 devDependencies）
 npm run security:audit:frontend:prod  # 仅 web-admin 生产依赖（忽略 devDependencies）
 npm run security:audit:all            # 后端/前端生产依赖 + 根目录完整依赖审计
@@ -475,7 +475,7 @@ MONGODB_URI_FILE=./secrets/mongodb_uri ./scripts/backup-mongo.sh
 
 # 默认产出加密归档 .gz.gpg + sha256 校验和；密钥/异地副本配置见 deployment/backup-encryption.md
 # 容器化部署时对卷数据定时备份（宿主机 crontab 示例，每日 02:00）：
-# 0 2 * * * cd /opt/xf && MONGODB_URI_FILE=./secrets/mongodb_uri ./scripts/backup-mongo.sh >> logs/backup.log 2>&1
+# 0 2 * * * cd /opt/fsms && MONGODB_URI_FILE=./secrets/mongodb_uri ./scripts/backup-mongo.sh >> logs/backup.log 2>&1
 # 注意 cron 跑在**宿主机**：路径写 ./secrets/<name>，写 /run/secrets/<name> 读不到（那是容器内挂载点）。
 # 明文串写进 crontab 也别用——凭据轮换后那行会静默失效，而 cron 的 stderr 没人看。
 ```

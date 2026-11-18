@@ -103,9 +103,7 @@ module.exports = {
         );
       }
     }
-    await db
-      .collection(COLLECTION)
-      .createIndex(KEY, { collation: COLLATION, background: true, name: INDEX_NAME });
+    await db.collection(COLLECTION).createIndex(KEY, { collation: COLLATION, name: INDEX_NAME });
     console.log(`${INDEX_NAME} 已创建（collation en/strength=2）`);
   },
 

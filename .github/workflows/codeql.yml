@@ -12,6 +12,9 @@ jobs:
   analyze:
     name: Analyze
     runs-on: ubuntu-latest
+    # 挂死保护（2026-11-18 审计 B）：CodeQL 全量分析实测分钟级，60 分钟为宽上限；
+    # 不设 timeout 的 job 挂住时会一直占着 runner。
+    timeout-minutes: 60
     # 本行判据是 2026-09-11 立下的：当时本仓是私有仓、未开通 code scanning
     # （GitHub Advanced Security），CodeQL 的分析本身能完整跑完，但 SARIF 上传会被拒——
     #   "Code scanning is not enabled for this repository. Please enable code

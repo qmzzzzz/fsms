@@ -34,6 +34,9 @@ jobs:
   drill-recency:
     name: 恢复演练时效（每季度至少一次）
     runs-on: ubuntu-latest
+    # 挂死保护（2026-11-18 审计 B）：本 job 只读一个 markdown 判日期，秒级完成；
+    # 15 分钟为宽上限，不设 timeout 的 job 挂住会一直占着 runner。
+    timeout-minutes: 15
 
     steps:
       # persist-credentials: false：本流程没有任何 git push 步骤，

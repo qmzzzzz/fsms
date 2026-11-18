@@ -123,7 +123,7 @@ prepare_upgrade_queue() {
       ;;
   esac
   case "$QUEUE_DIR" in
-    / | /var | /var/lib | /var/log | /etc | /etc/* | /usr | /usr/* | /home | /home/* | /root | /root/* | /tmp | /run)
+    / | /var | /var/lib | /var/log | /etc | /etc/* | /usr | /usr/* | /home | /home/* | /root | /root/* | /tmp | /run | /opt | /srv | /boot | /bin | /lib | /proc | /sys | /dev)
       echo "app-entrypoint: 警告：UPGRADE_QUEUE_DIR 指向系统目录，已跳过权限适配：$QUEUE_DIR" >&2
       return 0
       ;;

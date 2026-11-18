@@ -96,9 +96,11 @@ cd /d "%~dp0web-admin"
 
 if not exist "node_modules\" (
     echo [提示] 首次运行，安装前端依赖（可能需要几分钟）...
-    call npm install
+    REM 用 npm ci 而不是 npm install：前端有 package-lock.json，ci 严格按锁文件
+    REM 安装，不会把解析差异写回锁文件弄脏工作区（install 可能顺手改锁文件）。
+    call npm ci
     if errorlevel 1 (
-        echo [错误] 前端依赖安装失败，请检查网络后手动执行 npm install
+        echo [错误] 前端依赖安装失败，请检查网络后手动执行 npm ci
         pause
         exit /b 1
     )

@@ -131,7 +131,7 @@ module.exports = {
             );
           }
         }
-        await collection.createIndex(key, { name, background: true });
+        await collection.createIndex(key, { name });
         console.log(coll + '.' + name + ' 已创建（替换 ' + oldName + '）');
       }
       // 旧索引只有在新索引确认在场后才删：删早了等值块内就又只剩阻塞排序
@@ -142,7 +142,7 @@ module.exports = {
   async down(db) {
     for (const { coll, name, oldName, oldKey } of REPLACE) {
       if (!(await getIndex(db, coll, oldName))) {
-        await db.collection(coll).createIndex(oldKey, { name: oldName, background: true });
+        await db.collection(coll).createIndex(oldKey, { name: oldName });
         console.log(coll + '.' + oldName + ' 已按旧形态建回');
       }
       await dropIndexIfExists(db, coll, name);

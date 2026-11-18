@@ -120,7 +120,7 @@ module.exports = {
             );
           }
         }
-        await collection.createIndex(KEY, { background: true });
+        await collection.createIndex(KEY);
         console.log(`${coll}.${compoundName(field)} 已创建`);
       }
 
@@ -138,7 +138,7 @@ module.exports = {
 
       await dropIndexIfExists(db, coll, compoundName(field));
       if (replaceSingle && !(await getIndex(db, coll, singleName(field)))) {
-        await collection.createIndex({ [field]: -1 }, { background: true });
+        await collection.createIndex({ [field]: -1 });
         console.log(`${coll}.${singleName(field)} 已按旧形态建回`);
       }
     }

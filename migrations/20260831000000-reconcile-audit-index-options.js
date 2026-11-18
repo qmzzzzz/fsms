@@ -13,7 +13,9 @@
  *
  * 处理：
  *   - TTL 用 collMod 原地生效（MongoDB 支持，无需重建）；
- *   - sparse 无法原地变更，采用「删除重建」（后台构建，低峰执行）。
+ *   - sparse 无法原地变更，采用「删除重建」（低峰执行；mongod 8.0 起
+ *     createIndex 的 background 选项已被服务端忽略为 no-op，索引构建一律
+ *     由服务端统一调度，不存在"后台构建"可指定）。
  * 幂等：逐项先读现有选项，已一致则跳过。
  *
  * 回滚（down）：恢复为无选项索引。注意 TTL 回滚即停止留存策略自动清理；
@@ -74,7 +76,7 @@ module.exports = {
         continue;
       }
       if (idx) await coll.dropIndex(name);
-      await coll.createIndex(key, { sparse: true, background: true });
+      await coll.createIndex(key, { sparse: true });
       console.log(`${name} 已重建为 sparse 索引`);
     }
   },
@@ -86,7 +88,7 @@ module.exports = {
     const tsIdx = await getIndex(db, 'timestamp_-1');
     if (tsIdx && tsIdx.expireAfterSeconds !== undefined) {
       await coll.dropIndex('timestamp_-1');
-      await coll.createIndex({ timestamp: -1 }, { background: true });
+      await coll.createIndex({ timestamp: -1 });
       console.log('timestamp_-1 已回滚为无 TTL 索引（留存策略停止自动清理）');
     }
 
@@ -97,7 +99,7 @@ module.exports = {
       const idx = await getIndex(db, name);
       if (idx && idx.sparse === true) {
         await coll.dropIndex(name);
-        await coll.createIndex(key, { background: true });
+        await coll.createIndex(key);
         console.log(`${name} 已回滚为普通索引`);
       }
     }

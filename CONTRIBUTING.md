@@ -6,7 +6,7 @@
 
 | 依赖    | 版本                             | 说明                                                                        |
 | ------- | -------------------------------- | --------------------------------------------------------------------------- |
-| Node.js | ≥22.12.0（建议 22，CI 另测 24）  | `package.json` / `web-admin/package.json` 的 `engines` 与 Dockerfile 同口径 |
+| Node.js | ≥22.12.0（CI 矩阵测 22/24/26，生产镜像 node:26.12.0-alpine） | `package.json` / `web-admin/package.json` 的 `engines` 与 Dockerfile 同口径 |
 | MongoDB | 8.0（镜像钉 8.0.34；6.0 已 EOL） | 本地需先启动（`net start MongoDB`）；升级须逐级 6.0 → 7.0 → 8.0             |
 | npm     | 随 Node                          | 后端在根目录、前端在 `web-admin/`                                           |
 

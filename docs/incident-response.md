@@ -19,7 +19,7 @@
 
 - **审计页** `GET /api/security/audit-logs`（按 action/riskLevel 过滤）：`rate_limit_abuse`、
   `login_failed` 激增、`view_sensitive_data` 异常、`bulk_data_export`；
-- **告警通道**：Alertmanager webhook（告警规则见 `observability/alert-rules.yml`，
+- **告警通道**：Alertmanager webhook（告警规则见 `deployment/observability/alert-rules.yml`，
   接收端未配置 = 触达链路断开，部署前置校验会拦——见 D-1 Top-2）；
 - **指标**：`security_alerts_total`、`audit_records_dropped_total`、`readyz_verdict`；
 - **护栏失效信号**：`SecurityFailOpenSustained`（`security_alerts_total{type=~"ip_blacklist_failopen|ratelimit_store_degraded|captcha_active_bound_lost|captcha_switch_db_fallback"}`

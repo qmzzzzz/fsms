@@ -21,6 +21,9 @@ permissions:
 jobs:
   dependency-review:
     runs-on: ubuntu-latest
+    # 挂死保护（2026-11-18 审计 B）：本 job 只做 graph 可用性探测 + 依赖 diff 比对，
+    # 实测分钟级；10 分钟为宽上限，不设 timeout 的 job 挂住会一直占着 runner。
+    timeout-minutes: 10
     steps:
       # dependency-review 依赖仓库的 Dependency graph。此前不可用只 warning + skip：
       # 一次账号级开关变化就能让供应链门禁静默变成"永远通过"。现在改为 fail-closed——

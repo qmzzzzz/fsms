@@ -155,6 +155,11 @@ WORKDIR /app
 # 安装 dumb-init 处理信号 + tzdata 时区支持
 # su-exec：入口脚本把 file secret 复制/收紧/改属主后，用它降回 nodejs。
 # 不用 gosu/setpriv：Alpine 官方仓库里 su-exec 最小，且只做 setgroups+setuid/setgid。
+# 【已知边界（2026-11-17 审计）】这里未钉 pkg=ver 版本：钉扎必须对应 node:26.12.0-alpine
+# 基础镜像的确切 Alpine 发行版（26 变体有 alpine3.23/alpine3.24 两个候选），版本查错会让
+# apk add 直接构建失败，比「同 digest 不同构建时间最终层漂移」的 P3 风险更重，故保持不钉。
+# 要钉时：先 docker run --rm node:26.12.0-alpine apk info -e dumb-init tzdata su-exec
+# 确认基础镜像，再按 `apk info` 输出的精确版本改写为 dumb-init=X.Y.Z-rN 形态并跑一次构建。
 RUN apk add --no-cache dumb-init tzdata su-exec
 
 # 创建非 root 用户

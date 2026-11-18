@@ -10,6 +10,15 @@ on:
   pull_request:
     branches: [main, develop]
 
+# 并发去重（2026-11-18 审计 B）：同一 ref 连续 push / 强推时取消仍在跑的旧 run，
+# 不让过时提交继续烧 runner、也不在队列里堆重复作业。group 按 ref 天然分组：
+# 分支 push 是 refs/heads/*，tag push 是 refs/tags/v*，PR 是 refs/pull/N/merge——
+# 不同 PR / 不同 tag 互不干扰。CI 是纯校验链，被取消的旧 run 没有半程状态要保护，
+# 故 cancel-in-progress 取 true（与 deploy.yml 的 false 相反：部署半程状态危险）。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 # 工作流级最小权限（安全审计 #9）：只读兜底。声明 permissions 会整体覆盖仓库默认
 # 令牌作用域，未列出的作用域一律为 none；需要写权限的 job 在**job 级** permissions
 # 里覆盖顶层——本文件只有 build（packages: write + id-token: write，GHCR 推送与

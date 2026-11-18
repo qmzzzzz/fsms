@@ -16,7 +16,7 @@ Express 5.3 与 4.x 有一处行为差异：**POST 不带 `Content-Type`（或�
 3. 于是"必填字段校验"整条失效，请求直达控制器里的 `req.body.username`（或
    `const { currentPassword } = req.body`）⇒ `TypeError` ⇒ **500**（本该是 400）。
 
-本仓库实测（`work/lead/probe-body5.cjs`，用**生产真实的** `reauthCredentialValidation`）：
+本仓库实测（探针脚本 `work/lead/probe-body5.cjs` 为内部工作区产物，未入版本库，路径仅存档于开发工作区；用**生产真实的** `reauthCredentialValidation`）：
 
 ```
 无归一: 500 {"m":"Cannot destructure property 'currentPassword' of 'req.body' as it is undefined."}
