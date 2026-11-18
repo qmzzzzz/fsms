@@ -651,18 +651,23 @@ const deviceListParams = [
 spec.paths['/api/devices'] = {
   get: p('get', ['Devices'], '获取设备列表（分页）', { parameters: deviceListParams }),
   post: p('post', ['Devices'], '创建设备', {
-    description: '设备编号自动生成，格式为 类型前缀-年份-序号（如 FA-2026-0001）',
+    // 与 deviceRoutes.createDeviceValidation 对齐（审计 2026-11-17 P2）：deviceCode/installDate
+    // 在路由层强制必填；「编号留空自动生成」只是模型插件能力（脚本/初始化路径可达），
+    // API 面从未放行缺省——文档按真实契约写，否则照旧文档集成的请求必然 400。
+    description:
+      'deviceCode 与 installDate 必填。设备编号由调用方提供（全局唯一，最长 50 字符，建议格式 类型前缀-年份-序号，如 FA-2026-0001）',
     parameters: [idempotencyKeyHeader],
     requestBody: body({
       type: 'object',
-      required: ['deviceName', 'deviceType'],
+      required: ['deviceCode', 'deviceName', 'deviceType', 'installDate'],
       properties: {
+        deviceCode: { type: 'string', maxLength: 50, description: '设备编号（全局唯一）' },
         deviceName: { type: 'string' },
         deviceType: { type: 'string' },
         model: { type: 'string' },
         manufacturer: { type: 'string' },
         location: { type: 'object' },
-        installDate: { type: 'string', format: 'date' },
+        installDate: { type: 'string', format: 'date', description: '安装日期（ISO8601）' },
         expiryDate: { type: 'string', format: 'date' },
         checkCycle: { type: 'integer', description: '检查周期（天）' },
         remark: { type: 'string' },
@@ -1107,10 +1112,21 @@ spec.paths['/api/security/reauth'] = {
 
 spec.paths['/api/security/view-sensitive'] = {
   post: p('post', ['Security'], '查看敏感数据（需二次验证）', {
+    // 与 securityRoutes /view-sensitive 实际校验对齐（审计 2026-11-17 P3）：
+    // targetUserId 缺省为本人；二次验证凭据三选一（与 /reauth 同一契约），
+    // 缺凭据请求会被 requireReAuthentication 拒绝——集成方须能按文档构造可通过的请求。
     requestBody: body({
       type: 'object',
       required: ['dataType'],
-      properties: { dataType: { type: 'string', enum: ['phone', 'email'] } },
+      properties: {
+        dataType: { type: 'string', enum: ['phone', 'email'] },
+        targetUserId: {
+          type: 'string',
+          pattern: '^[0-9a-fA-F]{24}$',
+          description: '目标用户 ID（查看他人时必传，需 system:read 权限；缺省为本人）',
+        },
+        ...reauthCredentialProperties,
+      },
     }),
     responses: { ...ok('返回脱敏和完整数据') },
   }),
@@ -1445,7 +1461,8 @@ spec.paths['/api/security/users/{userId}/password/reset'] = {
 
 spec.paths['/api/security/audit-logs/verify'] = {
   get: p('get', ['Security'], '校验审计日志哈希链完整性（hash 重算 + hmac + 链接性三层校验）', {
-    parameters: [{ name: 'limit', in: 'query', schema: { type: 'integer' } }],
+    // 路由实际挂 requireReauthTicket()（审计 2026-11-02 C-F1），与同族 /export、/{id} 同样登记票据头
+    parameters: [reauthTicketHeader, { name: 'limit', in: 'query', schema: { type: 'integer' } }],
     responses: ok('返回校验报告（intact/breaks/byType）'),
   }),
 };
@@ -1571,8 +1588,13 @@ spec.paths['/readyz'] = {
 };
 spec.paths['/metrics'] = {
   get: p('get', ['System'], 'Prometheus 指标抓取端点（QPS/延迟直方图/错误计数/安全告警计数）', {
+    // 与 middleware/metricsAuth 实际鉴权对齐（审计 2026-11-17 P3）：不走 JWT bearerAuth，
+    // 与 /health、/readyz 同族写法一致——显式 security: false，鉴权方式写进 description。
+    security: false,
     description:
-      '运维抓取面（O-8）。应用层鉴权：内网/回环放行 + 可选 METRICS_TOKEN（Bearer）作为 Nginx 限源之外的第二道防线。',
+      '运维抓取面（O-8）。不走 JWT bearerAuth：应用层 metricsAuth 鉴权——仅回环对端免令牌放行' +
+      '（声明反代 TRUST_PROXY_HOPS>0 时回环也必须带令牌），或携带正确的 METRICS_TOKEN' +
+      '（Bearer 随机 hex 令牌，非 JWT）；其余来源一律 401（含非回环私网），作为 Nginx 限源之外的第二道防线。',
     responses: ok('text/plain; version=0.0.4; charset=utf-8 指标流'),
   }),
 };
