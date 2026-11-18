@@ -1,9 +1,12 @@
 /**
  * useCountUp 行为测试（统计卡数字滚动）
  *
- * 模块级 SKIP_ANIMATION = import.meta.env.MODE === 'test' || prefers-reduced-motion
- * 在**导入时**求值，因此两条分支必须用「stubEnv/stub matchMedia + resetModules +
- * 动态 import」的方式单独覆盖，静态 import 只能覆盖 test 模式那条。
+ * reduced-motion / 测试模式判定（skipAnimation）在**每次使用时**现查
+ * （2026-11-17 审计 G 组修复：不再于模块加载时固化）。因此：
+ *  - test 模式分支静态 import 即可覆盖；
+ *  - development 模式分支用「stubEnv + resetModules + 动态 import」覆盖；
+ *  - reduced-motion 用「stub window.matchMedia」覆盖，且可在用例中途翻转
+ *    （专门有用例锁定「会话中途开启减弱动效立即生效」）。
  *
  * 覆盖的行为：
  *  1. test 模式：数值/非数值（'-' 占位）变化直给终值，不建 rAF（断言确定性文本）；
@@ -163,6 +166,34 @@ describe('useCountUp 数字滚动', () => {
     await flush(2)
     expect(display.value).toEqual([100])
     expect(rafSpy).not.toHaveBeenCalled()
+  })
+
+  test('会话中途开启 reduced-motion：下一次数值更新立即直给终值（判定每次现查）', async () => {
+    // 2026-11-17 审计 G 组回归：判定若在模块加载时固化，本用例第二段会继续建帧
+    vi.resetModules()
+    vi.stubEnv('MODE', 'development')
+    window.matchMedia = vi.fn(() => ({ matches: false }))
+    const { useCountUp: devUseCountUp } = await import('@/composables/useCountUp')
+    const stats = ref([{ value: 0 }])
+    let display = null
+    await mountComposable(() => {
+      display = devUseCountUp(stats, { duration: 600 })
+    })
+    const { frames, drive } = installRafQueue()
+    vi.spyOn(performance, 'now').mockReturnValue(1000)
+
+    stats.value = [{ value: 50 }]
+    await flush(2)
+    expect(frames).toHaveLength(1) // 起滚
+    await drive(1600)
+    expect(display.value).toEqual([50])
+
+    // 中途开启「减弱动效」：无需重新加载模块，下一次更新立即直给终值
+    window.matchMedia = vi.fn(() => ({ matches: true }))
+    stats.value = [{ value: 80 }]
+    await flush(2)
+    expect(frames).toHaveLength(0)
+    expect(display.value).toEqual([80])
   })
 
   test('卸载：pending 的 rAF 被 cancel，不再有回调残留', async () => {

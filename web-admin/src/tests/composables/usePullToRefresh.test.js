@@ -19,6 +19,10 @@ import { mountComponent, flush } from '../helpers/componentHarness'
 const hapticMock = vi.fn()
 vi.mock('@/utils/haptic', () => ({ haptic: (...a) => hapticMock(...a) }))
 
+// 2026-11-17 审计 D 组：刷新失败必须经 reportDegradation 留痕，不再双层静默吞掉
+const reporter = vi.hoisted(() => ({ reportDegradation: vi.fn() }))
+vi.mock('@/utils/errorReporter', () => ({ reportDegradation: reporter.reportDegradation }))
+
 import { usePullToRefresh } from '@/composables/usePullToRefresh'
 
 let active = null
@@ -28,6 +32,7 @@ afterEach(() => {
   active = null
   vi.restoreAllMocks()
   hapticMock.mockReset()
+  reporter.reportDegradation.mockReset()
 })
 
 /** jsdom 无 TouchEvent：自造带 touches 的事件对象 */
@@ -124,6 +129,10 @@ describe('usePullToRefresh 下拉刷新', () => {
     throwing.el.dispatchEvent(touch('touchend', 300))
     await flush(2)
     expect(throwing.api().refreshing.value).toBe(false)
+    // 同步抛错也必须留痕（不再被静默吞掉）
+    expect(reporter.reportDegradation).toHaveBeenCalledWith('下拉刷新回调执行失败', {
+      error: 'refresh failed',
+    })
   })
 
   test('onRefresh 返回被拒 Promise：不产生未处理拒绝，状态正确复位且可再次触发', async () => {
@@ -145,6 +154,10 @@ describe('usePullToRefresh 下拉刷新', () => {
     // 拒绝路径同样走 finally：状态正确复位，不把用户锁在「刷新中」
     expect(api().refreshing.value).toBe(false)
     expect(api().y.value).toBe(0)
+    // 拒绝必须留痕（2026-11-17 审计 D 组：不再 .catch(() => {}) 静默吞掉）
+    expect(reporter.reportDegradation).toHaveBeenCalledWith('下拉刷新执行失败', {
+      error: 'refresh network down',
+    })
 
     // 失败不锁死手势：复位后可再次下拉并重新触发刷新
     el.dispatchEvent(touch('touchstart', 100))

@@ -654,7 +654,7 @@ describe('D. 加载、并发与生命周期', () => {
   })
 })
 
-describe('C. 暗色主题适配（H5：切主题后图表按新配色重建，不留浅色图表）', () => {
+describe('E. 暗色主题适配（H5：切主题后图表按新配色重建，不留浅色图表）', () => {
   test('暗色下首次初始化：饼图描边/轴标签/网格线/空态文字取暗色值（四处硬编码浅色已收编）', async () => {
     await mountCharts({ theme: 'dark' })
     const trend = trendOption()

@@ -677,6 +677,21 @@ describe('DeviceView 删除', () => {
     expect(c.errors).toEqual([])
   })
 
+  test('确认框右上角关闭（close）：与 cancel 同一双判据，不得发删除请求、不弹失败提示', async () => {
+    // 旧实现 handleDelete 的 catch 只排除 'cancel'，与同文件 handleChangeStatus/
+    // handleScrap 的双判据口径不一；EP 右上角关闭以 'close' 拒绝，不是删除失败。
+    const c = await open()
+    confirm.mockRejectedValueOnce('close')
+    const del = btn(c, '删除')
+    click(del)
+    await waitFor(() => confirm.mock.calls.length === 1, { message: '确认框已弹出' })
+    await flush(20)
+    expect(remove).not.toHaveBeenCalled()
+    expect(ElMessage.error).not.toHaveBeenCalled()
+    expect(ElMessage.success).not.toHaveBeenCalled()
+    expect(c.errors).toEqual([])
+  })
+
   test('删除失败：请求已发出且被处理，不双提示（错误 toast 由拦截器负责）、不误报成功', async () => {
     const c = await open()
     confirm.mockResolvedValue('confirm')

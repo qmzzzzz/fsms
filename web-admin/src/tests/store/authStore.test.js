@@ -164,6 +164,17 @@ describe('useAuthStore（I-01 httpOnly cookie 方案）', () => {
     expect(sessionStorage.getItem('token')).toBeNull()
   })
 
+  test('clearAuth 重置 postLoginRedirect：过期→登出→再登录不得复用上次深链目标', () => {
+    // 深链目标是「上一次会话」的导航意图：登出后必须丢弃，否则同一页面里
+    // 会话过期→登出→再登录后，用户会被送回上次的深链而不是默认落点。
+    // 正常登录跳转不受影响——守卫拦下深链时会重新写入该字段。
+    const store = useAuthStore()
+    store.setAuth({ userId: 'u-carol', username: 'carol' }, [])
+    store.postLoginRedirect = '/devices?tab=history'
+    store.clearAuth()
+    expect(store.postLoginRedirect).toBeNull()
+  })
+
   test('刷新页面恢复：localStorage 中的 currentUser 重建已登录态（但未核实）', () => {
     localStorage.setItem('currentUser', JSON.stringify({ userId: 'u-dave', username: 'dave' }))
     localStorage.setItem('permissions', JSON.stringify(['device:read']))
@@ -448,6 +459,16 @@ describe('useAuthStore（I-01 httpOnly cookie 方案）', () => {
 
     expect(store.isAuthenticated).toBe(true)
     expect(window.location.replace).not.toHaveBeenCalled()
+  })
+
+  test('会话被其他标签页覆盖/终止：postLoginRedirect 一并重置（旧深链意图作废）', () => {
+    const store = useAuthStore()
+    store.setAuth({ userId: 'u-alice', username: 'alice' }, [])
+    store.postLoginRedirect = '/reports'
+
+    store.handleRemoteAuthEvent({ type: 'login', userId: 'u-admin', username: 'admin' })
+
+    expect(store.postLoginRedirect).toBeNull()
   })
 
   test('未登录时收到任何事件：直接忽略', () => {

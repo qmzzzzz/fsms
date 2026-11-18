@@ -374,6 +374,10 @@ describe('MfaSettingsCard 注册与二维码', () => {
     expect(c.find('.mfa-secret')).toBe(null)
     expect(findButton(c, BTN.start)).toBeTruthy()
     expect(ElMessage.info).not.toHaveBeenCalled()
+    // 2026-11-17 审计 D 组：缺 secret 属异常响应，必须与其余写入口同口径提示失败
+    expect(ElMessage.error).toHaveBeenCalledWith('操作失败')
+    // busy 复位，用户可重试
+    expect(findButton(c, BTN.start).disabled).toBe(false)
   })
 
   test('注册响应 success=false（异常包络）：不得进入密钥视图、不得误报已生成', async () => {
@@ -390,6 +394,8 @@ describe('MfaSettingsCard 注册与二维码', () => {
     expect(c.find('.mfa-secret')).toBe(null)
     expect(findButton(c, BTN.start)).toBeTruthy()
     expect(ElMessage.info).not.toHaveBeenCalled()
+    // 2026-11-17 审计 D 组：2xx 但 success=false 不再静默，给出失败提示
+    expect(ElMessage.error).toHaveBeenCalledWith('操作失败')
     expect(c.errors).toEqual([])
   })
 

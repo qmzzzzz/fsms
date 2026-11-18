@@ -57,6 +57,12 @@ const literalAlertTypes = () => {
  * 变量/模板形态发出、扫描器看不到的类型：
  * captcha_${scope}_cap_reached 的 scope 在 captchaService.js 里只有 ip / global；
  * admin_initial_password_file_delete_failed 由 initialPasswordFile.js 的 alert() 间接投递。
+ *
+ * 盲区注记：本清单是**手工维护**的补偿项，只覆盖上面这些已知形态。后端未来
+ * 若新增「变量/模板形态」的告警类型（例如 captcha_${scope}_xxx 扩出新的 scope、
+ * 或新加一处经变量间接投递的 sendNotification），字面量扫描与本清单都看不到，
+ * 「新增类型不登记即红」的门禁对它会失效。新增此类类型时必须同步手工补进本清单
+ * （或改成字面量形态发出），否则词条覆盖闸存在漏报盲区。
  */
 const INDIRECT_ALERT_TYPES = [
   'captcha_ip_cap_reached',

@@ -16,7 +16,9 @@ import { mountComponent, click, flush, waitFor } from '../helpers/componentHarne
 const getCaptchaStatus = vi.fn()
 const getCaptcha = vi.fn()
 const register = vi.fn()
-const encryptPassword = vi.fn(async () => null)
+// G2 统一口径后不存在「null → 明文回退轨」：encryptPassword 返回 null = 阻断提交。
+// 默认桩改为加密成功（信封值），需要演练阻断的用例自行 mockResolvedValue(null)/mockRejectedValue。
+const encryptPassword = vi.fn(async () => 'ENVELOPE-1')
 vi.mock('@/utils/api', () => ({
   api: {
     auth: {
@@ -42,6 +44,7 @@ vi.mock('@/utils/loginCipher', () => ({
 import RegisterView from '@/views/RegisterView.vue'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { ElNotification } from 'element-plus/es/components/notification/index.mjs'
+import i18n from '@/i18n'
 
 let active = null
 const ROUTES = [
@@ -92,11 +95,14 @@ const acceptConsent = (c) => {
 afterEach(() => {
   active?.handle.unmount()
   active = null
+  // 统一还原界面语言：语言切换用例不再各自在用例末尾手动还原，
+  // 断言失败提前退出时也能复位，不污染后续用例
+  i18n.global.locale.value = 'zh-CN'
   getCaptchaStatus.mockReset()
   getCaptcha.mockReset()
   register.mockReset()
   encryptPassword.mockReset()
-  encryptPassword.mockImplementation(async () => null)
+  encryptPassword.mockImplementation(async () => 'ENVELOPE-1')
   ElMessage.success.mockReset()
   ElMessage.error.mockReset()
   ElMessage.warning.mockReset()
@@ -231,7 +237,7 @@ test('切换语言不得在空表单上触发校验红错（validate-on-rule-cha
   // 三步字段全部挂载（v-show 切换，非 v-if），任一步冒出红错都算退化
   expect(errorTexts()).toEqual([])
   expect(errCount(c)).toBe(0)
-  i18n.global.locale.value = 'zh-CN'
+  // locale 还原统一由 afterEach 负责（本用例断言失败时也能复位）
   expect(c.errors).toEqual([])
 })
 
@@ -273,9 +279,9 @@ describe('RegisterView 提交载荷与失败处理', () => {
     expect(payload.phone).toBe('13800138000')
     expect(payload).not.toHaveProperty('captchaId')
     expect(payload).not.toHaveProperty('captchaText')
-    // 明文轨（WebCrypto 不可用）才带 password；可用时必须带 encPassword
-    expect(payload.password).toBe(STRONG)
-    expect(payload).not.toHaveProperty('encPassword')
+    // G2 统一口径后不存在明文轨：加密成功 ⇒ 载荷带 encPassword，明文口令绝不上行
+    expect(payload.encPassword).toBe('ENVELOPE-1')
+    expect(payload).not.toHaveProperty('password')
   })
 
   test('WebCrypto 可用：提交 encPassword 且明文口令不上行', async () => {
@@ -308,6 +314,23 @@ describe('RegisterView 提交载荷与失败处理', () => {
     expect(register).not.toHaveBeenCalled()
     // 锁必须解开：否则用户重试时按钮永久卡死
     expect(btnByText(c, '提交注册')).toBeTruthy()
+    expect(c.errors).toEqual([])
+  })
+
+  test('口令加密不可用（返回 null）：阻断提交，不回退明文上行（G2 统一口径）', async () => {
+    // 旧实现 null 会走 payload.password 明文回退轨；统一为与 ReportView 相同的阻断口径
+    encryptPassword.mockResolvedValue(null)
+    register.mockResolvedValue({ data: { success: true } })
+    const c = await open()
+    await fillStep1AndNext(c)
+    click(btnByText(c, '下一步'))
+    await flush(40)
+    acceptConsent(c)
+    await flush(4)
+    click(btnByText(c, '提交注册'))
+    await waitFor(() => ElMessage.error.mock.calls.length === 1, { message: '阻断提示出现' })
+    expect(ElMessage.error).toHaveBeenCalledWith(i18n.global.t('login.insecureContext'))
+    expect(register).not.toHaveBeenCalled()
     expect(c.errors).toEqual([])
   })
 

@@ -148,7 +148,20 @@ export const mountComponent = (component, options = {}) => {
     },
   }
 
-  return { handle, ...handle }
+  // 返回值同时支持两种取用方式：c.handle.* 与直接解构（c.element / c.find(...)）。
+  // 转发必须用 getter 而非 ...handle 展开——element 是 accessor，展开会把它在
+  // 返回瞬间求值一次、固化成快照属性，之后组件重渲染/卸载后 c.element 仍是旧
+  // DOM 节点（用例会拿到过期引用）。getter 转发保持「每次取值都是当前 DOM」的
+  // 语义，与 @vue/test-utils 的 wrapper.element 行为一致。
+  const wrapped = { handle }
+  for (const key of Object.keys(handle)) {
+    Object.defineProperty(wrapped, key, {
+      get: () => handle[key],
+      enumerable: true,
+      configurable: true,
+    })
+  }
+  return wrapped
 }
 
 /**

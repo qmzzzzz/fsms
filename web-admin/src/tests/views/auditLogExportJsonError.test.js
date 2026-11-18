@@ -12,6 +12,13 @@
  *   - JSON 错误体：不触发下载（createObjectURL 不被调用）、不报成功、走错误提示
  *   - 正常 xlsx：正常下载并提示成功
  * 把 exportLogs 里的 JSON 检测分支删掉，前两条即变红。
+ *
+ * 脆度注记（P3，已知取舍）：下方 extractFn 以「const <name> = 后第一个 { 起、
+ * 花括号深度配平到归零」从 SFC 源码切出函数体，与源码排版/写法耦合（如函数体
+ * 内出现不配对的字面量花括号会误切）。选择保留该实现是因为失败形态响亮：
+ * 切不到函数（not found）或切错（运行即 SyntaxError / 断言红），不会静默假绿；
+ * 若未来误切频发，再考虑按函数名定位 + 更稳的括号配对（如剥离字符串/模板字面量
+ * 后再计数），当前不为此引入更复杂的解析。
  */
 import { describe, test, expect, vi, beforeEach } from 'vitest'
 import { readFileSync } from 'node:fs'

@@ -59,6 +59,8 @@ vi.mock('@/utils/loginCipher', () => ({
 import RegisterView from '@/views/RegisterView.vue'
 import LoginView from '@/views/LoginView.vue'
 import PasswordStrengthMeter from '@/components/PasswordStrengthMeter.vue'
+// 断言 G2 阻断口径的提示（顶部 vi.mock 已替身该模块，此处拿到的是 mock）
+import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 
 const readSrc = (rel) => readFileSync(resolve(__dirname, '../..', rel), 'utf8')
 
@@ -464,11 +466,39 @@ describe('RegisterView 分步导航与提交的同步锁（H1 / H7）', () => {
     await flush(4)
     const before = getCaptcha.mock.calls.length
     expect(before).toBeGreaterThan(0)
+    // 口令加密成功路径（G2 统一口径后 null 会阻断提交，到不了注册请求）：
+    // 本用例要驱动到「请求失败」，须先给定加密成功桩
+    encryptPassword.mockResolvedValue('ENC:' + STRONG)
     register.mockRejectedValue(new Error('boom'))
     click(c.findAll('button').find((b) => b.textContent.includes('提交注册')))
     await flush(40)
     // 请求失败 ⇒ 必须重载验证码（一次性消费）
     expect(getCaptcha.mock.calls.length).toBeGreaterThan(before)
+    expect(c.errors).toEqual([])
+  })
+
+  test('口令加密不可用（返回 null）：阻断注册并提示，不回退明文上行（G2 统一口径）', async () => {
+    // 默认桩即 encryptPassword → null（dev 非安全上下文形态）。
+    // 旧实现会回退 payload.password 明文上行；统一为与 ReportView 相同的阻断口径。
+    const c = await openRegisterWithCaptcha()
+    fillStepOne(c)
+    await flush(6)
+    click(nextButton(c))
+    await flush(30)
+    click(nextButton(c))
+    await flush(30)
+    expect(visibleStep(c)).toBe(2)
+    typeInto(c, 'captcha', 'a1b2')
+    acceptConsent(c)
+    await flush(4)
+    const captchaCallsBefore = getCaptcha.mock.calls.length
+    click(c.findAll('button').find((b) => b.textContent.includes('提交注册')))
+    await flush(40)
+    // 阻断：不发注册请求（明文 password 不上行）、给 insecureContext 报错、
+    // 验证码未被消费（不需重载——这次失败发生在发请求之前）
+    expect(register).not.toHaveBeenCalled()
+    expect(ElMessage.error).toHaveBeenCalledWith(i18n.global.t('login.insecureContext'))
+    expect(getCaptcha.mock.calls.length).toBe(captchaCallsBefore)
     expect(c.errors).toEqual([])
   })
 

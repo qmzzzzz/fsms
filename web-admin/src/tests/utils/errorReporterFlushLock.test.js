@@ -140,3 +140,57 @@ describe('flush 并发锁（P3-67）', () => {
     expect(mod.__isFlushInFlight()).toBe(false)
   })
 })
+
+describe('flush 失败后的退避重试', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    vi.restoreAllMocks()
+    vi.useRealTimers()
+  })
+
+  /** 假定时器 + 失败的 fetch：用初始 10s 定时 flush 触发第一次失败，时序完全确定 */
+  const setupFailingCollector = async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.fn(() => Promise.reject(new Error('collector down')))
+    vi.stubGlobal('fetch', fetchMock)
+    const { mod, app } = await setup()
+    entryVia(app, 'retry entry')
+    // 初始 scheduleFlush 定时器到点 → flush → fetch 被拒 → 进入退避重排程
+    await vi.advanceTimersByTimeAsync(10 * 1000)
+    return { mod, app, fetchMock }
+  }
+
+  test('失败后无需新错误进账即自动重试（待发批次不滞留）', async () => {
+    const { fetchMock } = await setupFailingCollector()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    // 首次退避 5s：窗口内不重试，到点自动补发同一批
+    await vi.advanceTimersByTimeAsync(4999)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  test('连续失败按 2 倍退避拉长间隔（5s → 10s），不高频轰炸收集端', async () => {
+    const { fetchMock } = await setupFailingCollector()
+    await vi.advanceTimersByTimeAsync(5000) // 第 1 次重试（+5s）
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+
+    await vi.advanceTimersByTimeAsync(9999) // 退避翻倍为 10s：9.999s 内不再发
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  test('重试期间待发条目一直保留在本地缓冲（收集端恢复后可补发）', async () => {
+    const { mod } = await setupFailingCollector()
+    await vi.advanceTimersByTimeAsync(15000)
+    // 上报持续失败，但留档不丢：这是「现场排障可直接取回」承诺的一部分
+    expect(mod.getLoggedErrors().some((e) => e.message === 'retry entry')).toBe(true)
+  })
+})

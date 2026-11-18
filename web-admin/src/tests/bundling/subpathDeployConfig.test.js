@@ -18,6 +18,11 @@ import config from '../../../vite.config.js'
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..')
 const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf8')
 
+// 源码文本判据先归一化再匹配：删掉全部空白、单引号统一成双引号。
+// 这些门禁断言的是「配置语义仍在」，不是源码排版——prettier 重排缩进/换行/引号
+// 风格不应造成假红（审计 §3.3-J：精确到箭头函数与引号风格的 toContain 过脆）。
+const semantic = (s) => s.replace(/\s+/g, '').replace(/'/g, '"')
+
 let resolved
 let csp
 
@@ -28,17 +33,24 @@ beforeAll(async () => {
 
 describe('PWA manifest 子路径安全', () => {
   test('start_url / scope / icon 为相对地址，不锚定站点根', () => {
-    const src = read('vite.config.js')
+    const src = semantic(read('vite.config.js'))
     // 防退化：改回 '/' → /admin/ 部署下安装后打开站点根而非应用
-    expect(src).toContain("start_url: '.'")
-    expect(src).toContain("scope: '.'")
-    expect(src).toContain("src: 'favicon.svg'")
+    expect(src).toContain('start_url:"."')
+    expect(src).toContain('scope:"."')
+    expect(src).toContain('src:"favicon.svg"')
   })
 
-  test('入口 HTML 的资源引用走 %BASE_URL%，且不手写 manifest 链接', () => {
+  test('入口 HTML 的资源引用为根绝对路径（Vite 自动拼接 base），且不手写 manifest 链接', () => {
+    // 实测（vite 8.3.4）：index.html 里的根绝对路径 /xxx 在 dev/build 下都会被
+    // Vite 统一拼接 base（--base=/admin/ 时产出 /admin/xxx），本身就是 base 感知的；
+    // 而 %BASE_URL% 会被 htmlEnvHook 先展开成绝对路径、再被 devHtmlHook 二次拼接
+    // base，子路径 dev 下变成 /admin/admin/... 而 404（favicon 与主题脚本实测命中）。
+    // 故这里钉「根绝对路径」而非 %BASE_URL%，并连同入口脚本一并钉住。
     const html = read('index.html')
-    expect(html).toContain('href="%BASE_URL%favicon.svg"')
-    expect(html).toContain('src="%BASE_URL%theme-bootstrap.js"')
+    expect(html).toContain('href="/favicon.svg"')
+    expect(html).toContain('src="/theme-bootstrap.js"')
+    expect(html).toContain('src="/src/main.js"')
+    expect(html).not.toContain('%BASE_URL%')
     // manifest 由 vite-plugin-pwa 按 base 注入；手写会产出两份且路径不受 base 控制
     expect(html).not.toContain('rel="manifest"')
   })
@@ -64,11 +76,11 @@ describe('开发/预览服务器监听面', () => {
 
 describe('版本探测接线（G4）', () => {
   test('startVersionWatcher 必须接 onUpdateAvailable 回调（否则服务端换版无提示）', () => {
-    const src = read('src/main.js')
+    const src = semantic(read('src/main.js'))
     // 防再漂移：版本探测发现 buildId 不一致后必须写入 updateNotice，
     // UpdateNoticeBar 才有依据出提示条；回调一旦丢失，轮询照跑但界面永远沉默
     expect(src).toContain(
-      "startVersionWatcher({ onUpdateAvailable: () => markUpdateAvailable('version') })"
+      'startVersionWatcher({onUpdateAvailable:()=>markUpdateAvailable("version")})'
     )
   })
 })

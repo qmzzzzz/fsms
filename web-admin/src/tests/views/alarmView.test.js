@@ -1174,6 +1174,21 @@ describe('AlarmView 行级动作：处理完成（双确认 + 原因单选）', 
     expect(c.errors).toEqual([])
   })
 
+  test('确认框右上角关闭（close）：与 cancel 同一双判据，不发 resolve、行锁释放', async () => {
+    // 旧实现 resolve 的 catch 只排除 'cancel'，与其余三个 handler 口径不一；
+    // EP 右上角关闭以 'close' 字符串拒绝，同属「用户没做决定」，不是失败。
+    const c = await open([mkRow('r3b', { status: 'processing' })])
+    confirm.mockRejectedValue('close')
+    click(rowBtn(c, 0, '处理完成'))
+    await waitFor(() => confirm.mock.calls.length === 1, { message: '确认框弹出' })
+    await flush(16)
+    expect(resolveAlarm).not.toHaveBeenCalled()
+    expect(prompt).not.toHaveBeenCalled()
+    expect(ElMessage.success).not.toHaveBeenCalled()
+    expect(rowBtn(c, 0, '处理完成').disabled).toBe(false)
+    expect(c.errors).toEqual([])
+  })
+
   test('结果弹窗取消（第二次确认被拒）：不发 resolve、不弹成功', async () => {
     const c = await open([mkRow('r4', { status: 'processing' })])
     confirm.mockResolvedValue('confirm')

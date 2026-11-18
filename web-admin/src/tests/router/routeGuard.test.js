@@ -112,6 +112,9 @@ beforeEach(() => {
   // 只是让「手动设为已登录」的用例保持既有语义，需要验证的用例会自己置 false。
   mockStore.sessionVerified = true
   mockStore.permissions = []
+  // 共享单例的 mustChangePassword 在这里统一复位：不再依赖各用例尾部就地还原
+  //（漏还原会把后续用例的导航悄悄改写到 /profile）
+  mockStore.currentUser = null
   mockStore.restoreSession.mockReset()
   mockStore.restoreSession.mockResolvedValue(false)
   mockCancelAll.mockClear()
@@ -257,9 +260,6 @@ describe('A. 守卫决策表', () => {
     mockStore.currentUser = { mustChangePassword: true }
     const next = await runGuard(mkRoute({ name: 'register', meta: {}, fullPath: '/register' }))
     expect(next).toHaveBeenCalledWith('/profile')
-    // 本组 mock store 是共享单例：mustChangePassword 必须就地还原，
-    // 否则后续用例会被守卫悄悄改写到 /profile
-    mockStore.currentUser = null
   })
 
   test('已登录（须改密）访问普通受保护页：改密闸先于权限校验，一律先去 /profile', async () => {
@@ -270,8 +270,6 @@ describe('A. 守卫决策表', () => {
     mockStore.permissions = ['user:read']
     const next = await runGuard(mkRoute()) // 默认 /users：普通受保护页（带 permission）
     expect(next).toHaveBeenCalledWith('/profile')
-    // 共享单例：用完就地还原（理由同上）
-    mockStore.currentUser = null
   })
 
   test('未登录访问公开页（/login、/register）：不探测会话，直接放行', async () => {
@@ -411,8 +409,6 @@ describe('B. 真实导航（守卫 + 路由表 + 重定向链的联合行为）'
     await push('/users')
     await settle(() => router.currentRoute.value.path === '/profile', '等 /profile')
     expect(router.currentRoute.value.path).toBe('/profile')
-    // 共享单例：mustChangePassword 就地还原，避免泄漏到后续用例
-    mockStore.currentUser = null
   })
 
   test('未知路径：兜底重定向后仍要过守卫（已登录落在首页）', async () => {
@@ -569,6 +565,24 @@ describe('C. chunk 加载失败恢复（onError）', () => {
     await onError(error, { fullPath: '/about' })
     expect(fetchMock).not.toHaveBeenCalled()
     expect(fake.replace).not.toHaveBeenCalled()
+  })
+
+  test('15 秒窗口内的二次失败：降级留痕 + 提示网络错误，不再静默返回', async () => {
+    // 防退化：窗口内二次失败若只是静默 return，用户停留在一个既无提示也无
+    // 下一步的白屏死胡同，线上也无从发现（自动恢复已被证明无效的场景）。
+    // 兜底方案走既有降级惯例：reportDegradation 留痕 + 复用 messages.networkError 文案。
+    const fake = stubLocation()
+    const fetchMock = stubFetch()
+    const error = chunkError('http://localhost:3000/assets/A.js')
+    await onError(error, { fullPath: '/about' }) // 第一次：走自动恢复
+    fetchMock.mockClear()
+    fake.replace.mockClear()
+    mockMessageError.mockClear()
+    await onError(error, { fullPath: '/about' }) // 第二次：窗口内，只留痕+提示
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(fake.replace).not.toHaveBeenCalled()
+    expect(mockMessageError).toHaveBeenCalledTimes(1)
+    expect(mockMessageError).toHaveBeenCalledWith(i18n.global.t('messages.networkError'))
   })
 
   test('恢复窗口按目标路由隔离：一条路由的失败不抑制另一条路由的恢复', async () => {

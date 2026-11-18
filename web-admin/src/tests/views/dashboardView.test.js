@@ -185,7 +185,7 @@ afterEach(() => {
   ElMessage.warning.mockReset()
   i18n.global.locale.value = 'zh-CN'
   delete document.visibilityState
-  vi.useRealTimers()
+  // vi.useRealTimers() 已在 afterEach 开头调用过一次：这里的第二次是冗余重复，删除
 })
 
 describe('DashboardView 骨架屏 → 内容直换', () => {

@@ -37,7 +37,8 @@ import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 let active = null
 /** 受控宿主：组件的加载/重置只在 watch(visible) 里，必须先挂载、后翻转 */
 const makeHost = () => {
-  const state = reactive({ modelValue: false, inspectionId: 'insp-1', inspectionTitle: 'T' })
+  // inspectionTitle prop 已随死契约清理从组件删除，宿主不再传入
+  const state = reactive({ modelValue: false, inspectionId: 'insp-1' })
   const Host = defineComponent({
     setup() {
       return () =>

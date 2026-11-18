@@ -225,7 +225,44 @@ describe('AttackAlertsView · 列表渲染与请求口径', () => {
     })
     expect(getAttackEvents.mock.calls.find((c) => c[0]?.page === 2)[0].limit).toBe(50)
   })
+
+  test('日期清空只触发一轮查询：EP 清空会连发 change+clear，视图只绑 change（E-双触发）', async () => {
+    await open()
+    getAttackEvents.mockClear()
+    getAttackEventSummary.mockClear()
+    // 在真实 vnode 树中定位日期选择器的组件 vnode。
+    // harness 未引入 @vue/test-utils，这里用一棵轻量 vnode 遍历代替 findComponent。
+    const picker = findComponentVnodeByName(active.app._instance.subTree, 'ElDatePicker')
+    expect(picker, '未在 vnode 树中找到日期选择器').toBeTruthy()
+    // EP onClear 源码（time-picker/picker）：清空 = emitChange(null) + emit('clear')。
+    // 旧实现 change/clear 都绑 handleSearch ⇒ 一次清空发两轮相同查询；
+    // 修复后只绑 @change（清空语义已被 change 覆盖），clear 不应再有监听。
+    expect(typeof picker.props.onChange).toBe('function')
+    expect(picker.props.onClear).toBeUndefined()
+    // 模拟 EP 清空序列中的 change(null)：只允许触发一轮（列表 + 角标各一次）
+    picker.props.onChange(null)
+    await flush(6)
+    expect(getAttackEvents).toHaveBeenCalledTimes(1)
+    expect(getAttackEventSummary).toHaveBeenCalledTimes(1)
+    // E：静态字符串不得走动态绑定（原 :data-test="'alerts-filter-action'"）
+    expect(active.element.querySelector('[data-test="alerts-filter-action"]')).toBeTruthy()
+  })
 })
+
+/** 深度遍历 vnode 树，按组件名返回第一个匹配的组件 vnode（无 test-utils 的轻量替代） */
+const findComponentVnodeByName = (vnode, name) => {
+  if (!vnode || typeof vnode !== 'object') return null
+  if (vnode.component && vnode.type?.name === name) return vnode
+  const next = []
+  if (vnode.component?.subTree) next.push(vnode.component.subTree)
+  if (Array.isArray(vnode.children)) next.push(...vnode.children)
+  if (vnode.suspense?.activeBranch) next.push(vnode.suspense.activeBranch)
+  for (const child of next) {
+    const hit = findComponentVnodeByName(child, name)
+    if (hit) return hit
+  }
+  return null
+}
 
 describe('AttackAlertsView · 角标与数据范围', () => {
   test('分段角标取自 summary.byType，「全部」取 meta.all', async () => {

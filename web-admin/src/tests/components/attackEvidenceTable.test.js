@@ -39,6 +39,9 @@ describe('AttackEvidenceTable 渲染', () => {
     })
     await flush()
     expect(vm.findAll('.el-table__row').length).toBe(1)
+    // 正向断言：已知 action 码必须经 actionLabel 投影成 audit.action.* 词条
+    // （login_failed → 「登录失败」，词条取自 zh-CN.js 真实登记项）
+    expect(vm.text()).toContain('登录失败')
     expect(vm.text()).not.toContain('undefined')
     vm.unmount()
   })
@@ -67,6 +70,10 @@ describe('AttackEvidenceTable 渲染', () => {
     })
     await flush()
     expect(vm.findAll('.el-table__row').length).toBe(2)
+    // 正向断言：两类已知 action 码都要投影出真实词条
+    // （honeypot_probe → 「蜜罐会话内探测」、login_failed → 「登录失败」）
+    expect(vm.text()).toContain('蜜罐会话内探测')
+    expect(vm.text()).toContain('登录失败')
     expect(vm.text()).not.toContain('undefined')
     vm.unmount()
   })

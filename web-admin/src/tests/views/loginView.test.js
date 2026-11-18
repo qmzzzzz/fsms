@@ -89,6 +89,9 @@ const submitBtn = (c) => c.findAll('.glass-btn--primary').slice(-1)[0]
 afterEach(() => {
   active?.handle.unmount()
   active = null
+  // 统一还原界面语言：语言切换用例不再各自在用例末尾手动还原，
+  // 断言失败提前退出时也能复位，不污染后续用例
+  i18n.global.locale.value = 'zh-CN'
   login.mockReset()
   getCaptcha.mockReset()
   getCaptchaStatus.mockReset()
@@ -432,7 +435,7 @@ describe('LoginView 页面标题与跨标签页提示', () => {
     const enTitle = document.title
     expect(enTitle).toBe(i18n.global.t('login.docTitle'))
     expect(enTitle).not.toBe(zhTitle)
-    i18n.global.locale.value = 'zh-CN'
+    // locale 还原统一由 afterEach 负责（本用例断言失败时也能复位）
     expect(c.errors).toEqual([])
   })
 
@@ -472,7 +475,7 @@ describe('LoginView 页面标题与跨标签页提示', () => {
     await flush(6)
     expect(errorTexts()).toEqual([])
     expect(c.findAll('.el-form-item.is-error')).toEqual([])
-    i18n.global.locale.value = 'zh-CN'
+    // locale 还原统一由 afterEach 负责（本用例断言失败时也能复位）
     expect(c.errors).toEqual([])
   })
 })

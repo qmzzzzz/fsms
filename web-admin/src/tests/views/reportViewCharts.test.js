@@ -413,6 +413,27 @@ describe('ReportView 图表数据渲染', () => {
     expect(c.errors).toEqual([])
   })
 
+  test('图表数据加载失败：两个图表卡给出持久失败态与重试入口，重试复跑请求（D）', async () => {
+    // 旧实现失败被完全静默：空白画布与「真的没有数据」不可区分，且 toast 会自行消失。
+    // 现在失败必须有常驻痕迹（失败块），并提供能真正复跑加载链路的重试入口。
+    const c = await open({
+      alarmsReject: new Error('alarms down'),
+      devicesReject: new Error('devices down'),
+    })
+    await waitFor(() => c.findAll('[data-test="chart-failed"]').length === 2, {
+      message: '两个图表卡出现失败态',
+    })
+    // 换回成功响应后点重试：请求重发、失败块退场（画布接管）
+    h.getAlarms.mockResolvedValue(ALARMS)
+    h.getDevices.mockResolvedValue(DEVICES)
+    const callsBefore = h.getAlarms.mock.calls.length
+    click(c.findAll('[data-test="chart-failed"] button')[0])
+    await waitFor(() => h.getAlarms.mock.calls.length > callsBefore, { message: '重试复跑请求' })
+    await flush(12)
+    expect(c.findAll('[data-test="chart-failed"]').length).toBe(0)
+    expect(c.errors).toEqual([])
+  })
+
   test('路由切换导致的取消错误：静默处理，不弹「加载失败」', async () => {
     await open({ alarmsReject: new Error('canceled') })
     expect(ElMessage.error).not.toHaveBeenCalled()

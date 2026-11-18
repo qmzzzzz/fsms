@@ -29,6 +29,17 @@ vi.mock('@/utils/api', () => ({
     post: (...a) => post(...a),
     delete: (...a) => del(...a),
   },
+  // 视图已改走 api.js 具名封装层：这里的 api.security 与 apiClient 同源
+  //（委托给同一组 get/post/del spy），既钉住「视图调的是封装函数」，
+  // 又保留既有按 URL/参数形状断言的口径
+  api: {
+    security: {
+      getIPList: (params) => get('/security/ip-list', { params }),
+      queryIPList: (ip) => get('/security/ip-list/query', { params: { ip } }),
+      saveIPEntry: (data) => post('/security/ip-list', data),
+      removeIPEntry: (id) => del(`/security/ip-list/${id}`),
+    },
+  },
   isCanceledError: (e) => Boolean(e && e.code === 'ERR_CANCELED'),
   // 与 api.js 同一判据（P3-14：此前钉死 false，组件侧死分支被测成可达）：
   // 只有走过响应拦截器的 axios 错误才算已提示
@@ -1268,7 +1279,6 @@ describe('IpListView 黑白名单切换按钮', () => {
     expect(post.mock.calls.at(-1)[1]).toMatchObject({ ip: '127.0.0.0/8', type: 'white' })
     // 拒绝原因分档到位，且**不叠加**笼统一句「切换失败」
     expect(ElMessage.error).not.toHaveBeenCalled()
-    expect(ElMessage.error).not.toHaveBeenCalled() // 不叠加笼统「切换失败」
     expect(c.errors).toEqual([])
   })
 

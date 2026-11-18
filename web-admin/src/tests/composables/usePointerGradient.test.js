@@ -103,3 +103,34 @@ describe('usePointerGradient 指针渐变', () => {
     expect(el.style.getPropertyValue('--posX')).toBe('50') // 未被改写
   })
 })
+
+describe('usePointerGradient rect 缓存（G-性能，2026-11-17 审计）', () => {
+  test('连续 pointermove 只测量一次布局；resize 与 pointerenter 触发重测', async () => {
+    const el = await mountGradient(vi.fn(() => ({ matches: true })))
+    const rectSpy = vi.fn(() => ({ left: 100, top: 50, width: 200, height: 100 }))
+    el.getBoundingClientRect = rectSpy
+
+    move(el, 250, 120)
+    move(el, 260, 130)
+    move(el, 270, 140)
+    // 三次移动只读一次布局：修复前每次 pointermove 都 getBoundingClientRect 强制重排
+    expect(rectSpy).toHaveBeenCalledTimes(1)
+    expect(el.style.getPropertyValue('--posX')).toBe('70') // 270-100-100
+
+    // 窗口 resize：重新测量（元素位置/尺寸变化后缓存不再沿用）
+    rectSpy.mockReturnValue({ left: 0, top: 0, width: 100, height: 50 })
+    window.dispatchEvent(new window.Event('resize'))
+    move(el, 60, 40)
+    expect(rectSpy).toHaveBeenCalledTimes(2)
+    expect(el.style.getPropertyValue('--posX')).toBe('10') // 60-0-50
+    expect(el.style.getPropertyValue('--posY')).toBe('15') // 40-0-25
+
+    // 指针再次进入元素：同样重测
+    rectSpy.mockReturnValue({ left: 10, top: 10, width: 100, height: 50 })
+    el.dispatchEvent(new window.MouseEvent('pointerenter'))
+    move(el, 60, 40)
+    expect(rectSpy).toHaveBeenCalledTimes(3)
+    expect(el.style.getPropertyValue('--posX')).toBe('0') // 60-10-50
+    expect(el.style.getPropertyValue('--posY')).toBe('5') // 40-10-25
+  })
+})

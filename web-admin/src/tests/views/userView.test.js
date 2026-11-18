@@ -788,6 +788,25 @@ describe('UserView 新增用户对话框', () => {
     expect(dlg.querySelectorAll('.el-form-item.is-error')).toHaveLength(0)
   })
 
+  test('口令加密不可用（返回 null，dev 非安全上下文）：阻断提交，不回退明文上行（G2 统一口径）', async () => {
+    enc.mockResolvedValueOnce(null)
+    const c = await mountUser(['user:read', 'user:create'])
+    const dlg = await openAdd(c)
+    await setField(dlg, '用户名', 'newbie01')
+    await setField(dlg, '邮箱', 'n@x.com')
+    await setField(dlg, '密码', 'Str0ng-Pass_2026')
+    await setField(dlg, '真实姓名', '新人')
+    click(footerBtn(dlg, '新增'))
+    await waitFor(() => ElMessage.error.mock.calls.length === 1, { message: '阻断提示出现' })
+    // 与 ReportView 导出二次验证同一阻断口径：insecureContext 报错并中止
+    expect(ElMessage.error).toHaveBeenCalledWith(i18n.global.t('login.insecureContext'))
+    // 旧实现会回退 payload.password 明文上行；统一阻断后不发 create、无明文字段
+    expect(usersCreate).not.toHaveBeenCalled()
+    expect(ElMessage.success).not.toHaveBeenCalled()
+    // 阻断也必须解锁重入锁（按钮可再次点击重试）
+    await waitFor(() => footerBtn(dlg, '新增').disabled === false, { message: '阻断后按钮解锁' })
+  })
+
   test('提交失败：提示创建失败、对话框保持打开、按钮解锁可重试', async () => {
     usersCreate.mockRejectedValueOnce(new Error('boom'))
     usersCreate.mockResolvedValueOnce({ data: { success: true } })
@@ -1834,6 +1853,22 @@ describe('UserView 批量删除', () => {
     expect(ElMessage.success).not.toHaveBeenCalled()
     expect(ElMessage.error).not.toHaveBeenCalled()
     expect(c.errors).toEqual([])
+  })
+
+  test('同一 tick 双击批量删除：只弹一次确认、只发一次请求（withSyncLock 重入锁，对齐单删）', async () => {
+    usersBatchDelete.mockResolvedValue({ data: { data: { deleted: 1 } } })
+    confirmBox.mockResolvedValue('confirm')
+    const c = await mountUser(P_ALL, [ROW_OTHER])
+    click(rowCheckbox(c, 0))
+    await waitFor(() => toolbarBtn(c, '批量删除').disabled === false, { message: '选中后按钮可用' })
+    const btn = toolbarBtn(c, '批量删除')
+    // 修复前：handleBatchDelete 无同步重入锁，同一 tick 的第二次点击会排队弹出
+    // 第二个确认框并重复发请求；现对齐同文件 handleDelete 的 withSyncLock 口径。
+    click(btn)
+    click(btn)
+    await flush(20)
+    expect(confirmBox).toHaveBeenCalledTimes(1)
+    expect(usersBatchDelete).toHaveBeenCalledTimes(1)
   })
 })
 

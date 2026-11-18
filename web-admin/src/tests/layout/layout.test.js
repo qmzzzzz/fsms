@@ -817,22 +817,27 @@ describe('布局 · 用户信息与登出', () => {
     const unhandled = []
     const onUnhandled = (reason) => unhandled.push(String(reason))
     process.on('unhandledRejection', onUnhandled)
-    confirmBox.mockImplementationOnce(() => Promise.reject(new Error('cancel')))
-    const c = mountLayout()
-    await settleRouter(c.router)
-    await flush(10)
-    const popper = await openByHover(c.find('.user-dropdown'), '用户菜单')
+    try {
+      // 注销必须放 finally：中间任何一步 await 抛错时监听也要摘掉，
+      // 否则监听器泄漏到后续用例，把别处的拒绝误记进本用例
+      confirmBox.mockImplementationOnce(() => Promise.reject(new Error('cancel')))
+      const c = mountLayout()
+      await settleRouter(c.router)
+      await flush(10)
+      const popper = await openByHover(c.find('.user-dropdown'), '用户菜单')
 
-    click(dropdownItem(popper, label('auth.logout')))
-    await pollUntil(() => confirmBox.mock.calls.length === 1, '弹出确认框')
-    await new Promise((resolve) => setTimeout(resolve, 150))
-    await flush(20)
-    process.off('unhandledRejection', onUnhandled)
+      click(dropdownItem(popper, label('auth.logout')))
+      await pollUntil(() => confirmBox.mock.calls.length === 1, '弹出确认框')
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      await flush(20)
 
-    expect(logoutApi).not.toHaveBeenCalled()
-    expect(c.router.currentRoute.value.path).toBe('/dashboard')
-    expect(currentAuth.currentUser).toEqual({ username: 'alice' })
-    expect(unhandled).toEqual([])
+      expect(logoutApi).not.toHaveBeenCalled()
+      expect(c.router.currentRoute.value.path).toBe('/dashboard')
+      expect(currentAuth.currentUser).toEqual({ username: 'alice' })
+      expect(unhandled).toEqual([])
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
   })
 
   test('退出遮罩显示期间：.app-wrapper 加 inert、遮罩 Teleport 到 body（第 34 轮 M5）', async () => {
@@ -1148,24 +1153,29 @@ describe('布局 · 全屏入口与刷新', () => {
     const unhandled = []
     const onUnhandled = (reason) => unhandled.push(String(reason))
     process.on('unhandledRejection', onUnhandled)
-    document.documentElement.requestFullscreen = () =>
-      Promise.reject(new Error('fullscreen denied'))
-    document.exitFullscreen = () => Promise.reject(new Error('exit denied'))
-    const c = mountLayout()
-    await settleRouter(c.router)
-    await flush(10)
-    const icons = standaloneIcons(c)
-    click(icons[3])
-    await new Promise((resolve) => setTimeout(resolve, 60))
-    Object.defineProperty(document, 'fullscreenElement', {
-      value: document.body,
-      configurable: true,
-    })
-    click(icons[3])
-    await new Promise((resolve) => setTimeout(resolve, 60))
-    process.off('unhandledRejection', onUnhandled)
-    expect(unhandled).toEqual([])
-    expect(c.errors).toEqual([])
+    try {
+      // 注销必须放 finally：多个 await 之间任何一步抛错，监听器也要摘掉，
+      // 避免泄漏到后续用例（原实现注销位于多个 await 之后、且不在 finally）
+      document.documentElement.requestFullscreen = () =>
+        Promise.reject(new Error('fullscreen denied'))
+      document.exitFullscreen = () => Promise.reject(new Error('exit denied'))
+      const c = mountLayout()
+      await settleRouter(c.router)
+      await flush(10)
+      const icons = standaloneIcons(c)
+      click(icons[3])
+      await new Promise((resolve) => setTimeout(resolve, 60))
+      Object.defineProperty(document, 'fullscreenElement', {
+        value: document.body,
+        configurable: true,
+      })
+      click(icons[3])
+      await new Promise((resolve) => setTimeout(resolve, 60))
+      expect(unhandled).toEqual([])
+      expect(c.errors).toEqual([])
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
   })
 
   test('仅有 moz/ms 前缀全屏 API 时：能力探测与调用都走对应前缀分支', async () => {

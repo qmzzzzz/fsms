@@ -41,6 +41,11 @@ const emptyLeaves = (dict) =>
     .map(([key]) => key)
     .sort()
 
+// 变异用例里的死码判据基线（与下面的死键检查同一份来源）。
+// 声明放在使用（变异用例）之前：const 有暂时性死区，虽然模块顶层声明在
+// 用例执行前必然已求值，但「先用后声明」的排布会误导阅读者以为有提升。
+const backendCodesSet = new Set(backend.ATTACK_EVENT_TYPE_CODES)
+
 describe('攻击告警词典：后端注册表必须有前端码表与双语落点', () => {
   test('前提自证：注册表非空且前端码表已导入（对账对象被清空时不得静默通过）', () => {
     expect(backend.ATTACK_EVENT_TYPE_CODES.length).toBeGreaterThan(0)
@@ -110,6 +115,3 @@ describe('攻击告警词典：后端注册表必须有前端码表与双语落�
     expect(enUS.nav.attackAlerts).toBeDefined()
   })
 })
-
-// 变异用例里的死码判据基线（与上面的死键检查同一份来源）
-const backendCodesSet = new Set(backend.ATTACK_EVENT_TYPE_CODES)

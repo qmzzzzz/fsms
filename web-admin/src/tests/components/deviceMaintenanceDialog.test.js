@@ -203,6 +203,23 @@ describe('DeviceMaintenanceDialog 成功与失败路径', () => {
     expect(state.visible).toBe(false)
   })
 
+  test('device 为 null 时点确认：判空防护拦下，不发请求并给出选择提示', async () => {
+    // 2026-11-17 审计 D 组：父组件可传 device=null，旧实现直接读 props.device._id 抛 TypeError
+    m.addMaintenance.mockResolvedValue({ data: { success: true } })
+    await open(null)
+    await typeContent('例行更换泵机密封圈')
+
+    click(footerBtn('确定'))
+    await flush(8)
+
+    expect(m.addMaintenance).not.toHaveBeenCalled()
+    expect(m.message.warning).toHaveBeenCalledWith('请选择')
+    expect(active.errors).toEqual([])
+    // 弹窗保持打开，按钮可重试
+    expect(dlg()).toBeTruthy()
+    expect(footerBtn('确定').disabled).toBe(false)
+  })
+
   test('请求失败：不误报成功、弹窗保持打开、按钮解锁可重试', async () => {
     m.addMaintenance.mockRejectedValue(new Error('boom'))
     const state = await open()
