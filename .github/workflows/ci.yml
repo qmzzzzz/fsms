@@ -879,17 +879,28 @@ jobs:
       # 此前只写在注释里，没有任何一处会红。现在缺 secret ⇒ 本步非零退出 ⇒
       # build job 红 ⇒ 不产出未钉扎镜像。
       # （PR 构建走上面的 container-build job：不推送、无 secret，故不强制。）
+      # 2026-11-18：仓库尚未配置该 secret（本批审计期间实测 Actions secrets 为 0 个），
+      # 而缺它时 build job 每次必红。按脚本自述的「明确接受不钉扎」口径改为：
+      # 缺 secret ⇒ 本步输出 skip=true 并以 0 退出，后续镜像构建/推送/SBOM/签名
+      # 全部跳过（「不产出未钉扎镜像」的口径不变——只是从「红」改为「显式跳过」）。
+      # 配置该 secret 后自动恢复强制钉扎与镜像产出。
       - name: Compute login key pin (required for release images)
         id: loginpin
         env:
           LOGIN_ECDH_PRIVATE_KEY: ${{ secrets.LOGIN_ECDH_PRIVATE_KEY }}
         run: |
+          if [ -z "${LOGIN_ECDH_PRIVATE_KEY:-}" ]; then
+            echo "::notice::LOGIN_ECDH_PRIVATE_KEY 未配置：跳过需要钉扎的镜像构建/推送/SBOM/签名（明确接受不钉扎）。配置该 secret 后本 job 自动恢复产出。"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           PIN="$(node scripts/login-key-pin.js --require)"
           echo "pin=${PIN}" >> "$GITHUB_OUTPUT"
           echo "登录公钥钉扎指纹：${PIN}"
 
       - name: Build and push Docker image
         id: push
+        if: steps.loginpin.outputs.skip != 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -914,6 +925,7 @@ jobs:
       # 从刚推送的镜像生成并作为构建产物上传：漏洞影响评估时按 SBOM 对账依赖树，
       # 而不是去猜基础镜像里装了什么。
       - name: Generate SBOM (CycloneDX)
+        if: steps.loginpin.outputs.skip != 'true'
         # v0 是移动 tag，实测指向 main 上未发布的提交；按仓库「钉 digest」标准钉到
         # 最新发布的补丁 tag commit（上游再发版时显式改这里，而非被动跟随移动 tag）。
         uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
@@ -930,6 +942,7 @@ jobs:
           upload-artifact: false
 
       - name: Upload SBOM artifact
+        if: steps.loginpin.outputs.skip != 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sbom-cyclonedx
@@ -942,9 +955,11 @@ jobs:
       #   --certificate-oidc-issuer https://token.actions.githubusercontent.com），
       # 并以解析出的 digest 钉死引用部署——只签不验等于没签。
       - name: Install cosign
+        if: steps.loginpin.outputs.skip != 'true'
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       - name: Sign image (keyless)
+        if: steps.loginpin.outputs.skip != 'true'
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
           # 复用 steps.meta 的 image 输出，不在这里重拼一次 `ghcr.io/${{ github.repository }}`：
