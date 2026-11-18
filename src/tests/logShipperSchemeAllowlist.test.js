@@ -80,7 +80,16 @@ const { HttpShipperTransport } = require('../utils/logShipper');
 
 // 本文件用本地 http 目标验证 scheme 白名单与目标门禁；2026-10-24 起明文 http
 // 需显式放宽（生产启动闸另有一档：带 Bearer 令牌时连放宽也不允许）。
-process.env.LOG_SHIPPING_ALLOW_INSECURE = 'true';
+// 放宽只在 beforeAll 里设置、afterAll 三态还原：模块顶层直接赋值且从不恢复，
+// 会把同 worker 后续测试文件的环境视图一并改掉。
+const SAVED_ALLOW_INSECURE = process.env.LOG_SHIPPING_ALLOW_INSECURE;
+beforeAll(() => {
+  process.env.LOG_SHIPPING_ALLOW_INSECURE = 'true';
+});
+afterAll(() => {
+  if (SAVED_ALLOW_INSECURE === undefined) delete process.env.LOG_SHIPPING_ALLOW_INSECURE;
+  else process.env.LOG_SHIPPING_ALLOW_INSECURE = SAVED_ALLOW_INSECURE;
+});
 
 function makeTransport(url, token = 'ZZSENTINEL_TOKEN') {
   return new HttpShipperTransport({

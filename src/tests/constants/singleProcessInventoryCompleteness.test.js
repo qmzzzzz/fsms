@@ -180,6 +180,20 @@ const EXEMPT_MODULES = {
   'services/attackProfileSummary.js':
     'ACCOUNT_FAILURE_ACTIONS，静态字面量 Set（登录失败动作词表），只读',
   'utils/bcryptWorkerThread.js': 'SUPPORTED_OPS，静态字面量 Set（worker 操作白名单），只读',
+  // parseCache：parseHoneypotUsernames 的解析结果记忆化（2026-11-17 审计批 Wave 1 引入）。
+  // 键 =「env 原文 + 当前超管名」，值为冻结的解析产物；输入只有静态默认名单与 env，
+  // 键含全部输入 ⇒ 内容逐进程恒同（env 相同则各实例解析结果相同），不存在跨实例不一致。
+  // 登记进清单会让启动期对运维说「多实例部署时蜜罐名单
+  // 解析会失效」——假警报，与 config/validate.js 词表缓存同族。
+  'constants/honeypotAccounts.js':
+    'parseCache：parseHoneypotUsernames 解析结果缓存（键含 env 原文+超管名，值冻结），输入恒同则结果恒同，无跨进程语义',
+  // lastChainHashCache：取证清单「文件路径 → 末行 chainHash+字节数」缓存（同批引入），
+  // 避免最重负载时段每次追加都整读日增长文件。正确性不依赖缓存：只在持锁临界区内使用，
+  // 字节数失配（他人追加/prune/人工改动）即整读重算自愈，进程重启缓存为空走整读——
+  // 跨进程互斥由 forensicManifestLock 文件锁承担，缓存不承担跨进程一致性 ⇒ 多实例不静默失效。
+  // （体积棘轮批自 forensicManifest.js 拆到 forensicManifestTailCache.js。）
+  'services/forensicManifestTailCache.js':
+    'lastChainHashCache：清单末行哈希缓存（键=文件路径，按字节数失配自愈整读），跨进程互斥由 forensicManifestLock 文件锁承担，缓存不承担跨进程一致性',
 };
 
 /** 递归收集 src 下全部非测试 .js 文件 */

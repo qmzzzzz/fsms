@@ -11,6 +11,8 @@ const { TEST_CLIENT_IP } = require('../fixtures');
 
 describe('审计哈希链并发不分叉', () => {
   let AuditLog;
+  // 本批数据的 stamp 前缀：写入侧与清理侧共用一份，避免两处前缀漂移
+  const stamp = `chain_conc_${Date.now()}`;
 
   beforeAll(async () => {
     if (mongoose.connection.readyState === 0) {
@@ -20,16 +22,21 @@ describe('审计哈希链并发不分叉', () => {
   });
 
   afterAll(async () => {
-    // append-only 下无法删除；测试数据留库无副作用（审计日志本就只增）
-    // 关闭连接，避免遗留连接拖住 jest worker 优雅退出
+    // 本批 40 条带 chain_conc_<ts>_ 前缀，按该前缀清理，不波及历史/他批数据。
+    // append-only 模型必须两参显式 bypass（NODE_ENV=test 契约）；清库失败当场红，
+    // 但无论成败都要关连接，避免遗留连接拖住 jest worker 优雅退出。
     if (mongoose.connection.readyState !== 0) {
-      await mongoose.connection.close();
+      try {
+        await AuditLog.deleteMany({ action: { $regex: `^${stamp}_` } }, { bypassAppendOnly: true });
+      } finally {
+        await mongoose.connection.close();
+      }
     }
   });
 
   test('40 条并发 create 形成单链无分叉', async () => {
     const N = 40;
-    const prefix = 'chain_conc_' + Date.now();
+    const prefix = stamp;
     const docs = Array.from({ length: N }, (_, i) => ({
       action: `${prefix}_${i}`,
       category: 'auth',

@@ -23,6 +23,18 @@ const ForensicCapture = require('../../models/ForensicCapture');
 
 const AT = new Date('2026-11-01T02:00:00.000Z');
 
+// mkdtemp 目录登记表：原先内联 mkdtempSync 的对账目录多数不回收（仅 1 例自删），
+// 统一走本助手登记，文件级 afterAll 回收（测试卫生；真库数据由 beforeEach 清理，不受影响）。
+const tmpDirs = [];
+const tmpdir = () => {
+  const dir = require('fs').mkdtempSync(require('path').join(require('os').tmpdir(), 'recon-'));
+  tmpDirs.push(dir);
+  return dir;
+};
+afterAll(() => {
+  for (const dir of tmpDirs) require('fs').rmSync(dir, { recursive: true, force: true });
+});
+
 // createdAt 必须落在 AT 所属的**业务日**窗口内，否则对账按天取库时看不到它
 const seed = async (hashes, seqs, at = AT) => {
   await ForensicCapture.insertMany(
@@ -56,7 +68,7 @@ describe('B-7 清单与库对账：清单说的记录必须真的在库里', () 
   });
 
   test('【核心验收】清单与库一致 ⇒ 绿（否则判据只是恒红）', async () => {
-    const dir = require('fs').mkdtempSync(require('path').join(require('os').tmpdir(), 'recon-'));
+    const dir = tmpdir();
     const hashes = ['a'.repeat(64), 'b'.repeat(64)];
     await seed(hashes, ['r-1', 'r-2']);
     await manifest.appendBatch({
@@ -74,7 +86,7 @@ describe('B-7 清单与库对账：清单说的记录必须真的在库里', () 
   });
 
   test('【核心验收】库里某条被删掉 ⇒ 必须判红并报出准确差额（但点不出是哪条）', async () => {
-    const dir = require('fs').mkdtempSync(require('path').join(require('os').tmpdir(), 'recon-'));
+    const dir = tmpdir();
     const hashes = ['a'.repeat(64), 'b'.repeat(64)];
     await seed(hashes, ['r-1', 'r-2']);
     await manifest.appendBatch({
@@ -96,7 +108,7 @@ describe('B-7 清单与库对账：清单说的记录必须真的在库里', () 
   });
 
   test('库里多出清单没记的记录 ⇒ 报 unmanifested（只警告，不算篡改）', async () => {
-    const dir = require('fs').mkdtempSync(require('path').join(require('os').tmpdir(), 'recon-'));
+    const dir = tmpdir();
     const hashes = ['a'.repeat(64)];
     await seed(hashes, ['r-1']);
     await manifest.appendBatch({
@@ -117,7 +129,7 @@ describe('B-7 清单与库对账：清单说的记录必须真的在库里', () 
   test('【边界】别的业务日的记录不得算进当天（窗口过滤真的生效）', async () => {
     // 这条是 M15 的杀手：若把查询条件放宽成 {}，昨天的记录会被算进今天，
     // 「少几条」就永远判不出来（假绿）。必须用跨日数据证明窗口有效。
-    const dir = require('fs').mkdtempSync(require('path').join(require('os').tmpdir(), 'recon-'));
+    const dir = tmpdir();
     const hashes = ['a'.repeat(64)];
     await seed(hashes, ['r-1']);
     await manifest.appendBatch({
@@ -137,14 +149,14 @@ describe('B-7 清单与库对账：清单说的记录必须真的在库里', () 
   });
 
   test('清单文件不存在 ⇒ 无从对账，如实报 no_manifest 而不是假装绿', async () => {
-    const dir = require('fs').mkdtempSync(require('path').join(require('os').tmpdir(), 'recon-'));
+    const dir = tmpdir();
     const v = await reconcileWithDb({ dir, date: AT, model: ForensicCapture, now: AT });
     expect(v.ok).toBe(false);
     expect(v.problems.map((p) => p.type)).toContain('no_manifest');
   });
 
   test('对账不得改动任何数据（只读）', async () => {
-    const dir = require('fs').mkdtempSync(require('path').join(require('os').tmpdir(), 'recon-'));
+    const dir = tmpdir();
     const hashes = ['a'.repeat(64)];
     await seed(hashes, ['r-1']);
     await manifest.appendBatch({
@@ -160,7 +172,7 @@ describe('B-7 清单与库对账：清单说的记录必须真的在库里', () 
   });
 
   test('按 recordHash 批量查库：不得对每条记录单独发一次查询（会打爆库）', async () => {
-    const dir = require('fs').mkdtempSync(require('path').join(require('os').tmpdir(), 'recon-'));
+    const dir = tmpdir();
     const hashes = Array.from({ length: 20 }, (_, i) => i.toString(16).padStart(2, '0').repeat(32));
     await seed(hashes, hashes);
     await manifest.appendBatch({ dir, recordHashes: hashes, now: AT });
@@ -210,7 +222,7 @@ describe('F6 对账窗口与周期接线', () => {
     process.env.BUSINESS_RETENTION_DAYS_FORENSIC_CAPTURE = '30';
     // 清单目录用空 tmp：默认目录是 logs/forensic-manifest（本机真实运行会留下近几日的
     // 真清单），窗口内的日期一旦撞上真清单，no_manifest 的对照判据就变成环境相关的假红。
-    const dir = require('fs').mkdtempSync(require('path').join(require('os').tmpdir(), 'recon-'));
+    const dir = tmpdir();
     const old = new Date(Date.now() - 31 * 86400000);
     const v = await reconcileWithDb({ date: old, model: ForensicCapture, dir });
     expect(v).toMatchObject({ ok: true, skippedBeyondTtl: 1, checked: 0, declared: 0 });

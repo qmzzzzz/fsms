@@ -49,8 +49,10 @@ const mockQuery = (rows) => {
   const limit = jest.fn(() => ({ lean }));
   const sort = jest.fn(() => ({ limit }));
   const select = jest.fn(() => ({ sort }));
-  AuditLog.find.mockReturnValue({ select });
-  return { select, sort, limit };
+  // 实现在 find 链首挂 withListBudget 的 maxTimeMS 预算（与业务列表链同口径）：替身链补上这一环
+  const maxTimeMS = jest.fn(() => ({ select }));
+  AuditLog.find.mockReturnValue({ maxTimeMS });
+  return { select, sort, limit, maxTimeMS };
 };
 
 const mockContainment = () =>

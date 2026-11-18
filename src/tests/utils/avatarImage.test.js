@@ -566,7 +566,9 @@ describe('avatarImage.parseAvatarImage', () => {
     expectReason(() => parseAvatarImage(toDataUri(late, 'image/png')), 'PNG_MALFORMED');
   });
 
-  test('PNG 解压炸弹（16×16 头 + 200 MB 解压输出）→ 拒绝', () => {
+  test('PNG 解压炸弹（16×16 头 + 32 MB 解压输出）→ 拒绝', () => {
+    // 判据只需"解压输出 > 16MiB 夹取值"即可触发拒绝，32MB 与 200MB 走的是同一条
+    // PNG_MALFORMED 路径——没必要为同一条判据一次性分配并压缩 200MB 缓冲。
     const ihdr = Buffer.alloc(13);
     ihdr.writeUInt32BE(16, 0);
     ihdr.writeUInt32BE(16, 4);
@@ -575,10 +577,64 @@ describe('avatarImage.parseAvatarImage', () => {
     const bomb = Buffer.concat([
       PNG_SIG,
       pngChunk('IHDR', ihdr),
-      pngChunk('IDAT', zlib.deflateSync(Buffer.alloc(200 * 1024 * 1024, 0))),
+      pngChunk('IDAT', zlib.deflateSync(Buffer.alloc(32 * 1024 * 1024, 0))),
       pngChunk('IEND', Buffer.alloc(0)),
     ]);
     expectReason(() => parseAvatarImage(toDataUri(bomb, 'image/png')), 'PNG_MALFORMED');
+  });
+
+  test('PNG 调色板图 tRNS/bKGD 与 PLTE 条目数交叉校验（审计 2026-11-17 P3）', () => {
+    // 2 条目的调色板（PLTE 6 字节）：
+    // ① tRNS 每字节对应一个条目的透明度，3 字节 > 2 条目 ⇒ 畸形
+    expectReason(
+      () =>
+        parseAvatarImage(
+          toDataUri(
+            pngBuffer(
+              32,
+              32,
+              [pngChunk('PLTE', Buffer.alloc(6, 0x10)), pngChunk('tRNS', Buffer.alloc(3, 0xff))],
+              { 9: 3 }
+            ),
+            'image/png'
+          )
+        ),
+      'PNG_MALFORMED'
+    );
+    // ② bKGD 是 2 字节背景索引，索引 2 落在 2 条目调色板之外 ⇒ 畸形
+    const oobBkgd = Buffer.alloc(2);
+    oobBkgd.writeUInt16BE(2, 0);
+    expectReason(
+      () =>
+        parseAvatarImage(
+          toDataUri(
+            pngBuffer(
+              32,
+              32,
+              [pngChunk('PLTE', Buffer.alloc(6, 0x10)), pngChunk('bKGD', oobBkgd)],
+              {
+                9: 3,
+              }
+            ),
+            'image/png'
+          )
+        ),
+      'PNG_MALFORMED'
+    );
+    // ③ 合法形态放行：bKGD 索引 0 < 2；tRNS 长度恰好等于条目数（= 边界合法）
+    const legal = pngBuffer(
+      32,
+      32,
+      [
+        pngChunk('PLTE', Buffer.alloc(6, 0x10)),
+        pngChunk('tRNS', Buffer.alloc(2, 0x80)),
+        pngChunk('bKGD', Buffer.from([0, 0])),
+      ],
+      { 9: 3 }
+    );
+    const result = parseAvatarImage(toDataUri(legal, 'image/png'));
+    expect(result.width).toBe(32);
+    expect(result.height).toBe(32);
   });
 
   test('E1：恶意声明 16384×16384 的 ≤256KB PNG ⇒ 解压前早拒 DIMENSION_INVALID，解压层零参与', () => {

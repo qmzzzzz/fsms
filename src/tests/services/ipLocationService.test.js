@@ -28,6 +28,11 @@ describe('ipLocationService（IP 归属地展示）', () => {
     searcher.resetForTest();
   });
 
+  afterEach(() => {
+    // 断言失败时也要还原 spy，避免桩泄漏到同文件后续用例
+    jest.restoreAllMocks();
+  });
+
   describe('输入卫生（非法输入一律 null，不抛错）', () => {
     test.each([
       ['null 输入', null],

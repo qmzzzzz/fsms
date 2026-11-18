@@ -12,6 +12,7 @@
 'use strict';
 
 const mongoose = require('mongoose');
+const { jsCodeOnly } = require('../helpers/jsCodeOnly');
 
 const {
   DEFAULT_LIST_QUERY_MAX_TIME_MS,
@@ -74,12 +75,29 @@ describe('列表链预算接线门禁（漏接即红）', () => {
   });
 
   test.each(LIST_SERVICES)('%s 引用了预算工具', (rel) => {
-    const src = fs.readFileSync(path.join(__dirname, '../../..', rel), 'utf8');
+    // F-145 纪律：按源码文本判定的闸必须跑在「只剩代码」视图上。原先直接对未剥
+    // 注释的源码 src.includes(...)——注释里提到 withListBudget 就算"已接线"，
+    // 注释可以双向骗闸（删掉真调用、在注释里补一句即回绿）。
+    const src = jsCodeOnly(fs.readFileSync(path.join(__dirname, '../../..', rel), 'utf8'));
     // 至少引用其一：find 链包装 / count options / aggregate options
     const wired =
       src.includes('withListBudget') ||
       src.includes('listCountOptions') ||
       src.includes('listAggregateOptions');
     expect({ rel, wired }).toMatchObject({ rel, wired: true });
+  });
+
+  test('反向自检：注释里提到 withListBudget 不算接线（F-145）', () => {
+    // 整行注释被 jsCodeOnly 连行删除：这段"伪接线"在视图上不得命中任何判据串
+    const fake = [
+      '// 列表查询请用 withListBudget / listCountOptions / listAggregateOptions 包装。',
+      'module.exports = {};',
+    ].join('\n');
+    const view = jsCodeOnly(fake);
+    expect(
+      view.includes('withListBudget') ||
+        view.includes('listCountOptions') ||
+        view.includes('listAggregateOptions')
+    ).toBe(false);
   });
 });

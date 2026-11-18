@@ -38,7 +38,24 @@ describe('认证面限流/凭据校验接线门禁（审计 2026-11-15）', () =
     const chain = routeChain(authRoutes, 'POST', '/mfa/enable');
     expect(chain).toBeTruthy();
     // 形状：authenticate → strictLimiter → rejectMalformedMfaCode → requireReAuthentication → 控制器
-    expect(chain.length).toBe(5);
+    // 审计 2026-11-17（主题 G）：链长只设下界——精确相等会把未来插入行为等价的透传
+    // 中间件误判为红。必需中间件改为逐一在场识别：
+    //   · authenticate / strictLimiter 按**同一模块导出的函数引用**识别（引用比对对
+    //     asyncHandler 之类包装免疫）；
+    //   · rejectMalformedMfaCode 是 authRoutes 的模块内常量，外部拿不到引用，按函数名识别。
+    const { authenticate } = require('../../middleware/auth');
+    const { strictLimiter } = require('../../middleware/rateLimit');
+    const handles = chain.map((layer) => layer.handle);
+    expect(handles).toContain(authenticate);
+    expect(handles).toContain(strictLimiter);
+    expect(chain.map((layer) => layer.name)).toContain('rejectMalformedMfaCode');
+    // 末位是控制器；格式闸与控制器之间必须至少隔着二次验证闸那一层
+    // （requireReAuthentication() 返回匿名闭包、控制器经 asyncHandler 包装，均无法按名
+    // 识别，按位置认：格式闸下标 ≤ 链长-3 ⇒ 其后至少还有 2 层）。
+    const gateIdx = chain.findIndex((layer) => layer.name === 'rejectMalformedMfaCode');
+    expect(gateIdx).toBeGreaterThanOrEqual(0);
+    expect(gateIdx).toBeLessThanOrEqual(chain.length - 3);
+    expect(chain.length).toBeGreaterThanOrEqual(5);
   });
 
   test('POST /mfa/enroll：必须挂 reauthCredentialValidation + consumeValidation', () => {

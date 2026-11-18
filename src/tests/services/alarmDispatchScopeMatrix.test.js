@@ -25,6 +25,8 @@ const FireAlarm = require('../../models/FireAlarm');
 const PWD = 'Qz7#Lm42vTx9';
 
 describe('dispatchAlarm 数据范围矩阵（self/none/未传参 都必须拒绝跨人指派）', () => {
+  // 夹具用户名 stamp 化：固定名在残留库/复跑场景下会撞唯一键或读到别人的数据
+  const stamp = Date.now().toString(36);
   let opSelf; // 仅有 self 档语义的操作者（本人属 A 栋）
   let mateInDept; // A 栋另一位在职人员
   let farDept; // B 栋在职人员
@@ -35,9 +37,9 @@ describe('dispatchAlarm 数据范围矩阵（self/none/未传参 都必须拒绝
     }
     const mk = (username, department) =>
       User.create({ username, email: `${username}@example.com`, password: PWD, department });
-    opSelf = await mk('dsx_op', 'A栋');
-    mateInDept = await mk('dsx_mate', 'A栋');
-    farDept = await mk('dsx_far', 'B栋');
+    opSelf = await mk(`dsx_op_${stamp}`, 'A栋');
+    mateInDept = await mk(`dsx_mate_${stamp}`, 'A栋');
+    farDept = await mk(`dsx_far_${stamp}`, 'B栋');
   });
 
   afterAll(async () => {

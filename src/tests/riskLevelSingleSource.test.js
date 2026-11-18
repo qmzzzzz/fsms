@@ -49,7 +49,14 @@ const { buildLevelCondition } = require('../utils/auditQuery');
 const LEVEL_SOURCE = AUDIT_RISK_LEVELS;
 const WORD = `(?:${LEVEL_SOURCE.join('|')})`;
 // 元素全部落在档位词表里、且至少两项（单元素不是"某档及以上"的复述）
-const LEVEL_LIST = new RegExp(String.raw`\[\s*(?:'${WORD}'\s*,\s*)+'${WORD}'\s*,?\s*\]`, 'g');
+// 档位字面量的引号形态：单引号之外，双引号与反引号书写的清单同样要抓——
+// 只认单引号时，换一种引号就能静默绕过门禁（门禁方向必须 fail-closed）。
+// 每个元素独立取引号，混用引号的写法也逃不掉。
+const Q = `['"\`]`;
+const LEVEL_LIST = new RegExp(
+  String.raw`\[\s*(?:${Q}${WORD}${Q}\s*,\s*)+${Q}${WORD}${Q}\s*,?\s*\]`,
+  'g'
+);
 
 /**
  * 剥注释，只留代码视图（同 auditCategoryLiteralWhitelist 的口径）。
@@ -153,6 +160,9 @@ describe('风险等级清单只能有一份', () => {
         `const a = { riskLevel: { $in: ['high', 'critical'] } };`,
         `const b = ['low', 'medium', 'high', 'critical'];`,
         `const c = ['medium', 'high', 'critical'].includes(x);`,
+        // 双引号与反引号书写的清单同样必须抓到（否则换引号即可绕过门禁）
+        `const e = ["high", "critical"];`,
+        `const f = [\`high\`, \`critical\`];`,
         `// 说明里写 ['high', 'critical'] 不算违规`,
         `/* 块注释里的 ['low', 'medium'] 也不算 */`,
         `const d = SOME_OTHER_LIST;`,
@@ -164,6 +174,8 @@ describe('风险等级清单只能有一份', () => {
         "['high', 'critical']",
         "['low', 'medium', 'high', 'critical']",
         "['medium', 'high', 'critical']",
+        '["high", "critical"]',
+        '[`high`, `critical`]',
       ].sort()
     );
   });

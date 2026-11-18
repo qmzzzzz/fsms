@@ -4,14 +4,28 @@
 
 describe('Encryption Utils', () => {
   let aesCipher, hmacSigner;
+  // 快照 setup.js 注入的密钥环境：本套件 beforeAll 会改写这两个变量，
+  // 收尾必须按原值还原（原本未设则删除）——否则同 worker 的后续套件
+  // 拿到的是本文件的测试密钥，env 泄漏会让断言随执行顺序漂移。
+  let originalAesKey;
+  let originalHmacSecret;
 
   beforeAll(() => {
+    originalAesKey = process.env.AES_SECRET_KEY;
+    originalHmacSecret = process.env.HMAC_SECRET;
     process.env.AES_SECRET_KEY = 'test-aes-key-32-chars-minimum!!';
     process.env.HMAC_SECRET = 'test-hmac-secret';
 
     const encryption = require('../../utils/encryption');
     aesCipher = new encryption.AESCipher();
     hmacSigner = new encryption.HMACSigner();
+  });
+
+  afterAll(() => {
+    if (originalAesKey === undefined) delete process.env.AES_SECRET_KEY;
+    else process.env.AES_SECRET_KEY = originalAesKey;
+    if (originalHmacSecret === undefined) delete process.env.HMAC_SECRET;
+    else process.env.HMAC_SECRET = originalHmacSecret;
   });
 
   describe('AES-GCM encrypt/decrypt', () => {

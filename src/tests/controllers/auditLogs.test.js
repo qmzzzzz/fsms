@@ -29,9 +29,10 @@ describe('/api/security/audit-logs 查询优化', () => {
     Permission = require('../../models/Permission');
     AuditLog = require('../../models/AuditLog');
 
-    // 幂等播种：'security:audit' 的 code 有 unique 索引，其它并行套件
-    // （reportExportAuditPerm / auditReportFixes）也会播种同一条记录，
-    // 用 create 会在并行执行时撞 E11000
+    // 幂等播种：每个测试文件拥有独立空库（setup.js 给 MONGODB_URI 追加
+    // 文件级后缀），不存在跨套件并行共享同一内存库的前提；
+    // 此处仍用 findOneAndUpdate+upsert 幂等播种，防同一文件重复 beforeAll
+    // 时撞 'security:audit' code 的 unique 索引
     const auditPerm = await Permission.findOneAndUpdate(
       { code: 'security:audit' },
       {

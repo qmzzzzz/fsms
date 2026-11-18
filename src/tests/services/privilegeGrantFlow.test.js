@@ -99,7 +99,9 @@ describe('临时权限授予流程', () => {
 
   afterAll(async () => {
     await Promise.all([
-      PrivilegeGrant.deleteMany({}),
+      // 只清本套件创建的授予（target 用户名前缀 zzpriv_），与 beforeEach 的清理口径一致；
+      // 不用 deleteMany({})——共享库上那是把别套件的数据一起扫掉
+      PrivilegeGrant.deleteMany({ username: /^zzpriv_/ }),
       User.deleteMany({ username: /^zzpriv_/ }),
       Role.deleteMany({ code: /^ZZPRIV_/ }),
       Permission.deleteMany({ code: { $in: [CODE_NORMAL, CODE_HIGH, CODE_GRANT, CODE_APPROVE] } }),

@@ -103,7 +103,9 @@ describe('写路径的 body 类型闸门', () => {
   afterAll(async () => {
     if (mongoose.connection.readyState !== 0) {
       await User.deleteMany({ username: new RegExp(`^${stamp}`) }).catch(() => {});
-      await Role.deleteMany({ code: new RegExp(`^${stamp}`) }).catch(() => {});
+      // 角色码在用例 12 里经 .toUpperCase() 变成大写（Role.code 形状要求大写），
+      // 清理必须大小写不敏感，否则大写角色码残留（审计 2026-11-17 主题 B）
+      await Role.deleteMany({ code: new RegExp(`^${stamp}`, 'i') }).catch(() => {});
       await Permission.deleteMany({ code: new RegExp(`^${stamp}`) }).catch(() => {});
       await FireDevice.deleteMany({ deviceCode: new RegExp(`^${stamp}`) }).catch(() => {});
       await Inspection.deleteMany({ title: new RegExp(`^${stamp}`) }).catch(() => {});
@@ -300,7 +302,11 @@ describe('写路径的 body 类型闸门', () => {
         .set(auth(superToken))
         .send({
           name: `${stamp}权限`,
-          code: `dev:${stamp.replace(/\D/g, '')}x`,
+          // stamp 里的数字已全部映射成字母，replace(/\D/g,'') 恒为空串 ⇒ 旧写法 code
+          // 恒为 'dev:x'，失去按次唯一性（负向用例一旦转红，重跑会以 E11000 混淆真实
+          // 失败原因）。改拼 stamp（即字母化的时间戳，每次运行唯一），形状仍满足
+          // Permission.code 的 /^(\*|[a-z]+):(\*|[a-z_]+)$/（审计 2026-11-17 主题 L）
+          code: `dev:x${stamp}`,
           type: 'api',
           module: 1,
         });

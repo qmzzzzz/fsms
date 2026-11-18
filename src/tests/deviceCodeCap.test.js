@@ -13,6 +13,7 @@
  */
 const mongoose = require('mongoose');
 const { randomPassword } = require('./helpers/buildLoginEnvelope');
+const { signTestToken } = require('./helpers/signTestToken');
 
 describe('deviceCode 上限：路由与模型同一口径', () => {
   let app;
@@ -51,12 +52,7 @@ describe('deviceCode 上限：路由与模型同一口径', () => {
       password: randomPassword(),
       roles: [role._id],
     });
-    const jwt = require('jsonwebtoken');
-    token = jwt.sign(
-      { userId: String(user._id), username: user.username, tokenVersion: user.tokenVersion },
-      process.env.JWT_SECRET,
-      { expiresIn: '24h' }
-    );
+    token = signTestToken(user);
     const { createApp } = require('../app');
     app = createApp();
   });

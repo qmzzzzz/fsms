@@ -44,6 +44,14 @@ describe('停用角色不参与授权判定', () => {
 
   afterAll(async () => {
     if (mongoose.connection.readyState !== 0) {
+      // 回收 beforeAll 播种的 1 用户、2 角色、2 权限（均带本文件随机戳，不误伤他套件）
+      if (seedStamp) {
+        await User.deleteOne({ _id: uid }).catch(() => {});
+        await Role.deleteMany({
+          code: new RegExp(`^(ACTIVE|INACTIVE)_${seedStamp.toUpperCase()}$`),
+        }).catch(() => {});
+        await Permission.deleteMany({ code: new RegExp(`^brackets${seedStamp}:`) }).catch(() => {});
+      }
       await mongoose.connection.close();
     }
   });
@@ -51,13 +59,16 @@ describe('停用角色不参与授权判定', () => {
   let uid;
   let activeRole;
   let inactiveRole;
+  // beforeAll 播种用的随机戳，提到 describe 级供 afterAll 回收
+  let seedStamp;
 
   beforeAll(async () => {
-    const stamp =
+    seedStamp =
       Date.now()
         .toString(36)
         .replace(/[^a-z]/gi, '')
         .slice(0, 6) || 'a1';
+    const stamp = seedStamp;
     const mod = `brackets${stamp}`;
     const permOfActive = await Permission.create({
       name: '生效角色权限',

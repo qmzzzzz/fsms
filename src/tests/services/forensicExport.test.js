@@ -78,4 +78,18 @@ describe('P2-03 verifyExport 畸形包守卫', () => {
       else process.env.FORENSIC_EXPORT_SECRET = prev;
     }
   });
+
+  // 审计 2026-11-17 P3：签名材料必须绑定导出归属（operator）。
+  // 旧材料只签 version/exportedAt/count/digest/manifestRef，持包者把 operator
+  // 改成任何人签名仍通过——导出归属成了可无痕改写的字段。
+  test('改写 operator ⇒ signature_mismatch（导出归属参与签名，不得无痕易主）', () => {
+    withSecret(() => {
+      const { pkg } = buildExport({ records: [{ a: 1 }], operator: 'alice' });
+      expect(pkg.operator).toBe('alice');
+      const reowned = { ...pkg, operator: 'mallory' };
+      expect(verifyExport({ pkg: reowned })).toEqual({ ok: false, reason: 'signature_mismatch' });
+      // 原归属仍必须验签通过（上面的判红不是把合法包也拦下的恒红）
+      expect(verifyExport({ pkg })).toMatchObject({ ok: true, count: 1 });
+    });
+  });
 });

@@ -71,8 +71,10 @@ describe('encryption.js 缺口覆盖：DataMasking / HMACSigner / HashUtils / AE
       expect(DataMasking.maskIP('2001:db8::192.168.0.1')).toMatch(/^2001:db8/);
       // 非法 IPv4 尾段（>255）：mapped 前缀剥掉后按点分四段处理，兜底打码而非整体作废
       expect(DataMasking.maskIP('::ffff:999.999.999.999')).toBe('999.999.*.*');
-      // 非 IP 形态（无 ':' 且非四段数字）：原样返回，不做猜测式打码
-      expect(DataMasking.maskIP('abc.def')).toBe('abc.def');
+      // 非 IP 形态（无 ':' 且非四段数字）：与 maskPhone/maskEmail/maskIdCard 的
+      // 「认不出即全掩码」同一失败方向。2026-11-17 口径更新：旧兜底"原样返回"
+      // 等于把未识别形态的明文漏出脱敏边界（审计 P3），合法 IP 各分支的既有断言不变
+      expect(DataMasking.maskIP('abc.def')).toBe('****');
     });
 
     test('_expandIPv6：组数超限 / 非法字符返回 null', () => {
@@ -284,10 +286,19 @@ describe('userPermissionService 缺口覆盖', () => {
     expect(perms.some((p) => p.startsWith('ups'))).toBe(true);
   });
 
-  test('getPermissions：命中缓存（两次结果一致）', async () => {
-    const first = await svc.getPermissions(testUserId);
-    const second = await svc.getPermissions(testUserId);
-    expect(second).toEqual(first);
+  test('getPermissions：命中缓存（底层只查一次库，两次结果一致）', async () => {
+    // 旧写法只断 `second` 与 `first` 相等——连查两趟库它也满足，是空洞断言。
+    // 钉住底层加载函数（User.findById）只被调用一次：第二次必须来自缓存。
+    svc.invalidatePermissionCache(testUserId);
+    const findByIdSpy = jest.spyOn(User, 'findById');
+    try {
+      const first = await svc.getPermissions(testUserId);
+      const second = await svc.getPermissions(testUserId);
+      expect(findByIdSpy).toHaveBeenCalledTimes(1);
+      expect(second).toEqual(first);
+    } finally {
+      findByIdSpy.mockRestore();
+    }
   });
 
   // 以下两条的共同判据：**改库 → 失效 → 重查必须拿到改后的值**。

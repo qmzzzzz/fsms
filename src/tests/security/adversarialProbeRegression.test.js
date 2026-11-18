@@ -251,6 +251,9 @@ describe('对抗性探针场景固化（原 zzz-* 探针 → 行为断言）', (
       .sort({ _id: -1 })
       .limit(5)
       .lean();
+    // 前提自证：本次登录失败必须真的落了审计行。否则 recent 为空、下面的循环
+    // 零执行，"不含明文口令"就成了恒绿的空断言（脱敏逻辑被删也不会红）。
+    expect(recent.length).toBeGreaterThanOrEqual(1);
     for (const rec of recent) {
       expect(JSON.stringify(rec.body || {})).not.toContain(secret);
     }
@@ -305,14 +308,22 @@ describe('对抗性探针场景固化（原 zzz-* 探针 → 行为断言）', (
     // 原 zzz-adversarial-audit.test.js P7：中间件层的键剔除已由
     // securityBranches.test.js（sanitizeMongo 分支）覆盖，但**端到端**从未验证
     // 「恶意体穿过完整中间件链后 Object.prototype 仍干净」，故补此断言。
+    // 注意：对象字面量里的 `__proto__: {...}` 是**改写原型**而非自有属性，
+    // JSON.stringify 后该键直接消失——那样这条腿根本到不了服务端（假覆盖）。
+    // 必须用计算键造出真正的自有属性，让该键真实出现在请求体里。
+    const payload = {
+      username: 'x',
+      password: 'y',
+      ['__proto__']: { isAdmin: true },
+      constructor: { prototype: { polluted: true } },
+    };
+    // 前提自证：序列化后的请求体确实携带 __proto__ 键（否则本用例退化为
+    // "只测 constructor.prototype 腿"，与用例名不符）。
+    expect(JSON.stringify(payload)).toContain('"__proto__"');
     const res = await request(app)
       .post('/api/auth/login')
-      .send({
-        username: 'x',
-        password: 'y',
-        __proto__: { isAdmin: true },
-        constructor: { prototype: { polluted: true } },
-      });
+      .set('Content-Type', 'application/json')
+      .send(JSON.stringify(payload));
     expect(res.status).toBe(401);
     expect({}.polluted).toBeUndefined();
     expect({}.isAdmin).toBeUndefined();

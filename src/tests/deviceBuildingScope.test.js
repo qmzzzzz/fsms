@@ -7,10 +7,10 @@
  * 创建路径同理：路由只判字符串长度。
  */
 const mongoose = require('mongoose');
-const jwt = require('jsonwebtoken');
 const request = require('supertest');
 
 const { randomPassword } = require('./helpers/buildLoginEnvelope');
+const { signTestToken } = require('./helpers/signTestToken');
 const { isDepartmentValueAllowed } = require('../middleware/rbac');
 const DEVICE_TYPE = Object.values(require('../utils/constants').DEVICE_TYPE)[0];
 
@@ -45,7 +45,6 @@ describe('设备楼栋只能落在操作者自己部门', () => {
   let app;
   let FireDevice;
   let deptToken;
-  let operatorId;
 
   beforeAll(async () => {
     if (mongoose.connection.readyState === 0) await mongoose.connect(process.env.MONGODB_URI);
@@ -76,12 +75,7 @@ describe('设备楼栋只能落在操作者自己部门', () => {
       department: DEPT_A,
       roles: [deptRole._id],
     });
-    operatorId = String(operator._id);
-    deptToken = jwt.sign(
-      { userId: operatorId, username: operator.username, tokenVersion: operator.tokenVersion ?? 0 },
-      process.env.JWT_SECRET,
-      { expiresIn: '24h' }
-    );
+    deptToken = signTestToken(operator);
     const { createApp } = require('../app');
     app = createApp();
   });

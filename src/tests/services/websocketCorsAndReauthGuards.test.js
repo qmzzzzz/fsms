@@ -380,12 +380,15 @@ describe('WebSocket 分支补漏', () => {
         { expiresIn: '24h' }
       );
 
-      const result = await svc.authenticateSocket(socket, token, timer);
-      clearTimeout(timer);
-
-      expect(result).toBe(false);
-      expect(socket.connected).toBe(false);
-      expect(socket.emitted.some((e) => /禁用或锁定/.test(e.data?.message || ''))).toBe(true);
+      try {
+        const result = await svc.authenticateSocket(socket, token, timer);
+        expect(result).toBe(false);
+        expect(socket.connected).toBe(false);
+        expect(socket.emitted.some((e) => /禁用或锁定/.test(e.data?.message || ''))).toBe(true);
+      } finally {
+        // authenticateSocket 抛错/断言失败也要清掉 60s 句柄，避免挂住 worker 退出
+        clearTimeout(timer);
+      }
     });
 
     test('密码修改后旧 token 认证失败', async () => {

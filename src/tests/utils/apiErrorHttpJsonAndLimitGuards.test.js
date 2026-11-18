@@ -306,7 +306,8 @@ describe('captchaService 定期清理启停（补 start/stop 分支）', () => {
     spy.mockRestore();
   });
 
-  test('到期条目在清理周期被删除（一次性消费视角：过期即不可验）', async () => {
+  test('到期条目在清理周期被删除（可证伪：配额归还后才能再生成满额新码）', async () => {
+    captchaService._resetForTests(); // 前提自证：清掉此前用例可能残留的本地条目与配额
     captchaService.startCaptchaCleanup();
     const cap = await captchaService.generate();
     expect(await captchaService.verify(cap.captchaId, 'x')).toBe(false); // 错误文本，且验证后即被消费
@@ -314,6 +315,16 @@ describe('captchaService 定期清理启停（补 start/stop 分支）', () => {
     const cap2 = await captchaService.generate();
     jest.advanceTimersByTime(5 * 60 * 1000 + 10);
     expect(await captchaService.verify(cap2.captchaId, 'whatever')).toBe(false);
+    // 可证伪判据：单 IP 活跃配额上限 20。清理周期若真把到期条目移出了 localStore，
+    // releaseLocalIp 已归还配额 ⇒ 可连续再生成 20 枚；若清理失效（旧条目仍占 1 格），
+    // 第 20 枚起被拒。verify 自带的过期判定对"删没删"恒返回 false，不能作为判据。
+    const made = [];
+    for (let i = 0; i < 20; i += 1) {
+      const c = await captchaService.generate();
+      if (!c) break;
+      made.push(c.captchaId);
+    }
+    expect(made).toHaveLength(20);
   });
 
   test('stop 清理 interval 且可重复安全调用（无 timer 时 no-op）', () => {

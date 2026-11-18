@@ -80,7 +80,12 @@ describe('审计载荷的 $ 前缀与点号键：存在性与链自洽', () => {
 
   afterAll(async () => {
     if (actions.length) {
-      await AuditLog.deleteMany({ action: { $in: actions } }).catch(() => {});
+      // AuditLog 是 append-only 集合：清理必须显式带 bypassAppendOnly，
+      // 否则删除被静默拦下，本文件的探针记录会残留到同库的其他断言里。
+      // actions 全部以本文件 stamp 开头（mkAction 生成），过滤天然收窄到本文件。
+      await AuditLog.deleteMany({ action: { $in: actions } }, { bypassAppendOnly: true }).catch(
+        () => {}
+      );
     }
     if (mongoose.connection.readyState !== 0) {
       await mongoose.connection.close();
@@ -159,9 +164,9 @@ describe('审计载荷的 $ 前缀与点号键：存在性与链自洽', () => {
     const after = await AuditLog.collection.findOne({ _id: doc._id });
     expect(after.hash).toBe(signed.hash);
 
-    // 复位后必须重新自洽：一是还给全局校验一个干净的同一条记录（本库按 worker 共享，
-    // 留一条断裂会替别人造出假断裂），二是反向证明这条判据是内容敏感的，
-    // 不是"跑过一次就一直是红"。
+    // 复位后必须重新自洽：一是把这条记录恢复成干净态（每个测试文件独立建库，
+    // 但同文件内的其他断言仍会复用这条记录，留一条断裂会污染本文件后续判据），
+    // 二是反向证明这条判据是内容敏感的，不是"跑过一次就一直是红"。
     await AuditLog.collection.updateOne({ _id: doc._id }, { $set: { body: original } });
     expect(await breaksFor(action)).toBe(0);
   });

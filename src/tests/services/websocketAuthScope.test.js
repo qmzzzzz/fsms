@@ -249,7 +249,9 @@ describe('WebSocket 认证范围校验', () => {
           })
           .on('error', () => resolve({ ip: null }));
       });
-      server.close();
+      // 等待端口真正释放再返回：不等的 close 会留下悬挂句柄，随机序下
+      // 可能干扰后续用例的端口/事件循环判定
+      await new Promise((resolve) => server.close(resolve));
       return res.ip;
     };
 

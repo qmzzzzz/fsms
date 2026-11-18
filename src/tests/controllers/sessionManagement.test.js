@@ -55,9 +55,10 @@ describe('设备级会话管理接口（/api/auth/sessions）', () => {
 
   afterAll(async () => {
     if (mongoose.connection.readyState !== 0) {
-      // P3-24：回收自建账号（sessuser/sessother）及其会话记录
+      // P3-24：回收自建账号（sessuser/sessother/sesspwd）及其会话记录
+      // （sesspwd 在「改密后全部会话吊销」用例中创建，同样要连会话一起回收）
       const users = await User.find({
-        username: { $in: ['sessuser', 'sessother'] },
+        username: { $in: ['sessuser', 'sessother', 'sesspwd'] },
       })
         .select('_id')
         .lean();

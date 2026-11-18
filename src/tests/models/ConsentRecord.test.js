@@ -29,15 +29,26 @@ describe('隐私同意记录（一-7）', () => {
     await ConsentRecord.init();
   });
 
+  // 本文件的夹具签名：username 一律 consent_ 前缀（consent_a…e / consent_old）。
+  // 清理按此前缀收窄，不做无过滤全表清空。
+  const CONSENT_FIXTURE_FILTER = { username: /^consent_/ };
+
   afterEach(async () => {
-    // 清库靠显式 bypassAppendOnly：与审计链护栏同一契约（NODE_ENV=test 才放行）
-    await ConsentRecord.deleteMany({}, null, { bypassAppendOnly: true }).catch(() => {});
+    // 清库靠显式 bypassAppendOnly：与审计链护栏同一契约（NODE_ENV=test 才放行）。
+    // mongoose 8 的 deleteMany 只有两参形态：(filter, options)——第三参会被忽略，
+    // bypass 传不进去 ⇒ 护栏拒绝 ⇒ 清库空转。两参 + 不吞错，清不掉就当场红。
+    await ConsentRecord.deleteMany(CONSENT_FIXTURE_FILTER, { bypassAppendOnly: true });
+    // 前提自证：清理真的生效（护栏若拒绝，上一行已抛；这里再钉计数归零）
+    expect(await ConsentRecord.countDocuments(CONSENT_FIXTURE_FILTER)).toBe(0);
   });
 
   afterAll(async () => {
-    await ConsentRecord.deleteMany({}, null, { bypassAppendOnly: true }).catch(() => {});
-    if (mongoose.connection.readyState !== 0) {
-      await mongoose.connection.close();
+    try {
+      await ConsentRecord.deleteMany(CONSENT_FIXTURE_FILTER, { bypassAppendOnly: true });
+    } finally {
+      if (mongoose.connection.readyState !== 0) {
+        await mongoose.connection.close();
+      }
     }
   });
 

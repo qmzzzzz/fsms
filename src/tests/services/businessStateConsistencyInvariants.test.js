@@ -28,6 +28,9 @@
 const mongoose = require('mongoose');
 
 describe('批次B 业务规则加固回归', () => {
+  // 本套件夹具的统一 stamp：用户名/设备名/巡检标题/报警描述都带它，
+  // afterAll 按它收口（无 stamp 的固定名在残留库/复跑场景下会互相污染）。
+  const fixtureStamp = `bsc${Date.now().toString(36)}`;
   let FireDevice;
   let Inspection;
   let User;
@@ -47,13 +50,28 @@ describe('批次B 业务规则加固回归', () => {
 
   afterAll(async () => {
     if (mongoose.connection.readyState !== 0) {
+      const FireAlarm = require('../../models/FireAlarm');
+      const stampRe = new RegExp(fixtureStamp);
+      // 三个真实用户 + 设备/巡检/报警业务夹具，全部按 stamp 维度清理
+      await User.deleteMany({
+        username: {
+          $in: [
+            `dispatch_ok_${fixtureStamp}`,
+            `dispatch_off_${fixtureStamp}`,
+            `dispatch_other_${fixtureStamp}`,
+          ],
+        },
+      }).catch(() => {});
+      await FireDevice.deleteMany({ deviceName: stampRe }).catch(() => {});
+      await Inspection.deleteMany({ title: stampRe }).catch(() => {});
+      await FireAlarm.deleteMany({ description: stampRe }).catch(() => {});
       await mongoose.connection.close();
     }
   });
 
   const makeDevice = (over = {}) =>
     FireDevice.create({
-      deviceName: '测试灭火器',
+      deviceName: `测试灭火器_${fixtureStamp}`,
       deviceType: 'extinguisher',
       installDate: new Date('2025-01-01'),
       ...over,
@@ -180,22 +198,22 @@ describe('批次B 业务规则加固回归', () => {
 
     beforeAll(async () => {
       activeUser = await User.create({
-        username: 'dispatch_ok',
-        email: 'dispatch_ok@example.com',
+        username: `dispatch_ok_${fixtureStamp}`,
+        email: `dispatch_ok_${fixtureStamp}@example.com`,
         password: 'Qz7#Lm42vTx9',
         department: 'A栋',
         status: 'active',
       });
       disabledUser = await User.create({
-        username: 'dispatch_off',
-        email: 'dispatch_off@example.com',
+        username: `dispatch_off_${fixtureStamp}`,
+        email: `dispatch_off_${fixtureStamp}@example.com`,
         password: 'Qz7#Lm42vTx9',
         department: 'A栋',
         status: 'inactive',
       });
       otherDeptUser = await User.create({
-        username: 'dispatch_other',
-        email: 'dispatch_other@example.com',
+        username: `dispatch_other_${fixtureStamp}`,
+        email: `dispatch_other_${fixtureStamp}@example.com`,
         password: 'Qz7#Lm42vTx9',
         department: 'B栋',
         status: 'active',
@@ -207,7 +225,7 @@ describe('批次B 业务规则加固回归', () => {
         alarmType: 'smoke',
         level: 'critical',
         location: { building: 'A栋' },
-        description: '测试报警',
+        description: `测试报警_${fixtureStamp}`,
         reporterName: '张三',
         reporterPhone: '13800000000',
       });
@@ -271,7 +289,7 @@ describe('批次B 业务规则加固回归', () => {
     const makeInspection = (over = {}) =>
       Inspection.create({
         inspectionType: 'daily',
-        title: `逾期测试-${Math.random().toString(36).slice(2, 8)}`,
+        title: `逾期测试_${fixtureStamp}_${Math.random().toString(36).slice(2, 8)}`,
         planStartTime: new Date(Date.now() - 7200_000),
         planEndTime: new Date(Date.now() - 3600_000),
         ...over,
@@ -384,7 +402,7 @@ describe('批次B 业务规则加固回归', () => {
     // 而列表的 search 曾直接给 query.$or 赋值——范围条件被整条替换，
     // 等于「只要带 search 就不做数据范围过滤」，可越权看见全组织设备。
     test('列表带 search 时仍按 self 范围收敛（搜索不得覆盖数据范围）', async () => {
-      const token = `BRH${Date.now().toString(36)}`;
+      const token = `BRH${fixtureStamp}`;
       const me = new mongoose.Types.ObjectId();
       const other = new mongoose.Types.ObjectId();
       await makeDevice({ deviceName: `泵房烟感-我建的-${token}`, createdBy: me });

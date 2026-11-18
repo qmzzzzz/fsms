@@ -30,14 +30,19 @@ describe('wellKnownRoutes 公共发现端点', () => {
       // 而不是依赖 Host 反射。
       const original = process.env.SECURITY_TXT_CANONICAL;
       process.env.SECURITY_TXT_CANONICAL = 'https://api.example.com/.well-known/security.txt';
-      const res = await request(buildApp()).get('/.well-known/security.txt');
-      if (original === undefined) delete process.env.SECURITY_TXT_CANONICAL;
-      else process.env.SECURITY_TXT_CANONICAL = original;
-      expect(res.status).toBe(200);
-      expect(res.headers['content-type']).toMatch(/text\/plain/);
-      expect(res.text).toMatch(/^Contact: mailto:/m);
-      expect(res.text).toMatch(/^Expires: /m);
-      expect(res.text).toMatch(/^Canonical: https:\/\/api\.example\.com\//m);
+      try {
+        const res = await request(buildApp()).get('/.well-known/security.txt');
+        expect(res.status).toBe(200);
+        expect(res.headers['content-type']).toMatch(/text\/plain/);
+        expect(res.text).toMatch(/^Contact: mailto:/m);
+        expect(res.text).toMatch(/^Expires: /m);
+        expect(res.text).toMatch(/^Canonical: https:\/\/api\.example\.com\//m);
+      } finally {
+        // 与下方 security policy 用例同口径：断言抛错也必须恢复 env 快照，
+        // 否则随机顺序门禁下会污染后续用例
+        if (original === undefined) delete process.env.SECURITY_TXT_CANONICAL;
+        else process.env.SECURITY_TXT_CANONICAL = original;
+      }
     });
 
     test('Expires 为将来时间且不超过一年（RFC 9116 约束）', async () => {
@@ -51,10 +56,14 @@ describe('wellKnownRoutes 公共发现端点', () => {
     test('Contact 取环境变量 SECURITY_CONTACT_EMAIL', async () => {
       const original = process.env.SECURITY_CONTACT_EMAIL;
       process.env.SECURITY_CONTACT_EMAIL = 'sec@fire.example';
-      const res = await request(buildApp()).get('/.well-known/security.txt');
-      expect(res.text).toContain('Contact: mailto:sec@fire.example');
-      if (original === undefined) delete process.env.SECURITY_CONTACT_EMAIL;
-      else process.env.SECURITY_CONTACT_EMAIL = original;
+      try {
+        const res = await request(buildApp()).get('/.well-known/security.txt');
+        expect(res.text).toContain('Contact: mailto:sec@fire.example');
+      } finally {
+        // 断言抛错也必须恢复 env 快照（与同文件 security policy 用例同口径）
+        if (original === undefined) delete process.env.SECURITY_CONTACT_EMAIL;
+        else process.env.SECURITY_CONTACT_EMAIL = original;
+      }
     });
 
     test('Policy 取 SECURITY_POLICY_URL；未配置整行缺省；换行截断防字段注入（2026-11-01 P0-5）', async () => {

@@ -8,7 +8,16 @@ const retry = require('../../services/forensicManifestRetry');
 const prune = require('../../services/forensicManifestPrune');
 const LOCK = require('../../services/forensicManifestLock');
 
-const tmpdir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'mret-'));
+// mkdtemp 目录登记表：文件级 afterAll 统一回收，不靠单个用例自觉（测试卫生）。
+const tmpDirs = [];
+const tmpdir = () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mret-'));
+  tmpDirs.push(dir);
+  return dir;
+};
+afterAll(() => {
+  for (const dir of tmpDirs) fs.rmSync(dir, { recursive: true, force: true });
+});
 const AT = new Date('2026-11-01T02:00:00.000Z');
 
 describe('B-4 时钟回拨：必须能与篡改区分开', () => {

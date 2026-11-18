@@ -121,7 +121,7 @@ describe('authService gap B', () => {
 
     test('ENC_INVALID - 注册时 encPassword 解密失败', async () => {
       // 注册验证码默认开启（src/config/index.js:115 顶层 registerCaptchaEnabled；
-      // models/SystemConfig.js:208 的 fallback 同读顶层；全仓无任何地方设
+      // models/SystemConfig.js:214 的 fallback 同读顶层；全仓无任何地方设
       // REGISTER_CAPTCHA_ENABLED=false），而 authService.registerUser 的验证码闸
       // （src/services/authService/session.js:52）排在密文解密
       // （src/services/authService/session.js:82）**之前** ⇒ 不打桩就会被 CAPTCHA_INVALID 拦下，

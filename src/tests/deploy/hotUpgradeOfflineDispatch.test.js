@@ -31,6 +31,15 @@ const REF = 'ghcr.io/acme/fsms@' + DIGEST;
 const JOB_ID = '33333333-2222-4333-8444-555555555555';
 const ALLOWLIST = 'ghcr.io/acme/';
 
+// 登记式临时目录回收：每用例的 fsms-offline-dispatch-* 目录在用例结束后删除，
+// 不再向 os.tmpdir() 泄漏。afterEach 在断言之后运行，不影响断言本身。
+const tempDirs = [];
+afterEach(() => {
+  for (const dir of tempDirs.splice(0)) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 /** 档板记录：每次 spawn 的 file/args；按脚本名区分两段 */
 const SPAWN_CALLS = [];
 /** 档板行为开关：各段返回的退出码（用例内设置） */
@@ -58,6 +67,7 @@ const agent = require('../../../scripts/hotUpgradeAgent');
 
 function makeEnv() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fsms-offline-dispatch-'));
+  tempDirs.push(dir);
   const queueDir = path.join(dir, 'upgrade');
   const nginxConf = path.join(dir, 'nginx.conf');
   fs.writeFileSync(

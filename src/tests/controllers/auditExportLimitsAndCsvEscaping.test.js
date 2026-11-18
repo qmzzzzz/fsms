@@ -2,8 +2,11 @@
  * ──────────────────────────────────────────────────────────────────────────
  * 本文件的定位（2026-09-20 补注，由变异审计批量补齐）
  *
- * 被测对象：审计导出的硬上限与 CSV 转义
- * 守护的不变式：超上限必须拒绝；CSV 字段必须转义（防公式/列注入）
+ * 被测对象：审计导出的 CSV 转义
+ * 守护的不变式：CSV 字段必须转义（防公式/列注入）
+ * 覆盖边界：文件名中的 "Limits" 易生误导——「超上限必须拒绝」不变式**不在本文件**
+ *   覆盖（本文件仅 1 条 CSV 转义用例，无上限用例；上限覆盖已迁往分区外文件，
+ *   见 AUDIT-REPORT-2026-11-17 §2.3-I）。评估覆盖时以本节为准，勿按文件名推断。
  * 可证伪性：本轮未做变异实测
  *
  * 命名沿革：2026-09-20 由 `auditExportBoundary.test.js` 更名。旧名里的
@@ -15,7 +18,9 @@
  */
 
 /**
- * Audit export hard-limit and CSV escaping regression tests.
+ * Audit export CSV escaping regression tests.
+ * Note: the hard-limit ("over-limit export must be rejected") invariant is NOT
+ * covered in this file; that coverage migrated out (see AUDIT-REPORT-2026-11-17 §2.3-I).
  */
 
 const request = require('supertest');

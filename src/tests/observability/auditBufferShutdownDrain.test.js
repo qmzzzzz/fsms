@@ -109,7 +109,11 @@ describe('审计缓冲的关停排空（F-101）', () => {
     auditBuffer.__resetForTest();
     insertSpy.mockRestore();
     intervalSpy.mockRestore();
-    await AuditLog.deleteMany({ username: /^shutdown_/ }).catch(() => {});
+    // append-only 集合：清理必须显式带 bypassAppendOnly，否则钩子拦截后
+    // 只会被下面的 .catch(() => {}) 静默吞掉，残留数据跨用例传播
+    await AuditLog.deleteMany({ username: /^shutdown_/ }, { bypassAppendOnly: true }).catch(
+      () => {}
+    );
   });
 
   afterAll(async () => {

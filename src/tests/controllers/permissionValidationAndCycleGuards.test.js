@@ -83,6 +83,18 @@ describe('权限接口加固回归', () => {
 
   afterAll(async () => {
     if (mongoose.connection.readyState !== 0) {
+      // 回收本文件夹具：perm_admin 用户、PERM_ADMIN_ROLE 角色、各用例创建的
+      // 测试权限（batchok/dupe/orphan/cycle*/normstat/pwa 等前缀，均挂在
+      // module:'test' 下，不会误删 module:'system' 的公共种子）
+      await User.deleteMany({ username: 'perm_admin' }).catch(() => {});
+      await Role.deleteMany({ code: 'PERM_ADMIN_ROLE' }).catch(() => {});
+      await Permission.deleteMany({
+        module: 'test',
+        code: {
+          $regex:
+            '^(batchok|dupe|orphan|badparent|nofield|bulk|cycle[a-z]*|normstat|pwa|pwb|pwor|pwol):',
+        },
+      }).catch(() => {});
       await mongoose.connection.close();
     }
   });

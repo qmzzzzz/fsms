@@ -16,9 +16,9 @@
  * 以及"已终结的报警"不能因为我是 handler 就能再改（状态机不被绕过）。
  */
 const request = require('supertest');
-const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const { randomPassword } = require('./helpers/buildLoginEnvelope');
+const { signTestToken } = require('./helpers/signTestToken');
 
 describe('被指派的处理人对单条报警有操作权', () => {
   let app;
@@ -28,12 +28,6 @@ describe('被指派的处理人对单条报警有操作权', () => {
   let FireAlarm;
   const stamp = `ah${Date.now()}`.replace(/\d/g, (d) => 'wxyzabbcde'[Number(d)]);
   const PASSWORD = randomPassword();
-  const tokenOf = (user) =>
-    jwt.sign(
-      { userId: String(user._id), username: user.username, tokenVersion: user.tokenVersion || 0 },
-      process.env.JWT_SECRET,
-      { expiresIn: '24h' }
-    );
 
   const ensurePerm = async (code) => {
     const module = code.split(':')[0];
@@ -139,7 +133,7 @@ describe('被指派的处理人对单条报警有操作权', () => {
     const alarm = await openAlarm();
     const res = await request(app)
       .put(`/api/alarms/${alarm._id}/arrive`)
-      .set('Authorization', `Bearer ${tokenOf(handler)}`)
+      .set('Authorization', `Bearer ${signTestToken(handler)}`)
       .send({});
     expect(res.status).toBe(200);
     const after = await FireAlarm.findById(alarm._id);
@@ -150,7 +144,7 @@ describe('被指派的处理人对单条报警有操作权', () => {
     const alarm = await openAlarm();
     const res = await request(app)
       .put(`/api/alarms/${alarm._id}/resolve`)
-      .set('Authorization', `Bearer ${tokenOf(handler)}`)
+      .set('Authorization', `Bearer ${signTestToken(handler)}`)
       .send({ handleResult: `${stamp} 现场确认并处置`, cause: 'equipment_fault' });
     expect(res.status).toBe(200);
     const after = await FireAlarm.findById(alarm._id);
@@ -161,7 +155,7 @@ describe('被指派的处理人对单条报警有操作权', () => {
     const alarm = await openAlarm();
     const res = await request(app)
       .get(`/api/alarms/${alarm._id}`)
-      .set('Authorization', `Bearer ${tokenOf(handler)}`);
+      .set('Authorization', `Bearer ${signTestToken(handler)}`);
     expect(res.status).toBe(200);
   });
 
@@ -169,7 +163,7 @@ describe('被指派的处理人对单条报警有操作权', () => {
     const alarm = await openAlarm();
     const res = await request(app)
       .put(`/api/alarms/${alarm._id}/arrive`)
-      .set('Authorization', `Bearer ${tokenOf(bystander)}`)
+      .set('Authorization', `Bearer ${signTestToken(bystander)}`)
       .send({});
     expect(res.status).toBe(403);
   });
@@ -182,7 +176,7 @@ describe('被指派的处理人对单条报警有操作权', () => {
     });
     const res = await request(app)
       .put(`/api/alarms/${alarm._id}/arrive`)
-      .set('Authorization', `Bearer ${tokenOf(handler)}`)
+      .set('Authorization', `Bearer ${signTestToken(handler)}`)
       .send({});
     expect(res.status).toBe(409);
   });

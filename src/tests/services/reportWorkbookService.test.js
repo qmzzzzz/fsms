@@ -4,6 +4,11 @@ const { fetchExportRows, writeExportWorkbook } = require('../../services/reportW
 const { createWorkbook } = require('../../utils/xlsxWriter');
 const FireDevice = require('../../models/FireDevice');
 
+// 断言失败也要还原模型 spy（mockRestore 不能只写在断言之后）：避免桩泄漏到后续用例
+afterEach(() => {
+  jest.restoreAllMocks();
+});
+
 /**
  * 成功导出现在要等目的端表态（writeExportWorkbook → writeWorkbookToResponse），
  * 而这里打桩的 workbook.write 不产生真实流事件。桩按"正常收尾"办事：

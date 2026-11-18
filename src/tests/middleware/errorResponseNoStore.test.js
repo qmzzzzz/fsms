@@ -79,7 +79,10 @@ const EXIT_REGISTRY = [
     // 2026-11-05 登录枚举收口（d13f431 对端桶）+ 攻击检测面接线新增两处 respond429 调用点
     funnel: { name: 'respond429', callSites: 17 },
   },
-  { file: 'src/routes/wellKnownRoutes.js', statuses: [429], sites: 3 },
+  // 2026-11-17 工厂化：三个上报限流器的 429 出口收进 reportLimiterOf 单一工厂
+  // （handler: (req, res) => setNoStore(res).status(429).end()），源码面 .status(429) 只剩 1 处；
+  // 「所有 429 路径都带 no-store」的门禁意图不变——下方「真实链路」三连用例继续逐端点验证。
+  { file: 'src/routes/wellKnownRoutes.js', statuses: [429], sites: 1 },
   { file: 'src/config/swagger.js', statuses: [429], sites: 1 },
   { file: 'src/middleware/originCheck.js', statuses: [403], sites: 2 },
 ];

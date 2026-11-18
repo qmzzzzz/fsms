@@ -31,6 +31,9 @@ describe('registerUser 的 create 撞键归一臂（DUPLICATE）', () => {
 
   afterAll(async () => {
     await User.deleteMany({ username: /^zzdup/ }).catch(() => {});
+    // 本套件在 beforeAll 种下的全局配置行也要回收，并同步失效进程内缓存
+    await SystemConfig.deleteMany({ key: 'registerCaptchaEnabled' }).catch(() => {});
+    SystemConfig.invalidateRegisterCaptchaCache?.();
     if (mongoose.connection.readyState !== 0) {
       await mongoose.connection.close();
     }
@@ -50,6 +53,33 @@ describe('registerUser 的 create 撞键归一臂（DUPLICATE）', () => {
         email: `zzdup${Date.now()}@example.com`,
         password: randomPassword(),
         realName: '撞键测试',
+        privacyConsent: true,
+      },
+      { ip: '127.0.0.1', userAgent: 'dup-key-test', method: 'POST', path: '/api/auth/register' }
+    );
+
+    expect(createSpy).toHaveBeenCalled();
+    expect(out.outcome).toBe('DUPLICATE');
+    createSpy.mockRestore();
+  });
+
+  test('判重通过但 create 撞 emailKey 唯一索引（emailKey_1）⇒ 同样归一 DUPLICATE', async () => {
+    // 服务注释声称 username_ci / emailKey_1 两把唯一索引共用同一条归一臂。
+    // 上一条只钉了 username_ci 分支；这里补 emailKey 分支——若有人把归一收窄成
+    // 只认 username_ci，邮箱撞键会重新以 500 冒泡（防枚举口径被打破）。
+    const createSpy = jest.spyOn(User, 'create').mockRejectedValueOnce(
+      Object.assign(new Error('E11000 duplicate key error collection users index emailKey_1'), {
+        code: 11000,
+        keyPattern: { emailKey: 1 },
+      })
+    );
+
+    const out = await registerUser(
+      {
+        username: `zzdupem${Date.now()}`,
+        email: `zzdupem${Date.now()}@example.com`,
+        password: randomPassword(),
+        realName: '邮箱撞键测试',
         privacyConsent: true,
       },
       { ip: '127.0.0.1', userAgent: 'dup-key-test', method: 'POST', path: '/api/auth/register' }

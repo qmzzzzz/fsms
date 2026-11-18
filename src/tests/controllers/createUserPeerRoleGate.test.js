@@ -77,7 +77,8 @@ describe('建号轨的同级角色归属闸（与 assignRoles 同尺）', () => 
       },
       { upsert: true, new: true }
     );
-    // *:* 用 upsert：其它套件也播种同一条，create 会撞 unique 索引
+    // *:* 用 upsert：现行拓扑为每测试文件独立空库（见 setup.js），跨套件不再共享；
+    // upsert 仅防同一文件重复执行播种时撞 code 的 unique 索引
     const wildcardPerm = await Permission.findOneAndUpdate(
       { code: '*:*' },
       { $setOnInsert: { name: '全部权限', code: '*:*', type: 'api', module: 'system' } },

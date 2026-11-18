@@ -17,6 +17,8 @@
  *     且其 `default` 条款必须在 switch 体内 `return`/`throw`（不许裸 `break;` 落空）。
  *     并附**闸的自检**：把判据喂一个退化样例（`default: break;`），必须判为违规——
  *     否则这条闸就是恒真的（本仓踩过一次 `gateSelfTest` 正则恒真的坑）。
+ *
+ * 注记（2026-11-17 审计修复批）：本文件含源码文本闸/精确计数棘轮，重构时需同步更新登记值。
  */
 
 jest.mock('express-validator', () => ({

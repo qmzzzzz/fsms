@@ -152,11 +152,14 @@ describe('迁移 20260928000000 与模型声明的对账', () => {
 
     // ── M-3：key 漂移（第八轮审计补的判据）─────────────────────────────────
     //
-    // 现状（登记项 M-1）：迁移 sameCollation 只比 locale/strength，up() **从不比较 KEY**，
-    // 于是"同名 + collation 一致 + key 漂移"会被判成"已存在，跳过"。下面三条用例断言的是
-    // **正确行为**（漂移必须被纠正），因此对着当前迁移**必然是红的**——红即证据：
-    // 说明这套判据真的在设防，而不是"跑绿了所以没事"。
-    // 实测危害（真实 mongod 8.0.34，见 work/audit-round8-compose-migrations.md §3.3）：
+    // 历史背景（登记项 M-1，缺陷已修复）：迁移曾用 sameCollation 只比 locale/strength，
+    // up() **从不比较 KEY**，"同名 + collation 一致 + key 漂移"会被判成"已存在，跳过"。
+    // 下面三条用例断言的是**正确行为**（漂移必须被纠正）。
+    // 现行为：迁移 up() 已按**完整 specSig**（key 有序 + collation 全字段 + unique/sparse/
+    // partialFilterExpression 等）比对，签名不一致即 dropIndex 后按声明重建
+    // （见 migrations/_lib/indexSpec.js 与迁移文件头"幂等"一节），因此这三条用例今天
+    // 应当**全绿**——绿说明判据与实现已对齐；若转红说明幂等判据退化（漏比维度）。
+    // 实测危害（修复前的旧迁移，真实 mongod 8.0.34，见 work/audit-round8-compose-migrations.md §3.3）：
     //   · 反序 key 漂移 ⇒ 查询计划从 IXSCAN 退化为 COLLSCAN（20k 条 4000→20000 docs）；
     //   · 缺 timestamp ⇒ 排序只能走内存（200k 条 304ms 阻塞排序）；
     //   · caseLevel 类细项漂移 ⇒ 同上退化为 COLLSCAN。

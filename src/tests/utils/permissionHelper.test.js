@@ -22,9 +22,21 @@ describe('层级校验 helper（O-13）', () => {
     permissionHelper = require('../../utils/permissionHelper');
   });
 
+  // 清理挪入 afterAll（此前写在用例断言之后）：断言一失败，LV_A_*/LV_B_* 角色与
+  // lvl_user_* 用户就残留库中。用例内只登记，无论成败统一回收。
+  const createdRoleIds = [];
+  const createdUserIds = [];
+
   afterAll(async () => {
-    if (mongoose.connection.readyState !== 0) {
-      await mongoose.connection.close();
+    try {
+      if (mongoose.connection.readyState !== 0) {
+        await User.deleteMany({ _id: { $in: createdUserIds } }).catch(() => {});
+        await Role.deleteMany({ _id: { $in: createdRoleIds } }).catch(() => {});
+      }
+    } finally {
+      if (mongoose.connection.readyState !== 0) {
+        await mongoose.connection.close();
+      }
     }
   });
 
@@ -59,11 +71,11 @@ describe('层级校验 helper（O-13）', () => {
         roles: [roleA._id, roleB._id],
       });
 
+      createdRoleIds.push(roleA._id, roleB._id);
+      createdUserIds.push(user._id);
+
       const maxLevel = await permissionHelper.getOperatorMaxLevel(String(user._id));
       expect(maxLevel).toBe(8);
-
-      await User.deleteOne({ _id: user._id });
-      await Role.deleteMany({ _id: { $in: [roleA._id, roleB._id] } });
     });
 
     test('用户不存在返回 0（undefined 路径）', async () => {

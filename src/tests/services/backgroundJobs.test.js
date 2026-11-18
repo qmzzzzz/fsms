@@ -11,6 +11,18 @@ const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
 
+// P3（投递层隔离）：checkBruteForce / checkBulkExport / checkPermissionAbuse 内部的
+// dispatchNotification 在模块加载期就解构绑定了 securityAlertDelivery.sendNotification，
+// 事后对 securityAlert / alertDispatch 的模块导出做 spyOn 拦不住这些调用点。
+// 这里在模块层替换投递层：测试机即便配了 SECURITY_ALERT_WEBHOOK 等 env 也不会真实外呼
+//（webhook 未配置时本就空操作，行为不变）。用**普通 async 函数**而不是 jest.fn：
+// 本文件不依赖对它的调用断言（需要观察的用例自会 spyOn securityAlert.sendNotification），
+// 普通函数也不会被任何 mockReset/restore 类操作清掉实现。
+jest.mock('../../services/securityAlertDelivery', () => ({
+  sendNotification: async () => undefined,
+  isWebhookTargetAllowed: () => true,
+}));
+
 const makeRes = () => {
   const res = {
     statusCode: 200,
@@ -82,10 +94,36 @@ describe('后台任务与错误路径（批次 E）', () => {
   afterAll(async () => {
     if (mongoose.connection.readyState !== 0) {
       const Role2 = require('../../models/Role');
+      const FireDevice2 = require('../../models/FireDevice');
+      const Inspection2 = require('../../models/Inspection');
       await User.deleteOne({ username: `eadmin${stamp}` }).catch(() => {});
       await Role2.deleteOne({ code: `SUPER_ADMIN_E_${stamp}` }).catch(() => {});
+      // 本套件写入的审计行（含 riskLevel=high/critical 的 brute_force_login /
+      // bulk_data_export / permission_abuse 告警行）按 stamp 用户名收口。
+      // 审计是 append-only 集合：清理必须带 bypassAppendOnly（mongoose 8 只收两参）。
+      await require('../../models/AuditLog')
+        .deleteMany(
+          {
+            username: {
+              $in: [
+                `eadmin${stamp}`,
+                `efail${stamp}`,
+                `bf${stamp}`,
+                `bf2${stamp}`,
+                `chain${stamp}`,
+                `bfx${stamp}`,
+              ],
+            },
+          },
+          { bypassAppendOnly: true }
+        )
+        .catch(() => {});
+      await FireDevice2.deleteMany({ deviceCode: `E-${stamp}-EXP` }).catch(() => {});
+      await Inspection2.deleteMany({ title: `逾期_${stamp}` }).catch(() => {});
+      // 只清本套件触发的自动封禁（brute force 用例的 203.0.113.210 与
+      // permission abuse 用例的 203.0.113.220），不再按 source:'auto' 全量删
       await require('../../models/IPBlacklist')
-        .deleteMany({ source: 'auto' })
+        .deleteMany({ source: 'auto', ip: { $in: ['203.0.113.210', '203.0.113.220'] } })
         .catch(() => {});
       await mongoose.connection.close();
     }

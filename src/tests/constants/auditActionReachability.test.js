@@ -49,6 +49,13 @@ const {
 const OID = '6aab4cb4ee7f2bc07fcd7a8d';
 const UUID = '550e8400-e29b-41d4-a716-446655440000';
 
+/** 路由声明扫描只认「字符串字面量路径」：单引号/双引号/模板串三种形态都要命中。
+ *  方向 fail-closed：漏扫一条路由 ⇒ 它的 action 派生不出来 ⇒ 「白名单 ⊆ 可达」或
+ *  「技术文档无冗余」必有一处红（不会静默放过）——扩展形态后必须跑全量确认
+ *  NEVER_PRODUCED 台账不变。捕获组：1=方法，2=引号，3=路径字面量。 */
+const ROUTE_DECL_RE = /router\.(get|post|put|patch|delete)\(\s*(['"`])((?:\\.|(?!\2).)*)\2/g;
+const APP_API_DECL_RE = /app\.(get|post|put|patch|delete)\(\s*(['"`])(\/api(?:\/(?:(?!\2).)*)?)\2/g;
+
 /** security/auditLog.js 的 auditGetExcludePaths（从源码读，不手抄——手抄必然漂移） */
 function readAuditGetExcludePaths() {
   const secSrc = fs.readFileSync(path.join(SRC_DIR, 'middleware/security/auditLog.js'), 'utf8');
@@ -114,9 +121,9 @@ function scanRoutes() {
       continue;
     }
     const src = fs.readFileSync(path.join(ROUTES_DIR, f), 'utf8');
-    for (const m of src.matchAll(/router\.(get|post|put|patch|delete)\(\s*'([^']*)'/g)) {
+    for (const m of src.matchAll(ROUTE_DECL_RE)) {
       const method = m[1].toUpperCase();
-      const route = (prefix + (m[2] === '/' ? '' : m[2])).replace(/\/+/g, '/');
+      const route = (prefix + (m[3] === '/' ? '' : m[3])).replace(/\/+/g, '/');
       const concrete = concretize(route);
       const category = deriveCategory(concrete);
       rows.push({
@@ -132,9 +139,9 @@ function scanRoutes() {
   // routes/*.js，但同样落在 app.use('/api/', auditLog()) 之下。不纳入扫描，
   // 它们派生的 action（system_view）会被误判为「永不产生」。
   const appSrc = fs.readFileSync(path.join(SRC_DIR, 'app.js'), 'utf8');
-  for (const m of appSrc.matchAll(/app\.(get|post|put|patch|delete)\(\s*'(\/api(?:\/[^']*)?)'/g)) {
+  for (const m of appSrc.matchAll(APP_API_DECL_RE)) {
     const method = m[1].toUpperCase();
-    const route = m[2];
+    const route = m[3];
     const concrete = concretize(route);
     const category = deriveCategory(concrete);
     rows.push({
@@ -278,6 +285,27 @@ describe('挂载前缀取数（与 auditMeta 闸共用 helpers/routeMounts）', 
       { forensicRoutes: [{ parent: 'securityRoutes', sub: '/forensic' }] }
     );
     expect(() => prefixOf('forensicRoutes')).toThrow(/父路由 securityRoutes/);
+  });
+
+  test('路由扫描器自检：单引号/双引号/模板串三种字面量都要命中（漏扫会误判 NEVER_PRODUCED）', () => {
+    const routeSrc = [
+      "router.get('/a', handler);",
+      'router.post("/b/:id", handler);',
+      'router.delete(`/c`, handler);',
+    ].join('\n');
+    expect([...routeSrc.matchAll(ROUTE_DECL_RE)].map((m) => m[3])).toEqual(['/a', '/b/:id', '/c']);
+    const appSrc = [
+      "app.get('/api/x', handler);",
+      'app.post("/api/y", handler);',
+      'app.get(`/api/z`, handler);',
+    ].join('\n');
+    expect([...appSrc.matchAll(APP_API_DECL_RE)].map((m) => m[3])).toEqual([
+      '/api/x',
+      '/api/y',
+      '/api/z',
+    ]);
+    // 变量/非字面量路径不在本闸职责内：扫不到会按 fail-closed 方向红出来，不静默放过
+    expect([...`router.get(path, handler);`.matchAll(ROUTE_DECL_RE)]).toHaveLength(0);
   });
 });
 

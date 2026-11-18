@@ -310,7 +310,10 @@ describe('reportController.exportReport 分支补齐', () => {
       const FireDevice = require('../../models/FireDevice');
       const Inspection = require('../../models/Inspection');
       const AuditLog = require('../../models/AuditLog');
-      await FireAlarm.deleteMany({ alarmCode: new RegExp(`^REXP[AB]${stamp}`) }).catch(() => {});
+      // 报警种子三批：REXPA/REXPB 两批常规 + B-4 行序用例的 ORD${stamp}A/B/C
+      await FireAlarm.deleteMany({ alarmCode: new RegExp(`^(REXP[AB]|ORD)${stamp}`) }).catch(
+        () => {}
+      );
       await FireDevice.deleteMany({ deviceCode: new RegExp(`^REXPD${stamp}`) }).catch(() => {});
       await Inspection.deleteMany({ title: new RegExp(`^分支补齐.*巡检_${stamp}$`) }).catch(
         () => {}

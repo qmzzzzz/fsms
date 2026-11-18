@@ -46,17 +46,29 @@ describe('登录权限快照：只含生效角色/权限项', () => {
   afterAll(async () => {
     if (mongoose.connection.readyState !== 0) {
       await User.deleteMany({ username: new RegExp(`^${stamp}`) }).catch(() => {});
+      // 补回收本文件创建的角色与权限（code/name 均带 stamp，不会误伤他套件数据）
+      await Role.deleteMany({ code: new RegExp(`^ZZQO_.*${stamp}$`, 'i') }).catch(() => {});
+      await Permission.deleteMany({ name: new RegExp(`^${stamp} 权限 `) }).catch(() => {});
       await mongoose.connection.close();
     }
   });
 
+  // 权限播种用 upsert 而不是裸 create：code 上有唯一索引，device:* 是多个套件
+  // 共用的公共码，裸 create 在该码已存在时撞 E11000；播种语义应当是"确保存在"，
+  // 与 adversarialProbeRegression 等文件的 findOneAndUpdate 写法对齐。
   const makePerm = (action, status = 'active') =>
-    Permission.create({
-      name: `${stamp} 权限 ${action}`,
-      code: `device:${action}`,
-      module: 'device',
-      status,
-    });
+    Permission.findOneAndUpdate(
+      { code: `device:${action}` },
+      {
+        $setOnInsert: {
+          name: `${stamp} 权限 ${action}`,
+          code: `device:${action}`,
+          module: 'device',
+          status,
+        },
+      },
+      { upsert: true, new: true }
+    );
 
   const login = async (user) =>
     authService.loginUser(
@@ -74,7 +86,8 @@ describe('登录权限快照：只含生效角色/权限项', () => {
   const makeUserWithRole = async (suffix, permissionIds, roleExtra = {}) => {
     const role = await Role.create({
       name: `${stamp}角色${suffix}`,
-      code: `ZZQO_${suffix.toUpperCase()}`,
+      // code 同样带本文件 stamp：ZZQO_* 是无后缀的固定码，多文件同库时会撞唯一索引
+      code: `ZZQO_${suffix.toUpperCase()}_${stamp}`,
       level: 3,
       permissions: permissionIds,
       ...roleExtra,

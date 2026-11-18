@@ -35,6 +35,9 @@ describe('userPermissionService 降级期权限缓存 TTL（P-3）', () => {
     require('../../models/Role');
     require('../../models/Permission');
 
+    // 预清理：残留的同名夹具先清掉，再创建本套件的用户（afterAll 已有同名清理，
+    // 这里补 beforeAll 侧，复跑/复用库场景下不会撞唯一键）
+    await User.deleteMany({ username: 'permcache_p3' }).catch(() => {});
     user = await User.create({
       username: 'permcache_p3',
       email: 'permcache_p3@example.com',

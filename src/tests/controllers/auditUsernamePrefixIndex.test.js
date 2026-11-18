@@ -31,6 +31,8 @@
  *  - service 里 `withCollation` 去掉 ⇒ ⑤（真跑 DB）红；
  *  - `auditExportService` 里 `withCollation` 去掉 ⇒ ⑥ 红（列表能搜到、导出搜不到）；
  *  - 上界退回「末字符码点 +1」⇒ ①（形状）与 ④ 的 z 前缀用例红。
+ *
+ * 注记（2026-11-17 审计修复批）：本文件含源码文本闸/精确计数棘轮，重构时需同步更新登记值。
  */
 
 'use strict';

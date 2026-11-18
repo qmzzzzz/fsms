@@ -27,8 +27,19 @@ const DIGEST = `sha256:${'b'.repeat(64)}`;
 const IMAGE = `ghcr.io/acme/fsms@${DIGEST}`;
 const JOB_ID = '11111111-2222-4333-8444-555555555555';
 
+// 登记式临时目录回收：makeEnv() 的 fsms-upgrade-* 与 HMAC 夹具的 fsms-hmac-*
+// 目录在每个用例结束后逐一删除，不再向 os.tmpdir() 泄漏。afterEach 在断言之后
+// 运行，断言所需产物在使用期内完整保留。
+const tempDirs = [];
+afterEach(() => {
+  for (const dir of tempDirs.splice(0)) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 function makeEnv() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fsms-upgrade-'));
+  tempDirs.push(dir);
   const queueDir = path.join(dir, 'upgrade');
   const nginxConf = path.join(dir, 'nginx.conf');
   fs.writeFileSync(
@@ -102,6 +113,7 @@ const readBeat = (queueDir) =>
 describe('代理配置与自检', () => {
   test('HMAC 密钥文件去掉 BOM/行尾；含 NUL 时拒绝（会被环境变量静默截断）', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fsms-hmac-'));
+    tempDirs.push(dir);
     const good = path.join(dir, 'good');
     fs.writeFileSync(good, '\uFEFF' + SECRET + '\r\n', 'utf8');
     expect(queue.readHmacSecret({ HMAC_SECRET_FILE: good })).toEqual({

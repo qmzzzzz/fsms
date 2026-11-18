@@ -131,26 +131,48 @@ describe('E2E 旅程数与 CI 防裁剪下界一致', () => {
   const CI_YML = path.join(ROOT, '.github', 'workflows', 'ci.yml');
 
   /**
+   * 剥掉字符串字面量与注释，只留代码视图（块注释按等长空白替换以保住行号）。
+   *
+   * 必须先剥字符串再剥注释：spec 里的路由通配串（形如 '**' + '/api/**'）内含
+   * "斜杠+星号"，先剥注释会把它误当块注释起点，把中间的真实用例整段吞掉。
+   */
+  const stripStrings = (text) =>
+    text.replace(/'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"/g, (m) => m.replace(/[^\n]/g, ' '));
+  const stripComments = (text) =>
+    stripStrings(text)
+      .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
+      .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+
+  /** 非旅程形态：钩子/分组/配置调用，一律不计 */
+  const NON_JOURNEY_CALL =
+    /^test\.(?:describe|beforeEach|afterEach|beforeAll|afterAll|use|configure|extend)\b/;
+  /** 条件旅程：是否执行由凭据等外部条件决定，不计入下界 */
+  const CONDITIONAL_CALL = /^test\.(?:skip|fixme)\b/;
+
+  /**
    * 统计 spec 文件里声明的**无条件**旅程数。
+   *
+   * 按「剥注释后的全文 \btest\s*\( 」统计，不再依赖行首形态：
+   * 行首正则会漏计折行书写（`test(` 后换行接用例名）的旅程。
    *
    * 三类形态必须分开，否则数字会错：
    *  1. `test(...)` / `test.only(...)` —— 真旅程，计入；
    *  2. `test.skip(cond)` / `test.fixme(...)` —— 条件旅程，**不计入**下界。
    *     它们跑不跑由 E2E_USER/E2E_PASS 是否注入决定，计入下界等于把"凭据没注入"
    *     变成门禁永远红；而真被跳过时 ci.yml 的 `skipped > 0` 已经判红，不重复计；
-   *  3. `test.beforeEach` / `test.afterEach` / `test.describe` —— 不是旅程。
-   *     这里最容易被误算：`test.beforeEach` 同样是"行首 test.xxx(" 形态，
-   *     用宽松正则统计会凭空多出十几个"旅程"，下界跟着虚高，真正被裁剪时反而拦不住。
+   *  3. `test.beforeEach` / `test.afterEach` / `test.describe` 等钩子与分组 —— 不是旅程。
+   *     这里最容易被误算：它们与真旅程同为 `test.xxx(` 形态，不排除会凭空多出
+   *     十几个"旅程"，下界跟着虚高，真正被裁剪时反而拦不住。
    */
   const countJourneys = (files) => {
     let unconditional = 0;
     let conditional = 0;
     for (const file of files) {
-      for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
-        if (!/^\s*test(?:\.\w+)*\s*\(/.test(line)) continue;
-        if (/^\s*test\.(beforeEach|afterEach|beforeAll|afterAll|describe)\s*\(/.test(line))
-          continue;
-        if (/^\s*test\.(skip|fixme)\s*\(/.test(line)) {
+      const text = stripComments(fs.readFileSync(file, 'utf8'));
+      for (const m of text.matchAll(/\btest(?:\.\w+)*\s*\(/g)) {
+        const call = m[0];
+        if (NON_JOURNEY_CALL.test(call)) continue;
+        if (CONDITIONAL_CALL.test(call)) {
           conditional += 1;
         } else {
           unconditional += 1;
@@ -222,6 +244,10 @@ describe('e2e 选择器：自研 class 必须在真实前端源码中存在', ()
   });
 
   test.each(selectorTokens.sort())('选择器 .%s 在前端源码中有对应实现', (token) => {
-    expect(frontendCorpus).toContain(token);
+    // 不能用子串包含：常见词在注释/别的标识符里出现过也会假绿（例如某个
+    // 与 class 同名的局部变量）。按 class 的定义/使用形态匹配——`.token` 且
+    // 其后不再接同类名字符；`.sidebar.collapsed`、`.sidebar-menu li` 这类
+    // 复合选择器同样算数（`.` 不在 [\w-] 内，能通过负向断言）。
+    expect(new RegExp(`\\.${token}(?![\\w-])`).test(frontendCorpus)).toBe(true);
   });
 });

@@ -174,7 +174,6 @@ describe('审计报告修复综合回归', () => {
     test.each([
       ['对象型 search（原 500）', '/api/users?search[$regex]=^a'],
       ['对象型 status（操作符注入）', '/api/users?status[$ne]=active'],
-      ['对象型 status（操作符注入）', '/api/users?status[$ne]=active'],
     ])('%s → 400 而非 500', async (_label, path) => {
       const res = await asAdmin(path);
       expect(res.status).toBe(400);

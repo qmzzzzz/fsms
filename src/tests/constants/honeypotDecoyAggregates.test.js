@@ -152,6 +152,66 @@ const PARITY = [
   },
 ];
 
+// 逐端点期望键集（含键序）：全部从真实控制器/服务代码导出，不是从被验模块抄——
+//   · 对象信封（success）：钉 data 顶层键名与字面量顺序（userController/read.js 的
+//     mapUserStatsFacet、accessReviewService.reviewSummary+控制器 spread、
+//     deviceStatsService.getDeviceStats 返回字面量、deviceReminder.js 的 result 字面量、
+//     AlarmService/InspectionService 的 { total, byX } 返回值）；
+//   · 数组信封（role-options/permission-tree/grant-list/device-expiring）：Object.keys
+//     对数组只给下标，键集落在行投影上——roleService.listAllRoles 的 select('name code
+//     description')+默认 _id、roleController.buildPermissionTree 的模块/权限节点字面量、
+//     privilegeGrantService 的 GRANT_LIST_FIELDS、deviceController 的 [_id, ...DEVICE_EXPIRY_FIELDS]。
+const EXPECTED_KEYS = {
+  'user-stats': {
+    dataKeys: ['total', 'active', 'inactive', 'thisMonth', 'byDepartment', 'byRole'],
+  },
+  'role-options': { rowKeys: ['_id', 'name', 'code', 'description'] },
+  'permission-tree': {
+    rowKeys: ['_id', 'id', 'name', 'module', 'children'],
+    childKeys: ['_id', 'id', 'name', 'code', 'type', 'module', 'path', 'method', 'children'],
+  },
+  'grant-list': { rowKeys: [...grantRules.GRANT_LIST_FIELDS] },
+  'grant-review': {
+    dataKeys: [
+      'asOf',
+      'overdueDays',
+      'active',
+      'expiringSoon',
+      'highRiskActive',
+      'overdue',
+      'pending',
+      'overdueGrants',
+    ],
+  },
+  'device-stats': {
+    dataKeys: [
+      'total',
+      'byType',
+      'byStatus',
+      'needMaintenance',
+      'needSchedule',
+      'expiringSoon',
+      'expired',
+      'expiryUnknown',
+    ],
+  },
+  'device-expiring': { rowKeys: ['_id', ...aggData.DEVICE_EXPIRY_FIELDS] },
+  'device-reminders': {
+    dataKeys: [
+      'scannedAt',
+      'expiringDays',
+      'summary',
+      'expired',
+      'expiringSoon',
+      'needMaintenance',
+      'needSchedule',
+      'limits',
+    ],
+  },
+  'alarm-stats': { dataKeys: ['total', 'byStatus', 'byLevel', 'byType'] },
+  'inspection-stats': { dataKeys: ['total', 'byStatus', 'byType', 'byResult'] },
+};
+
 const MESSAGE_FILES = {
   'user-stats': 'src/controllers/userController/read.js',
   'role-options': 'src/controllers/roleController.js',
@@ -220,7 +280,27 @@ describe('蜜罐聚合端点表：声明与真实路由表同源', () => {
       const hit = resolveOf(item.id);
       const tokens = item.tokens;
       expect(orderedTokens(codeOf(item.file), tokens)).toBe(true);
-      expect(Object.keys(hit.data)).toEqual(expect.arrayContaining([]));
+      const expected = EXPECTED_KEYS[item.id];
+      if (expected.dataKeys) {
+        // 对象信封：data 顶层键名与键序必须与真实控制器/服务的字面量顺序完全相等
+        //（arrayContaining([]) 恒真，改用逐键全等比对才可证伪）
+        expect(Object.keys(hit.data)).toEqual(expected.dataKeys);
+      } else {
+        // 数组信封：键集钉在行投影上（对数组 Object.keys 只回下标，不承载键集信息）
+        expect(hit.data.length).toBeGreaterThan(0);
+        for (const row of hit.data) {
+          expect(Object.keys(row)).toEqual(expected.rowKeys);
+        }
+        if (expected.childKeys) {
+          // 权限树：顶层是模块节点，权限子节点另有九键投影，一并钉住
+          expect(hit.data.some((node) => node.children.length > 0)).toBe(true);
+          for (const node of hit.data) {
+            for (const child of node.children) {
+              expect(Object.keys(child)).toEqual(expected.childKeys);
+            }
+          }
+        }
+      }
     }
   });
 

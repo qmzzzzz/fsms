@@ -17,9 +17,9 @@
  */
 
 const request = require('supertest');
-const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const { randomPassword } = require('./helpers/buildLoginEnvelope');
+const { signTestToken } = require('./helpers/signTestToken');
 
 describe('临时锁定到期必须自动放行（与"未到期拦截"成对）', () => {
   let User;
@@ -36,11 +36,7 @@ describe('临时锁定到期必须自动放行（与"未到期拦截"成对）',
       password: PASSWORD,
     });
     if (Object.keys(update).length > 0) await User.findByIdAndUpdate(user._id, update);
-    users[name] = jwt.sign(
-      { userId: String(user._id), username: user.username, tokenVersion: 0 },
-      process.env.JWT_SECRET,
-      { expiresIn: '24h' }
-    );
+    users[name] = signTestToken(user);
   };
 
   beforeAll(async () => {

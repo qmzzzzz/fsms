@@ -36,6 +36,11 @@ const FireDevice = require('../../models/FireDevice');
 
 const LIMIT = EXPORT_LIMIT;
 
+// 断言失败也要还原模型 spy（mockRestore 不能只写在断言之后）：避免桩泄漏到后续用例
+afterEach(() => {
+  jest.restoreAllMocks();
+});
+
 const makeWorksheet = () => ({ addRow: jest.fn() });
 
 /** 目的端由测试亲自摆位的 res 桩：`fire(event, err)` 按 once 语义派发 */

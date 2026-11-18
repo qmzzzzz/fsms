@@ -5,7 +5,7 @@
  * winston 的 `log(level, msg)` 在 msg 是对象时会把这个对象的 `level` 覆盖成分派级别，
  * 而两种版式都因此丢掉告警等级：
  *  - 生产 jsonFormat：落盘 `"level":"error"`（critical 这个字面串整行消失）；
- *  - dev/test printfLayout（`src/utils/logger.js:115`）：`level` 被解构进 `[error]` 前缀，
+ *  - dev/test printfLayout（`src/utils/logger.js:137`）：`level` 被解构进 `[error]` 前缀，
  *    meta 里连这个键都不剩。
  * 后果：webhook 关掉 / 被级别过滤 / 被白名单拒掉时，**文件日志是唯一的取证通道**，
  * 而 ELK 上 `SECURITY_ALERT AND level:critical` 这类规则永远不会命中；

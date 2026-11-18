@@ -6,6 +6,9 @@
  * 守护的不变式：层级拦截必须双向；内置角色状态不可改；被引用的角色不可删
  * 可证伪性：变异实测（筛查 N=2）：杀 3/6
  *
+ * 用例命名约定（2026-11-18）：用例名（含分组标题）一律**不带源码行号**——
+ * 行号会随源码演进而漂移失实；定位用例一律以语义化名称为准。
+ *
  * ⚠️ 既往审计指出的边界（2026-09-20 逐条**内容复核**；原报告行号已漂移，按代码特征取证）
  *   标记：[仍有效] 复核后问题依旧 / [已修复] 已被后续修复解决 / [部分有效] 仅部分成立 /
  *   [已自陈] 用例内已记录并给出保留理由。复核证据见 `deliverables/AGENT工作总账与待办-2026-09-21.md` §2.9 测试资产。
@@ -308,7 +311,7 @@ describe('roleController 覆盖率补齐', () => {
     delete: (url) => request(app).delete(url).set('Authorization', `Bearer ${token}`),
   });
 
-  // ===================== getRoles: search branch (lines 78-79) =====================
+  // ===================== getRoles: search branch =====================
 
   test('getRoles: search parameter triggers $or regex branch', async () => {
     const res = await authed(superToken).get('/api/roles?search=RCG');
@@ -381,7 +384,7 @@ describe('roleController 覆盖率补齐', () => {
 
   // ===================== createRole non-superadmin branches =====================
 
-  test('createRole: non-superadmin level > operatorMaxLevel → 403 (line 203)', async () => {
+  test('createRole: non-superadmin level > operatorMaxLevel → 403', async () => {
     // Mid operator (level 5) tries to create role at level 8
     const res = await authed(midToken)
       .post('/api/roles')
@@ -411,7 +414,7 @@ describe('roleController 覆盖率补齐', () => {
     );
   });
 
-  test('createRole: non-superadmin lacking permission subset → 403 (lines 213-218)', async () => {
+  test('createRole: non-superadmin lacking permission subset → 403', async () => {
     // Mid operator has role:* perms but not rcg*:* — try assigning rcg perm
     const res = await authed(midToken)
       .post('/api/roles')
@@ -442,7 +445,7 @@ describe('roleController 覆盖率补齐', () => {
 
   // ===================== updateRole error branches =====================
 
-  test('updateRole: validation errors → 400 (line 256)', async () => {
+  test('updateRole: validation errors → 400', async () => {
     // Send invalid name (too long, > 50 chars)
     const res = await authed(superToken)
       .put(`/api/roles/${customRoleId}`)
@@ -454,7 +457,7 @@ describe('roleController 覆盖率补齐', () => {
     expect(res.body.errors.fieldErrors[0].path).toBe('name');
   });
 
-  test('updateRole: role not found → 404 (line 263)', async () => {
+  test('updateRole: role not found → 404', async () => {
     const fakeId = new mongoose.Types.ObjectId();
     const res = await authed(superToken).put(`/api/roles/${fakeId}`).send({ name: '不存在' });
     expect(res.status).toBe(404);
@@ -462,7 +465,7 @@ describe('roleController 覆盖率补齐', () => {
     expect(res.body.errors.errorCode).toBe('ROLE_NOT_FOUND');
   });
 
-  test('updateRole: built-in role status change → 403 (lines 278-279)', async () => {
+  test('updateRole: built-in role status change → 403', async () => {
     const res = await authed(superToken)
       .put(`/api/roles/${builtinSuperId}`)
       .send({ status: 'inactive' });
@@ -470,7 +473,7 @@ describe('roleController 覆盖率补齐', () => {
     expect(res.body.message).toContain('内置角色不能修改状态');
   });
 
-  test('updateRole: name trimming works (line 318 path)', async () => {
+  test('updateRole: name trimming works', async () => {
     const res = await authed(superToken)
       .put(`/api/roles/${customRoleId}`)
       .send({ name: '  已更名_RCG  ' });
@@ -478,14 +481,14 @@ describe('roleController 覆盖率补齐', () => {
     expect(res.body.data.name).toBe('已更名_RCG');
   });
 
-  test('updateRole: non-superadmin level > operatorMaxLevel → 403 (lines 295-301)', async () => {
+  test('updateRole: non-superadmin level > operatorMaxLevel → 403', async () => {
     // Mid operator (level 5) tries to set custom role to level 8
     const res = await authed(midToken).put(`/api/roles/${customRoleId}`).send({ level: 8 });
     expect(res.status).toBe(403);
     expect(res.body.message).toContain('无权将角色层级设置为高于自身层级');
   });
 
-  test('updateRole: non-superadmin touching higher-level role → 403 (lines 303-308)', async () => {
+  test('updateRole: non-superadmin touching higher-level role → 403', async () => {
     // Create a level-7 role via superadmin, then mid (level 5) tries to change its level
     const highRole = await Role.create({
       name: '高级_RCG',
@@ -574,7 +577,7 @@ describe('roleController 覆盖率补齐', () => {
 
   // ===================== assignPermissions error branches =====================
 
-  test('assignPermissions: validation errors → 400 (line 351)', async () => {
+  test('assignPermissions: validation errors → 400', async () => {
     // Send non-array permissions (triggers express-validator isArray check)
     const res = await authed(superToken)
       .put(`/api/roles/${customRoleId}/permissions`)
@@ -585,7 +588,7 @@ describe('roleController 覆盖率补齐', () => {
     expect(res.body.errors.fieldErrors[0].path).toBe('permissions');
   });
 
-  test('assignPermissions: missing permissions array → 400 (line 357)', async () => {
+  test('assignPermissions: missing permissions array → 400', async () => {
     // Body without permissions field at all
     const res = await authed(superToken).put(`/api/roles/${customRoleId}/permissions`).send({});
     expect(res.status).toBe(400);
@@ -595,7 +598,7 @@ describe('roleController 覆盖率补齐', () => {
     expect(res.body.errors.fieldErrors[0].path).toBe('permissions');
   });
 
-  test('assignPermissions: role not found → 404 (line 362)', async () => {
+  test('assignPermissions: role not found → 404', async () => {
     const fakeId = new mongoose.Types.ObjectId();
     const res = await authed(superToken)
       .put(`/api/roles/${fakeId}/permissions`)
@@ -604,7 +607,7 @@ describe('roleController 覆盖率补齐', () => {
     expect(res.body.errors.errorCode).toBe('ROLE_NOT_FOUND');
   });
 
-  test('assignPermissions: empty permissions array after filter → 400 (line 374)', async () => {
+  test('assignPermissions: empty permissions array after filter → 400', async () => {
     // Empty array passes isArray() validation but yields uniquePermIds.length === 0
     const res = await authed(superToken)
       .put(`/api/roles/${customRoleId}/permissions`)
@@ -613,7 +616,7 @@ describe('roleController 覆盖率补齐', () => {
     expect(res.body.message).toContain('请提供至少一个有效的权限 ID');
   });
 
-  test('assignPermissions: invalid permission IDs in DB → 400 (line 380)', async () => {
+  test('assignPermissions: invalid permission IDs in DB → 400', async () => {
     // Valid ObjectId format but doesn't exist in DB
     const fakePermId = new mongoose.Types.ObjectId().toString();
     const res = await authed(superToken)
@@ -623,7 +626,7 @@ describe('roleController 覆盖率补齐', () => {
     expect(res.body.message).toContain('存在无效的权限 ID');
   });
 
-  test('assignPermissions: non-superadmin level check global mode → 403 (lines 392-394)', async () => {
+  test('assignPermissions: non-superadmin level check global mode → 403', async () => {
     // Mid operator (level 5) tries to assign permissions on mid-level role (level 5, >= operatorMaxLevel)
     const res = await authed(midToken)
       .put(`/api/roles/${midOperatorRoleId}/permissions`)
@@ -677,7 +680,7 @@ describe('roleController 覆盖率补齐', () => {
     }
   });
 
-  test('assignPermissions: non-superadmin lacking perm subset → 403 (lines 399-404)', async () => {
+  test('assignPermissions: non-superadmin lacking perm subset → 403', async () => {
     // Mid operator tries to assign rcg perm to a lower-level custom role
     // First create a level-3 role owned by nobody
     const lowCustomRole = await Role.create({
@@ -694,7 +697,7 @@ describe('roleController 覆盖率补齐', () => {
     await Role.findByIdAndDelete(lowCustomRole._id).catch(() => {});
   });
 
-  // ===================== assignPermissions: clone mode (lines 412-502) =====================
+  // ===================== assignPermissions: clone mode =====================
 
   test('assignPermissions: clone mode — non-built-in role + targetUserId → 400（静默退回全局改写已收口）', async () => {
     // 行为变更（审计 I 项）：clone mode 只对内置角色生效；自定义角色带 targetUserId 此前
@@ -725,7 +728,7 @@ describe('roleController 覆盖率补齐', () => {
     expect(body).not.toContain('clonedCode');
   });
 
-  test('assignPermissions: clone mode — target user not found → 404 (line 419)', async () => {
+  test('assignPermissions: clone mode — target user not found → 404', async () => {
     let guestRole = await Role.findOne({ code: 'GUEST' });
     if (!guestRole) {
       guestRole = await Role.create({
@@ -744,7 +747,7 @@ describe('roleController 覆盖率补齐', () => {
     expect(res.body.message).toContain('目标用户不存在');
   });
 
-  test('assignPermissions: clone mode — target user lacks the role → 400 (line 424)', async () => {
+  test('assignPermissions: clone mode — target user lacks the role → 400', async () => {
     let guestRole = await Role.findOne({ code: 'GUEST' });
     if (!guestRole) {
       guestRole = await Role.create({
@@ -770,7 +773,7 @@ describe('roleController 覆盖率补齐', () => {
     await User.findByIdAndDelete(noRoleUser._id).catch(() => {});
   });
 
-  test('assignPermissions: clone mode — target same/higher level user → 403 (line 438)', async () => {
+  test('assignPermissions: clone mode — target same/higher level user → 403', async () => {
     let guestRole = await Role.findOne({ code: 'GUEST' });
     if (!guestRole) {
       guestRole = await Role.create({
@@ -818,7 +821,7 @@ describe('roleController 覆盖率补齐', () => {
     }
   });
 
-  test('assignPermissions: clone mode — SUPER_ADMIN role not clonable → 403 (line 449)', async () => {
+  test('assignPermissions: clone mode — SUPER_ADMIN role not clonable → 403', async () => {
     // To reach line 449 (isSuperAdminRole check), we need isSelf=true so line 437 passes.
     // The superadmin targets themselves with the SUPER_ADMIN role in clone mode.
     const res = await authed(superToken)
@@ -828,7 +831,7 @@ describe('roleController 覆盖率补齐', () => {
     expect(res.body.errors?.errorCode).toBe('SUPER_ADMIN_ROLE_NOT_CLONABLE');
   });
 
-  test('assignPermissions: clone mode — successful clone (lines 453-509)', async () => {
+  test('assignPermissions: clone mode — successful clone', async () => {
     let guestRole = await Role.findOne({ code: 'GUEST' });
     if (!guestRole) {
       guestRole = await Role.create({
@@ -866,9 +869,9 @@ describe('roleController 覆盖率补齐', () => {
     }
   });
 
-  // ===================== assignPermissions: super admin role locked (lines 518-519) =====================
+  // ===================== assignPermissions: super admin role locked =====================
 
-  test('assignPermissions: SUPER_ADMIN global mode → 403 (lines 518-519)', async () => {
+  test('assignPermissions: SUPER_ADMIN global mode → 403', async () => {
     const res = await authed(superToken)
       .put(`/api/roles/${builtinSuperId}/permissions`)
       .send({ permissions: [permReadId] });
@@ -876,9 +879,9 @@ describe('roleController 覆盖率补齐', () => {
     expect(res.body.errors?.errorCode).toBe('SUPER_ADMIN_ROLE_PERMISSIONS_LOCKED');
   });
 
-  // ===================== assignPermissions: global mode success + syncPermissionsToUsers (line 553) =====================
+  // ===================== assignPermissions: global mode success + syncPermissionsToUsers =====================
 
-  test('assignPermissions: global mode success triggers syncPermissionsToUsers (line 553)', async () => {
+  test('assignPermissions: global mode success triggers syncPermissionsToUsers', async () => {
     // Create a dedicated custom role and assign a user to it
     const syncRole = await Role.create({
       name: '同步测试_RCG',
@@ -914,14 +917,14 @@ describe('roleController 覆盖率补齐', () => {
 
   // ===================== deleteRole error branches =====================
 
-  test('deleteRole: role not found → 404 (line 571)', async () => {
+  test('deleteRole: role not found → 404', async () => {
     const fakeId = new mongoose.Types.ObjectId();
     const res = await authed(superToken).delete(`/api/roles/${fakeId}`);
     expect(res.status).toBe(404);
     expect(res.body.errors.errorCode).toBe('ROLE_NOT_FOUND');
   });
 
-  test('deleteRole: role in use → 400 (line 581)', async () => {
+  test('deleteRole: role in use → 400', async () => {
     // customRoleId is held by nobody yet; create a user holding it
     const holderUser = await User.create({
       username: `rcgholder${stamp}`,
@@ -935,9 +938,9 @@ describe('roleController 覆盖率补齐', () => {
     await User.findByIdAndDelete(holderUser._id).catch(() => {});
   });
 
-  // ===================== getPermissionTree: parent-child node mounting (lines 651-653) =====================
+  // ===================== getPermissionTree: parent-child node mounting =====================
 
-  test('getPermissionTree: parent-child relationship covered (lines 651-653)', async () => {
+  test('getPermissionTree: parent-child relationship covered', async () => {
     // Create parent permission
     const parentPerm = await Permission.create({
       name: 'RCG父权限',
@@ -1055,9 +1058,9 @@ describe('roleController 覆盖率补齐', () => {
     findRoleForUpdateSpy.mockRestore();
   });
 
-  // ===================== emitWebSocketEvent with permissions-updated type (line 35) =====================
+  // ===================== emitWebSocketEvent with permissions-updated type =====================
 
-  test('emitWebSocketEvent: permissions-updated type uses emitPermissionUpdate (line 35)', async () => {
+  test('emitWebSocketEvent: permissions-updated type uses emitPermissionUpdate', async () => {
     const wsService = app.get('wsService');
     wsService.emitPermissionUpdate.mockClear();
 
@@ -1079,9 +1082,9 @@ describe('roleController 覆盖率补齐', () => {
     await Role.findByIdAndDelete(evtRole._id).catch(() => {});
   });
 
-  // ===================== syncPermissionsToUsers failure path (lines 61-62) =====================
+  // ===================== syncPermissionsToUsers failure path =====================
 
-  test('syncPermissionsToUsers: emitPermissionSync failure logged but not blocking (lines 61-62)', async () => {
+  test('syncPermissionsToUsers: emitPermissionSync failure logged but not blocking', async () => {
     const wsService = app.get('wsService');
     const origMock = wsService.emitPermissionSync.getMockImplementation();
     wsService.emitPermissionSync.mockRejectedValueOnce(new Error('WS push failed'));
@@ -1119,9 +1122,9 @@ describe('roleController 覆盖率补齐', () => {
     await Role.findByIdAndDelete(failRole._id).catch(() => {});
   });
 
-  // ===================== assignPermissions: clone mode — non-superadmin level check (line 396-398) =====================
+  // ===================== assignPermissions: clone mode — non-superadmin level check =====================
 
-  test('assignPermissions: clone mode non-superadmin role.level > operatorMaxLevel → 403 (lines 396-398)', async () => {
+  test('assignPermissions: clone mode non-superadmin role.level > operatorMaxLevel → 403', async () => {
     // Create a built-in role at level 8 (higher than mid operator level 5)
     let highBuiltin = await Role.findOne({ code: 'SECURITY_ADMIN' });
     if (!highBuiltin) {

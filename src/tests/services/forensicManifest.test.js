@@ -37,7 +37,17 @@ const {
   dateKeyOf,
 } = require('../../services/forensicManifest');
 
-const tmpdir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'fc-manifest-'));
+// mkdtemp 目录登记表：用例自建自用，文件级 afterAll 统一回收，不靠单个用例自觉
+// ——漏清理的临时目录会在系统 tmpdir 里无限累积（测试卫生：临时目录必须可回收）。
+const tmpDirs = [];
+const tmpdir = () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fc-manifest-'));
+  tmpDirs.push(dir);
+  return dir;
+};
+afterAll(() => {
+  for (const dir of tmpDirs) fs.rmSync(dir, { recursive: true, force: true });
+});
 
 describe('清单批次链：每批一行、chainHash 串起来', () => {
   beforeEach(() => resetManifestState());
@@ -444,6 +454,56 @@ describe('边界与特殊情况（用户追问"考虑了吗"后补测的实测�
       expect.arrayContaining(['unparsable_line', 'chain_broken'])
     );
     expect(v.count).toBe(2); // 第 1、3 行仍被读进来（不因坏行整份放弃）
+  });
+});
+
+describe('末行哈希缓存（P2 性能）：连续追加不得整读清单文件', () => {
+  beforeEach(() => resetManifestState());
+  const day = new Date(Date.UTC(2026, 9, 31));
+  const fileOf = (dir) => path.join(dir, '2026-10-31.jsonl');
+
+  test('连续追加：冷缓存（已有文件）整读一次，其后追加零整读（fs spy 钉死）', async () => {
+    const dir = tmpdir();
+    // 预置一行（模拟进程重启后面对已有清单）：首个追加必须整读拿到真实末行
+    const seed = batchEntryOf({ recordHashes: ['s'.repeat(64)], now: day });
+    fs.writeFileSync(fileOf(dir), JSON.stringify(seed) + '\n');
+    const readSpy = jest.spyOn(fs, 'readFileSync');
+    try {
+      await appendBatch({ dir, recordHashes: ['a'.repeat(64)], now: day });
+      const firstReads = readSpy.mock.calls.filter(([f]) => f === fileOf(dir)).length;
+      await appendBatch({ dir, recordHashes: ['b'.repeat(64)], now: day });
+      await appendBatch({ dir, recordHashes: ['c'.repeat(64)], now: day });
+      const totalReads = readSpy.mock.calls.filter(([f]) => f === fileOf(dir)).length;
+      // 冷缓存整读一次；之后两批命中缓存零整读。若有人改回"每批 readFileSync 整读"，
+      // 这里立即红（锁文件的读已按路径过滤，不参与计数）。
+      expect(firstReads).toBe(1);
+      expect(totalReads).toBe(1);
+    } finally {
+      readSpy.mockRestore();
+    }
+    // 缓存没接错哈希：四批链仍自洽
+    const v = verifyManifest({ dir, date: day });
+    expect(v.problems).toEqual([]);
+    expect(v.count).toBe(4);
+  });
+
+  test('清单被锁外改写（字节数失配）⇒ 缓存失效重读，新批接在真实末行后', async () => {
+    const dir = tmpdir();
+    await appendBatch({ dir, recordHashes: ['a'.repeat(64)], now: day });
+    // 模拟另一进程绕开本进程缓存追加了一行
+    const { entries } = readManifest({ dir, date: day });
+    const foreign = batchEntryOf({
+      prevChainHash: entries[0].chainHash,
+      recordHashes: ['f'.repeat(64)],
+      now: day,
+    });
+    fs.appendFileSync(fileOf(dir), JSON.stringify(foreign) + '\n');
+    await appendBatch({ dir, recordHashes: ['b'.repeat(64)], now: day });
+    // 若缓存未失效，新行会接在本进程旧末行（第 1 行）后 ⇒ 与外部行断链；
+    // 失效重读后必须接在外部行（第 2 行）后，三行链自洽
+    const v = verifyManifest({ dir, date: day });
+    expect(v.problems).toEqual([]);
+    expect(v.count).toBe(3);
   });
 });
 

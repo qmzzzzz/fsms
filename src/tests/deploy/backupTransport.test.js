@@ -24,8 +24,19 @@ const SCRIPT = path.join(ROOT, 'scripts/backup-mongo.sh');
 const URI = 'mongodb://fsms:Sup3r%21Secret@mongo:27017/fire-safety?authSource=admin';
 const FAKE_ARCHIVE_BYTES = Buffer.from('FAKE-GZIP-ARCHIVE-PAYLOAD');
 
+// 登记式临时目录回收：makeWorkspace() 建出的目录（含桩产物与假连接串）在
+// 每个用例结束后逐一删除，不再向 os.tmpdir() 泄漏。afterEach 在断言之后运行，
+// 断言所需产物在使用期内完整保留。
+const tempWorkspaces = [];
+afterEach(() => {
+  for (const dir of tempWorkspaces.splice(0)) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 function makeWorkspace() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backup-transport-'));
+  tempWorkspaces.push(dir);
   const bin = path.join(dir, 'bin');
   fs.mkdirSync(bin);
   const work = { dir, bin, backupDir: path.join(dir, 'backups') };

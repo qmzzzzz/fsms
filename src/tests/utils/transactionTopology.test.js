@@ -118,8 +118,8 @@ describe('withTransaction 拓扑能力感知', () => {
     // 缺陷形状（2026-10-03 审计线）：`finally { session.endSession(); }` 丢掉了返回值。
     // 驱动里这个方法是 async，并且**只**对 MongoOperationTimeoutError 显式 rethrow
     // （node_modules/mongodb/lib/sessions.js:121-129，其余错误 squashError），
-    // 于是"事务清理超时"会变成一个没人持有的拒绝 ⇒ src/index.js:548 起
-    // （2026-11-15 审计收敛批把崩溃收尾链抽到 utils/crashFlush.js，注册区净 −4 行后由 :526 顺移；同日全树 prettier 规范化后 :522→:524；PROXY 装配抽 helper 后 :524→:533；同日取证/审计域批（P2-11 信号注册前移 + 拒绝计数）后 :533→:550）
+    // 于是"事务清理超时"会变成一个没人持有的拒绝 ⇒ src/index.js:549 起
+    // （2026-11-15 审计收敛批把崩溃收尾链抽到 utils/crashFlush.js，注册区净 −4 行后由 :526 顺移；同日全树 prettier 规范化后 :522→:524；PROXY 装配抽 helper 后 :524→:533；同日取证/审计域批（P2-11 信号注册前移 + 拒绝计数）后 :533→:550；2026-11-17 审计修复批（入口 24h 轮询提具名常量）后 :550→:548，同批收口（入口提常量净 −3 行）实测修正为 :549）
     // 的 unhandledRejection 口径（所有环境）flush 审计后 process.exit(1)：
     // 一次清理超时打死整个进程。上游同一条链都是"接住"的：
     // mongoose/lib/connection.js:743 `session.endSession().catch(() => {})`、

@@ -1,15 +1,17 @@
 /**
  * 边界情况补齐（2026-09-15 边界覆盖专项）
  *
- * 从 lcov 未覆盖分支逐行审阅后确认的四类真边界（此前无测试）：
+ * 从 lcov 未覆盖分支逐行审阅后确认的三类真边界（此前无测试）：
  *  1. auditScopeFilter（评价报告 #22 拆分件）：self/department 各越权与放行分支
  *     ——权限翻译逻辑，全部是安全语义分支
  *  2. cursorPagination：sortField 被注入为非 string（qs 展开攻击面）与
  *     valueType 非法值分支
  *  3. ipRange：规则超长（单条 64 / 整体 8192）与 ipaddr.js 抛错容错
  *     （畸形 IP、地址族错配）
- *  4. protocolCompliance：同名 header 多值的字节求和分支 + 违规审计异步落库
- *     （setImmediate 路径，含 AuditLog.record 抛错的容错分支）
+ *
+ * 注：初稿曾列第 4 类 protocolCompliance（同名 header 多值的字节求和分支 + 违规
+ * 审计异步落库），但该覆盖实际在 src/tests/middleware/protocolCompliance.test.js，
+ * 不在本文件（审计 2026-11-17 主题 I：文件头须与实际内容一致）。
  */
 
 const mockPermissionRbac = { getDataScope: jest.fn() };

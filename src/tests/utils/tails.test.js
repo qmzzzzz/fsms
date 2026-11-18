@@ -68,6 +68,19 @@ describe('尾差覆盖（批次 F）', () => {
       await Role.deleteOne({ code: `RB_${stamp}` }).catch(() => {});
       await FireDevice.deleteMany({ deviceCode: new RegExp(`^F-${stamp}`) }).catch(() => {});
       await IPBlacklist.deleteMany({ ip: '203.0.113.77' }).catch(() => {});
+      // 三类此前漏收的残留：
+      // ① upsert 出来的 *:* 通配权限；
+      await Permission.deleteOne({ code: '*:*' }).catch(() => {});
+      // ② 内置保护用例可能新建的 ADMIN 角色——模型钩子对内置角色一律拒绝删除，
+      //    走原生 collection 回收（roleBuiltInDeleteGuard.test.js 同款做法）；
+      await mongoose.connection
+        .collection('roles')
+        .deleteOne({ code: 'ADMIN' })
+        .catch(() => {});
+      // ③ 审计行是 append-only，清理必须显式 bypassAppendOnly，按本文件的 stamp 归属回收
+      await AuditLog.deleteMany({ username: `fadmin${stamp}` }, { bypassAppendOnly: true }).catch(
+        () => {}
+      );
       await mongoose.connection.close();
     }
   });

@@ -29,14 +29,22 @@ const logger = require('../../utils/logger');
 // 又远小于回落后的默认间隔 32 ⇒ "间隔被回落成 32" 与 "间隔是 1" 在计数上可分。
 const APPENDS = 10;
 
+// 本文件会改写的全部 env（beforeAll 快照 / afterAll 按快照还原，见下）
+const WAL_ENV_KEYS = ['AUDIT_WAL_PATH', 'AUDIT_WAL_MAX_BYTES', 'AUDIT_WAL_STAT_INTERVAL'];
+
 describe('AUDIT_WAL_STAT_INTERVAL：只有正整数被采纳，非法值回落默认并留痕', () => {
   let tmpDir;
+  let walEnvSnapshot;
   let auditBuffer;
   let wal;
   let arm = 0;
 
   beforeAll(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wal-stat-interval-'));
+    // 快照必须在**改之前**取（同 walCapTrimFailureTaxonomy.test.js 的做法）：
+    // drive() 每臂改写 AUDIT_WAL_PATH、beforeAll 写 MAX_BYTES，不快照还原的话
+    // 这三态（含指向已删临时目录的路径）会泄漏给同 worker 的后续套件。
+    walEnvSnapshot = Object.fromEntries(WAL_ENV_KEYS.map((k) => [k, process.env[k]]));
     process.env.AUDIT_WAL_MAX_BYTES = '200';
     auditBuffer = require('../../services/auditBuffer');
     wal = require('../../services/auditBufferWal');
@@ -44,8 +52,12 @@ describe('AUDIT_WAL_STAT_INTERVAL：只有正整数被采纳，非法值回落�
 
   afterAll(() => {
     auditBuffer.stop();
-    delete process.env.AUDIT_WAL_STAT_INTERVAL;
-    delete process.env.AUDIT_WAL_MAX_BYTES;
+    // 按快照还原（原值为 undefined 的键必须 delete：`process.env.X = undefined`
+    // 会写入字符串 'undefined'）
+    for (const k of WAL_ENV_KEYS) {
+      if (walEnvSnapshot[k] === undefined) delete process.env[k];
+      else process.env[k] = walEnvSnapshot[k];
+    }
     try {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     } catch (_) {

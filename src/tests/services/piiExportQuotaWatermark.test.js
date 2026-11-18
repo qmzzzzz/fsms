@@ -16,12 +16,23 @@ const {
   piiExportWatermarkFor,
 } = require('../../services/piiExportWatermark');
 
+// 本套件审计夹具的统一用户名 stamp（写入真库 auditlogs 的行按它收口）
+const stamp = Date.now().toString(36);
+
 beforeAll(async () => {
   if (mongoose.connection.readyState === 0) await mongoose.connect(process.env.MONGODB_URI);
 });
 
 afterAll(async () => {
-  if (mongoose.connection.readyState !== 0) await mongoose.connection.close();
+  if (mongoose.connection.readyState !== 0) {
+    // 本套件写入的 view_sensitive_data 审计行（20+ 条）按 stamp 用户名清理；
+    // 审计是 append-only 集合，清理必须带 bypassAppendOnly（mongoose 8 两参形式）
+    await AuditLog.deleteMany(
+      { username: `quota-user-${stamp}` },
+      { bypassAppendOnly: true }
+    ).catch(() => {});
+    await mongoose.connection.close();
+  }
 });
 
 /** 每条用例独立的用户：本文件内的计数互不串味（也证明计数确实按 userId 分流） */
@@ -31,7 +42,7 @@ const exportRow = (userId, timestamp) => ({
   action: 'view_sensitive_data',
   category: 'report',
   userId,
-  username: 'quota-user',
+  username: `quota-user-${stamp}`,
   dataType: 'export_realname',
   success: true,
   riskLevel: 'medium',

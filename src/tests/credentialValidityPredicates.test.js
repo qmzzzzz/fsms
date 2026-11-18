@@ -215,9 +215,14 @@ describe('凭证有效性判据（UserSession.isUsable / tokenService 探测）'
 
     test('用户被禁用 ⇒ false（用户态这一格不许只看令牌）', async () => {
       await User.updateOne({ _id: uid }, { $set: { status: 'disabled' } });
-      await expect(tokenService.isAccessTokenValid(token)).resolves.toBe(false);
-      await expect(tokenService.isRefreshTokenValid(refresh)).resolves.toBe(false);
-      await User.updateOne({ _id: uid }, { $set: { status: 'active' } });
+      // 改完用户态必须 try/finally 恢复（对齐下方 lockUntil 用例的写法）：
+      // 断言失败时若不还原 status，共享 uid 的后续用例会读到 disabled 的脏状态
+      try {
+        await expect(tokenService.isAccessTokenValid(token)).resolves.toBe(false);
+        await expect(tokenService.isRefreshTokenValid(refresh)).resolves.toBe(false);
+      } finally {
+        await User.updateOne({ _id: uid }, { $set: { status: 'active' } });
+      }
       expect(await tokenService.isAccessTokenValid(token)).toBe(true);
     });
 

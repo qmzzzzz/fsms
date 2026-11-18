@@ -30,7 +30,8 @@ describe('全网段写入：痕迹晚于落库 + 删除侧守护救援路径', (
   const PASSWORD = randomPassword();
   const FULL_RANGE = '0.0.0.0/0';
   const RESCUE_WHITE = '127.0.0.0/8';
-  const createdIds = [];
+  const createdUserIds = [];
+  const createdRoleIds = [];
 
   const post = (body) =>
     request(app)
@@ -96,7 +97,7 @@ describe('全网段写入：痕迹晚于落库 + 删除侧守护救援路径', (
       level: 5,
       permissions: [configPerm._id],
     });
-    createdIds.push(String(secRole._id));
+    createdRoleIds.push(String(secRole._id));
 
     const uSuper = await User.create({
       username: 'grssuper' + stamp,
@@ -110,7 +111,7 @@ describe('全网段写入：痕迹晚于落库 + 删除侧守护救援路径', (
       password: PASSWORD,
       roles: [secRole._id],
     });
-    createdIds.push(String(uSuper._id), String(uSec._id));
+    createdUserIds.push(String(uSuper._id), String(uSec._id));
     const sign = (u) =>
       jwt.sign(
         { userId: String(u._id), username: u.username, tokenVersion: 0 },
@@ -135,8 +136,9 @@ describe('全网段写入：痕迹晚于落库 + 删除侧守护救援路径', (
       const User = require('../../models/User');
       const Role = require('../../models/Role');
       await IPBlacklist.deleteMany({}).catch(() => {});
-      await User.deleteMany({ _id: { $in: createdIds.slice(0, 2) } }).catch(() => {});
-      await Role.deleteMany({ _id: { $in: createdIds.slice(2) } }).catch(() => {});
+      // 角色/用户分流按 id 全量回收（此前 slice 错位会漏掉 uSec 与 secRole）
+      await User.deleteMany({ _id: { $in: createdUserIds } }).catch(() => {});
+      await Role.deleteMany({ _id: { $in: createdRoleIds } }).catch(() => {});
       await mongoose.connection.close();
     }
   });
@@ -149,6 +151,9 @@ describe('全网段写入：痕迹晚于落库 + 删除侧守护救援路径', (
       typedConfirm: FULL_RANGE,
     });
     expect(white.status).toBe(200);
+    // 白名单授权自身的痕迹也是 fire-and-forget：先等它落稳再取基线，
+    // 否则满载下它会在 after 快照后落地，被 ① 误判成"拒绝路径写了痕迹"。
+    await waitForStable(() => grantTraces());
     const before = await grantTraces();
 
     const black = await post({

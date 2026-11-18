@@ -123,12 +123,18 @@ describe('限流器接线门禁（源码形状）', () => {
 
   test('wellKnownRoutes 三个限流器接入共享存储并归一化键（P-9）', () => {
     const src = WELLKNOWN_SRC();
+    // 2026-11-17 起三个限流器由 reportLimiterOf(name, max) 工厂统一产出：store/keyGenerator/
+    // handler 只在工厂里写一份，差异只剩共享 store 命名空间与配额。门禁改为两层，意图不变：
+    // ① 钉工厂形状——store 必须接 makeSharedStore，键必须走安全裁决地址 + 归一化 +
+    //    IPv6 /56 聚合（工厂内单点定义恰好 1 处；计数变多即出现绕过工厂的裸限流器）；
+    // ② 三个上报/发现端点的注册点逐一显式走工厂并各自命名空间（独立计数），缺一个即红。
+    expect(src).toContain('const reportLimiterOf = (name, max) =>');
+    expect(src).toContain('store: makeSharedStore(name)');
+    expect(src.match(/normalizeRateLimitIp\(clientIpForSecurityDecision\(req\)\)/g).length).toBe(1);
+    expect(src.match(/ipKeyGenerator\(/g).length).toBe(1);
     for (const prefix of ['csp-report', 'client-errors', 'security-txt']) {
-      expect(src).toContain(`makeSharedStore('${prefix}')`);
+      expect(src).toContain(`reportLimiterOf('${prefix}'`);
     }
-    // 三个 keyGenerator 全部走安全裁决地址 + 归一化 + IPv6 /56 聚合
-    expect(src.match(/normalizeRateLimitIp\(clientIpForSecurityDecision\(req\)\)/g).length).toBe(3);
-    expect(src.match(/ipKeyGenerator\(/g).length).toBe(3);
   });
 });
 

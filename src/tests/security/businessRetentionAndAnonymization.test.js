@@ -30,9 +30,22 @@ describe('业务数据保留期声明（A2）', () => {
   const { MIN_RETENTION_DAYS, MAX_RETENTION_DAYS } = require('../../constants/retention');
 
   const ENV_KEYS = BUSINESS_RETENTION_POLICY.map((p) => p.envKey);
-  const clearEnv = () => ENV_KEYS.forEach((k) => delete process.env[k]);
-  beforeEach(clearEnv);
-  afterEach(clearEnv);
+  // 保存+恢复口径（对齐 backupPatrolAndDrillRecency / jwtKeyRotation）：
+  // 无条件 delete 会把运行环境原有的同名变量一并抹掉且不还原，
+  // 污染同 worker 后续测试文件的环境视图。
+  const savedEnv = {};
+  beforeEach(() => {
+    ENV_KEYS.forEach((k) => {
+      savedEnv[k] = process.env[k];
+      delete process.env[k];
+    });
+  });
+  afterEach(() => {
+    ENV_KEYS.forEach((k) => {
+      if (savedEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = savedEnv[k];
+    });
+  });
 
   test('受管业务集合清单：四个"无 TTL"的集合都被登记，且新增集合必须显式登记', () => {
     expect(BUSINESS_RETENTION_POLICY.map((p) => p.modelName).sort()).toEqual([

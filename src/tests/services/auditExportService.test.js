@@ -5,10 +5,18 @@ const {
   streamAuditExport,
 } = require('../../services/auditExportService');
 
-jest.mock('../../models/AuditLog', () => ({
-  countDocuments: jest.fn(),
-  find: jest.fn(),
-}));
+jest.mock('../../models/AuditLog', () => {
+  // P2-1：mock 只给 countDocuments/find 时，本文件内 RESPONSE_EXCLUDE 是 undefined，
+  // 服务层的 `.select(AuditLog.RESPONSE_EXCLUDE)` 与测试断言会一起退化成
+  // toHaveBeenCalledWith(undefined)——「排除清单挂没挂、挂的是不是真清单」都验不出来。
+  // 这里把真实模型上的清单透传给 mock：被测路径与断言用的才是同一份「活的」清单。
+  const actual = jest.requireActual('../../models/AuditLog');
+  return {
+    countDocuments: jest.fn(),
+    find: jest.fn(),
+    RESPONSE_EXCLUDE: actual.RESPONSE_EXCLUDE,
+  };
+});
 
 const AuditLog = require('../../models/AuditLog');
 
@@ -73,6 +81,14 @@ describe('audit export service', () => {
     // 这条腿此前是全字段取回，一次上限导出会把 5 万条记录的 hmac/body/params/query
     // 读进进程。RESPONSE_EXCLUDE 不含 -hash/-prevHash ⇒ 上面那条链摘要照样算得出，
     // 两件事由同一条用例同时钉住：清单挂了、且挂了没把链字段一起排除掉。
+    // 清单内容本身也要钉死（对 mock 透传的值做外部核对）：必须排除 hmac（防离线爆破
+    // HMAC_SECRET 的样本外流），且不得把链字段（hash/prevHash）排除掉——否则上面那条
+    // 链摘要断了粮。三件事由同一条用例同时钉住：清单真的挂到查询上、挂的确实是模型上
+    // 那份清单、且清单内容没有把链字段一起排除。
+    const actualResponseExclude = jest.requireActual('../../models/AuditLog').RESPONSE_EXCLUDE;
+    expect(AuditLog.RESPONSE_EXCLUDE).toBe(actualResponseExclude);
+    expect(actualResponseExclude).toContain('-hmac');
+    expect(actualResponseExclude).not.toMatch(/-hash|-prevHash/);
     expect(chain1.select).toHaveBeenCalledWith(AuditLog.RESPONSE_EXCLUDE);
 
     // 摘要必须可复算，且真的依赖记录内容。但注意口径：`sha256` 覆盖的是**记录的 hash 字段

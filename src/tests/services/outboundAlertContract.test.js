@@ -104,15 +104,24 @@ function scanEmitSites(rel, raw) {
   return { sites, dynamic };
 }
 
+// 全树扫描结果在文件生命周期内不变 ⇒ memoize 一次读盘复用（此前 4 个用例各全树读盘一遍）。
+// 返回缓存对象本身：调用方只读不改（变异用例走 scanEmitSites 直接传变异文本，不经过这里）。
+let allEmitSitesCache = null;
 const allEmitSites = () => {
-  const sites = [];
-  let dynamic = 0;
-  for (const f of scanEmitRootFiles()) {
-    const r = scanEmitSites(path.relative(ROOT, f).replace(/\\/g, '/'), fs.readFileSync(f, 'utf8'));
-    sites.push(...r.sites);
-    dynamic += r.dynamic;
+  if (!allEmitSitesCache) {
+    const sites = [];
+    let dynamic = 0;
+    for (const f of scanEmitRootFiles()) {
+      const r = scanEmitSites(
+        path.relative(ROOT, f).replace(/\\/g, '/'),
+        fs.readFileSync(f, 'utf8')
+      );
+      sites.push(...r.sites);
+      dynamic += r.dynamic;
+    }
+    allEmitSitesCache = { sites, dynamic };
   }
-  return { sites, dynamic };
+  return allEmitSitesCache;
 };
 
 const scanEmitRootFiles = () => SCAN_ROOTS.flatMap((r) => walkFiles(path.join(ROOT, r))).sort();

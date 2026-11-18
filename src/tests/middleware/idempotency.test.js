@@ -1277,71 +1277,84 @@ describe('在途租约：崩溃/被杀/永久挂起不再把键钉满 24h（真�
     const key = 'lease-late-' + stamp16();
     const lateKeyHash = keyHashOf('latefail', key);
     releaseLateClaim = null;
-
-    // X：认领后挂在门上。supertest 的请求是**惰性发车**（挂上 then/end 才真正送出），
-    // 不能等到用例末尾的 await 才发车——那样下面的认领轮询永远等不到请求到达。
-    // 立刻挂 then 触发在途；结论经包装 promise 交付（发送层失败折成 status 0，由断言显红）。
-    const firstSettled = post('latefail', {}, key).then(
-      (r) => r,
-      (e) => ({ status: 0, errMessage: String((e && e.message) || e) })
-    );
-    // 处理器开跑 = 中间件已完成认领（claim 先于 next()，登记失败会走 degradeOpen 放行
-    // 而不落记录——那个形态是真实 DB 故障，本用例会在下一个 waitFor 显式红）
-    await waitFor(() => countOf('latefail') >= 1, {
-      timeoutMs: 15000,
-      label: 'X 到达处理器（认领阶段已完成）',
-    });
-    await waitFor(
-      async () => {
-        const rec = await IdempotencyRecord.findOne({ keyHash: lateKeyHash }).lean();
-        return Boolean(rec) && rec.state === 'in_progress';
-      },
-      { timeoutMs: 15000, label: 'X 的在途认领落库' }
-    );
-    // 把 X 的认领回拨成「超租约」（seedClaim 同形，不真等 5 分钟）：此后同键请求可原子接管
-    await IdempotencyRecord.updateOne(
-      { keyHash: lateKeyHash },
-      {
-        $set: {
-          createdAt: new Date(Date.now() - 10 * 60 * 1000),
-          expiresAt: new Date(Date.now() - 10 * 60 * 1000 + RETENTION_MS),
-        },
+    // 门闩释放收口成幂等函数：无论断言在哪一步失败，finally 都能放开挂起的首个请求——
+    // 否则 X 永不收尾，测试进程被在途请求拖住
+    const releaseGate = () => {
+      if (typeof releaseLateClaim === 'function') {
+        const resolveGate = releaseLateClaim;
+        releaseLateClaim = null; // 只放一次：正式路径放行后 finally 再进来自动变空操作
+        resolveGate();
       }
-    );
+    };
 
-    const second = await post('latefail', {}, key); // Y：接管 + 2xx 完成
-    expect(second.status).toBe(201);
-    await waitFor(
-      async () => {
-        const rec = await IdempotencyRecord.findOne({ keyHash: lateKeyHash }).lean();
-        return Boolean(rec) && rec.state === 'completed';
-      },
-      { timeoutMs: 15000, label: 'Y 接管后收敛为 completed' }
-    );
+    try {
+      // X：认领后挂在门上。supertest 的请求是**惰性发车**（挂上 then/end 才真正送出），
+      // 不能等到用例末尾的 await 才发车——那样下面的认领轮询永远等不到请求到达。
+      // 立刻挂 then 触发在途；结论经包装 promise 交付（发送层失败折成 status 0，由断言显红）。
+      const firstSettled = post('latefail', {}, key).then(
+        (r) => r,
+        (e) => ({ status: 0, errMessage: String((e && e.message) || e) })
+      );
+      // 处理器开跑 = 中间件已完成认领（claim 先于 next()，登记失败会走 degradeOpen 放行
+      // 而不落记录——那个形态是真实 DB 故障，本用例会在下一个 waitFor 显式红）
+      await waitFor(() => countOf('latefail') >= 1, {
+        timeoutMs: 15000,
+        label: 'X 到达处理器（认领阶段已完成）',
+      });
+      await waitFor(
+        async () => {
+          const rec = await IdempotencyRecord.findOne({ keyHash: lateKeyHash }).lean();
+          return Boolean(rec) && rec.state === 'in_progress';
+        },
+        { timeoutMs: 15000, label: 'X 的在途认领落库' }
+      );
+      // 把 X 的认领回拨成「超租约」（seedClaim 同形，不真等 5 分钟）：此后同键请求可原子接管
+      await IdempotencyRecord.updateOne(
+        { keyHash: lateKeyHash },
+        {
+          $set: {
+            createdAt: new Date(Date.now() - 10 * 60 * 1000),
+            expiresAt: new Date(Date.now() - 10 * 60 * 1000 + RETENTION_MS),
+          },
+        }
+      );
 
-    releaseLateClaim(); // 放开 X：403 迟到收尾（旧实现在此删掉 Y 的记录）
-    const firstRes = await firstSettled;
-    expect(firstRes.status).toBe(403);
+      const second = await post('latefail', {}, key); // Y：接管 + 2xx 完成
+      expect(second.status).toBe(201);
+      await waitFor(
+        async () => {
+          const rec = await IdempotencyRecord.findOne({ keyHash: lateKeyHash }).lean();
+          return Boolean(rec) && rec.state === 'completed';
+        },
+        { timeoutMs: 15000, label: 'Y 接管后收敛为 completed' }
+      );
 
-    // 释放是响应后的 fire-and-forget 删（(f2) 同判例）：多轮采样确认 Y 的记录始终完好——
-    // 旧实现会在其中某一轮读到 null（记录被误删）。采样改走 waitFor 条件轮询：
-    // 每轮都是「真实 DB 往返 + 轮询间隔」，凑满 5 轮后统一断言，不再赌固定睡眠时长。
-    const samples = [];
-    await waitFor(
-      async () => {
-        const rec = await IdempotencyRecord.findOne({ keyHash: lateKeyHash }).lean();
-        samples.push(rec && rec.state);
-        return samples.length >= 5;
-      },
-      { timeoutMs: 4000, label: 'Y 的 completed 记录在 X 迟到收尾后的多轮采样中始终完好' }
-    );
-    expect(samples).toEqual(Array(5).fill('completed'));
+      releaseGate(); // 放开 X：403 迟到收尾（旧实现在此删掉 Y 的记录）
+      const firstRes = await firstSettled;
+      expect(firstRes.status).toBe(403);
 
-    // 判据仍在：同键第三次到达拿到 Y 的回放，而不是第三次真实执行
-    const third = await post('latefail', {}, key);
-    expect(third.status).toBe(201);
-    expect(third.headers['idempotency-replayed']).toBe('true');
-    expect(countOf('latefail')).toBe(2); // 修复前：third 重新执行 ⇒ 3
+      // 释放是响应后的 fire-and-forget 删（(f2) 同判例）：多轮采样确认 Y 的记录始终完好——
+      // 旧实现会在其中某一轮读到 null（记录被误删）。采样改走 waitFor 条件轮询：
+      // 每轮都是「真实 DB 往返 + 轮询间隔」，凑满 5 轮后统一断言，不再赌固定睡眠时长。
+      const samples = [];
+      await waitFor(
+        async () => {
+          const rec = await IdempotencyRecord.findOne({ keyHash: lateKeyHash }).lean();
+          samples.push(rec && rec.state);
+          return samples.length >= 5;
+        },
+        { timeoutMs: 4000, label: 'Y 的 completed 记录在 X 迟到收尾后的多轮采样中始终完好' }
+      );
+      expect(samples).toEqual(Array(5).fill('completed'));
+
+      // 判据仍在：同键第三次到达拿到 Y 的回放，而不是第三次真实执行
+      const third = await post('latefail', {}, key);
+      expect(third.status).toBe(201);
+      expect(third.headers['idempotency-replayed']).toBe('true');
+      expect(countOf('latefail')).toBe(2); // 修复前：third 重新执行 ⇒ 3
+    } finally {
+      releaseGate(); // 断言失败也必须放开门闩：挂起的首个请求永不收尾会拖死测试进程
+    }
   });
 });
 

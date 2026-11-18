@@ -45,7 +45,12 @@ const EXPECT = Object.freeze({
 const LURE = parseHoneypotUsernames().names[0];
 const BODY_MARK = `sp-body-${stamp}`;
 const seedRows = () => {
-  const now = new Date();
+  // 种子时刻锚定在当前业务日正午：读口的统计窗口是「业务时区的今天」
+  // （businessDayBounds(day)）。若用 new Date()，在业务时区午夜附近运行时
+  // 种子与断言可能落在两个业务日，种子全部落到窗口外的假红。
+  // 取当日窗口中点，距两侧日界最远；断言本身不变。
+  const bounds = businessDayBounds();
+  const now = new Date((bounds.start.getTime() + bounds.end.getTime()) / 2);
   const rows = [];
   for (let i = 0; i < EXPECT.attempts; i += 1) {
     rows.push({

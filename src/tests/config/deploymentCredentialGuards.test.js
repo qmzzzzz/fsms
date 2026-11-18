@@ -195,11 +195,15 @@ describe('REQUIRE_PRODUCTION_CONFIG：声明了生产语义就必须真的按生
     const exitSpy = jest.spyOn(process, 'exit').mockImplementation((code) => {
       throw new Error(`__exit_${code}__`);
     });
-    jest.spyOn(require('../../utils/logger'), 'error').mockImplementation(() => {});
+    // logger.error 的 spy 原先从不 restore，静音态会泄漏到同文件后续用例
+    const errorSpy = jest
+      .spyOn(require('../../utils/logger'), 'error')
+      .mockImplementation(() => {});
     try {
       return fn();
     } finally {
       exitSpy.mockRestore();
+      errorSpy.mockRestore();
     }
   };
 

@@ -4,8 +4,13 @@ const { verifyAuditChain } = require('../../services/auditChainVerify');
 const { CURRENT_PAYLOAD_VERSION } = require('../../utils/auditChain');
 
 describe('审计链重签后的当前版本不变量', () => {
+  // 本套件写入的 3 条链式记录的用户名 stamp：afterAll 按它收口
+  const stamp = `resign${Date.now()}`;
+
   afterAll(async () => {
     if (mongoose.connection.readyState !== 0) {
+      // 带哈希链的审计行是 append-only 集合的正式记录，清理必须带 bypassAppendOnly
+      await AuditLog.deleteMany({ username: stamp }, { bypassAppendOnly: true }).catch(() => {});
       await mongoose.connection.close();
     }
   });
@@ -19,7 +24,6 @@ describe('审计链重签后的当前版本不变量', () => {
     // 现改为：先用真实模型写入一批记录（pre-save 走真实链锁 + 当前 payload 口径），
     // 再断言校验结论为「零断裂」，且落库记录确实带当前版本（CURRENT_PAYLOAD_VERSION）
     // 的 hash/hmac。版本值一律取常量而非字面量，payload 升版时不会假红。
-    const stamp = `resign${Date.now()}`;
     for (let i = 0; i < 3; i++) {
       await AuditLog.create({
         action: 'chain_resign_test',

@@ -295,33 +295,36 @@ describe('WebSocket 全流程（批次 D2）', () => {
       },
     }));
 
-    let svc;
-    let pending;
-    const sent = [];
-    jest.isolateModules(() => {
-      const FreshService = require('../../services/websocketService');
-      svc = Object.create(FreshService.prototype);
-      svc.clients = new Map();
-      svc.userConnections = new Map([['u-fallback', new Set(['sid-fb'])]]);
-      svc.io = {
-        to: (t) => ({ emit: (ev, data) => sent.push({ target: t, ev, data }) }),
-        sockets: { adapter: { rooms: new Map() } },
-      };
-      // 在隔离注册表内发起：emitPermissionSync 首行的惰性 require 是同步执行的，
-      // 放在回调内才能确保拿到桩模块（jest 对已缓存模块的显式 mock 语义不稳）
-      pending = svc.emitPermissionSync(['u-fallback']);
-    });
+    try {
+      let svc;
+      let pending;
+      const sent = [];
+      jest.isolateModules(() => {
+        const FreshService = require('../../services/websocketService');
+        svc = Object.create(FreshService.prototype);
+        svc.clients = new Map();
+        svc.userConnections = new Map([['u-fallback', new Set(['sid-fb'])]]);
+        svc.io = {
+          to: (t) => ({ emit: (ev, data) => sent.push({ target: t, ev, data }) }),
+          sockets: { adapter: { rooms: new Map() } },
+        };
+        // 在隔离注册表内发起：emitPermissionSync 首行的惰性 require 是同步执行的，
+        // 放在回调内才能确保拿到桩模块（jest 对已缓存模块的显式 mock 语义不稳）
+        pending = svc.emitPermissionSync(['u-fallback']);
+      });
 
-    const result = await pending;
-    expect(result).toEqual({ notified: 1, offline: 0 });
-    expect(sent).toHaveLength(1);
-    expect(sent[0].ev).toBe('permission-sync');
-    // 桩必须真的被调用：否则「字段缺失」可能来自「用户不在线」等旁路，
-    // 断言会为错误的理由通过（原版无此断言，mock 未生效也照样绿）
-    expect(permCalls.n).toBe(1);
-    expect(sent[0].data.permissionCodes).toBeUndefined();
-
-    jest.dontMock('../../services/userPermissionService');
+      const result = await pending;
+      expect(result).toEqual({ notified: 1, offline: 0 });
+      expect(sent).toHaveLength(1);
+      expect(sent[0].ev).toBe('permission-sync');
+      // 桩必须真的被调用：否则「字段缺失」可能来自「用户不在线」等旁路，
+      // 断言会为错误的理由通过（原版无此断言，mock 未生效也照样绿）
+      expect(permCalls.n).toBe(1);
+      expect(sent[0].data.permissionCodes).toBeUndefined();
+    } finally {
+      // 断言失败也要解除桩注册，避免泄漏到同文件后续用例
+      jest.dontMock('../../services/userPermissionService');
+    }
   });
 
   test('认证超时闸：到期未认证被断开并告知；认证成功清除计时器', async () => {

@@ -101,6 +101,15 @@ describe('权限缓存失效链', () => {
 
   afterAll(async () => {
     if (mongoose.connection.readyState !== 0) {
+      // 回收本文件夹具：自建用户（cache_admin/cache_target）、CACHE_* 三角色、
+      // cacheprobe:* 探针权限，避免残留到同库的其他排查或复跑
+      await User.deleteMany({
+        username: { $in: ['cache_admin', 'cache_target'] },
+      }).catch(() => {});
+      await Role.deleteMany({
+        code: { $in: ['CACHE_ADMIN_ROLE', 'CACHE_EMPTY_ROLE', 'CACHE_PROBE_ROLE'] },
+      }).catch(() => {});
+      await Permission.deleteMany({ code: { $regex: '^cacheprobe:' } }).catch(() => {});
       await mongoose.connection.close();
     }
   });

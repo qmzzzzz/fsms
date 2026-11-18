@@ -276,56 +276,65 @@ describe('容量闸：采样与丢弃必须可见（计数 + 信号，不静默�
   test('全局日预算耗尽：停止捕获并计 dropped（配置为极小预算的实例）', () => {
     jest.isolateModules(() => {
       process.env.FORENSIC_GLOBAL_DAILY_BYTES = '2000'; // 单条实测约 1284 字节 ⇒ 只放行 1 条
-      const isolated = require('../../services/forensicCapture');
-      const results = [];
-      for (let i = 0; i < 4; i += 1) {
-        results.push(
-          isolated.record({
-            req: buildReq(),
-            res: {},
-            ip: '198.51.100.4',
-            trigger: { reason: 'brute_force_auto_ban' },
-            response: jsonResponse('{"ok":true}'),
-          })
-        );
+      try {
+        const isolated = require('../../services/forensicCapture');
+        const results = [];
+        for (let i = 0; i < 4; i += 1) {
+          results.push(
+            isolated.record({
+              req: buildReq(),
+              res: {},
+              ip: '198.51.100.4',
+              trigger: { reason: 'brute_force_auto_ban' },
+              response: jsonResponse('{"ok":true}'),
+            })
+          );
+        }
+        const stats = isolated.getForensicCaptureStats();
+        expect(stats.captured).toBeGreaterThan(0);
+        expect(stats.captured).toBeLessThan(4); // 预算用尽后确实停捕
+        expect(stats.dropped).toBeGreaterThan(0); // 且不是静默停止
+        expect(results.filter(Boolean).length).toBe(stats.captured);
+      } finally {
+        delete process.env.FORENSIC_GLOBAL_DAILY_BYTES;
       }
-      const stats = isolated.getForensicCaptureStats();
-      expect(stats.captured).toBeGreaterThan(0);
-      expect(stats.captured).toBeLessThan(4); // 预算用尽后确实停捕
-      expect(stats.dropped).toBeGreaterThan(0); // 且不是静默停止
-      expect(results.filter(Boolean).length).toBe(stats.captured);
-      delete process.env.FORENSIC_GLOBAL_DAILY_BYTES;
     });
   });
 
   test('采样跳过不占日预算：连续采样后第 10 次放行不因"假耗尽"被丢（预算口径可证伪）', () => {
     mockTrigger.on = true;
-    jest.isolateModules(() => {
-      process.env.FORENSIC_PER_IP_PER_MIN = '1';
-      process.env.FORENSIC_SAMPLE_EVERY_N = '10';
-      process.env.FORENSIC_GLOBAL_DAILY_BYTES = '4000';
-      const isolated = require('../../services/forensicCapture');
-      for (let i = 0; i < 11; i += 1) {
-        isolated.record({
-          req: buildReq(),
-          res: {},
-          ip: '198.51.100.9',
-          trigger: { reason: 'honeypot_login' },
-          response: jsonResponse('{"ok":true}'),
-        });
-      }
-      const stats = isolated.getForensicCaptureStats();
-      // 第 1 条配额内放行；第 2–10 条采样跳过；第 11 条第 10 次采样被放行。
-      // 若采样也扣日预算，第 11 条会撞上"预算耗尽"被 drop ⇒ 这条断言红。
-      expect(stats.sampled).toBe(9);
-      expect(stats.captured).toBe(2);
-      expect(stats.dropped).toBe(0);
-      expect(stats.bytes).toBeLessThanOrEqual(Number(process.env.FORENSIC_GLOBAL_DAILY_BYTES));
-      delete process.env.FORENSIC_PER_IP_PER_MIN;
-      delete process.env.FORENSIC_SAMPLE_EVERY_N;
-      delete process.env.FORENSIC_GLOBAL_DAILY_BYTES;
-    });
-    mockTrigger.on = false;
+    try {
+      jest.isolateModules(() => {
+        process.env.FORENSIC_PER_IP_PER_MIN = '1';
+        process.env.FORENSIC_SAMPLE_EVERY_N = '10';
+        process.env.FORENSIC_GLOBAL_DAILY_BYTES = '4000';
+        try {
+          const isolated = require('../../services/forensicCapture');
+          for (let i = 0; i < 11; i += 1) {
+            isolated.record({
+              req: buildReq(),
+              res: {},
+              ip: '198.51.100.9',
+              trigger: { reason: 'honeypot_login' },
+              response: jsonResponse('{"ok":true}'),
+            });
+          }
+          const stats = isolated.getForensicCaptureStats();
+          // 第 1 条配额内放行；第 2–10 条采样跳过；第 11 条第 10 次采样被放行。
+          // 若采样也扣日预算，第 11 条会撞上"预算耗尽"被 drop ⇒ 这条断言红。
+          expect(stats.sampled).toBe(9);
+          expect(stats.captured).toBe(2);
+          expect(stats.dropped).toBe(0);
+          expect(stats.bytes).toBeLessThanOrEqual(Number(process.env.FORENSIC_GLOBAL_DAILY_BYTES));
+        } finally {
+          delete process.env.FORENSIC_PER_IP_PER_MIN;
+          delete process.env.FORENSIC_SAMPLE_EVERY_N;
+          delete process.env.FORENSIC_GLOBAL_DAILY_BYTES;
+        }
+      });
+    } finally {
+      mockTrigger.on = false;
+    }
   });
 
   test('统计形状冻结：恰好七个字段（契约 §2.2 逐字）', () => {
@@ -354,8 +363,11 @@ describe('入口判据三态：关 / 开 / 抛错', () => {
   test('开关关闭 ⇒ 不捕获（不查触发、不计数）', () => {
     const prev = process.env.FORENSIC_CAPTURE_ENABLED;
     process.env.FORENSIC_CAPTURE_ENABLED = 'false';
-    expect(svc.shouldCapture('203.0.113.7')).toBe(false);
-    process.env.FORENSIC_CAPTURE_ENABLED = prev;
+    try {
+      expect(svc.shouldCapture('203.0.113.7')).toBe(false);
+    } finally {
+      process.env.FORENSIC_CAPTURE_ENABLED = prev;
+    }
     expect(svc.getForensicCaptureStats().rejected).toBe(0);
   });
 

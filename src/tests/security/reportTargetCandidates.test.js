@@ -345,10 +345,15 @@ describe('GET /api/security/report-targets：候选集与提交核验同值', ()
         });
       }
       await FireDevice.insertMany(bulk);
-      const res = await get(tokens.all, { type: 'device', keyword: 'RTC-BULK' });
-      expect(res.status).toBe(200);
-      expect(res.body.data.items).toHaveLength(20);
-      await FireDevice.deleteMany({ deviceCode: /RTC-BULK/ });
+      // 批量夹具必须在断言失败时也能清掉：清理放进 finally，
+      // 否则一条红会留下 25 条脏数据，殃及同文件后续用例（--randomize 下更甚）。
+      try {
+        const res = await get(tokens.all, { type: 'device', keyword: 'RTC-BULK' });
+        expect(res.status).toBe(200);
+        expect(res.body.data.items).toHaveLength(20);
+      } finally {
+        await FireDevice.deleteMany({ deviceCode: /RTC-BULK/ });
+      }
     });
 
     test('配额与举报提交桶独立：搜满一批后仍能提交举报（搜索不吃提交配额）', async () => {

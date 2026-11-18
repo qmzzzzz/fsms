@@ -115,11 +115,15 @@ describe('securityAlert delivery and failure guards', () => {
 
   test('returns an explicit degraded marker when metrics aggregation fails (A-2)', async () => {
     const spy = jest.spyOn(AuditLog, 'countDocuments').mockRejectedValue(new Error('db down'));
-    const overview = await securityAlert.getSecurityOverview(7);
-    // 关键：不能返回一排 0——「零风险」与「数据不可用」是相反结论。
-    expect(overview).toEqual({ degraded: true, period: expect.stringContaining('7') });
-    expect(overview.criticalAlerts).toBeUndefined();
-    spy.mockRestore();
+    try {
+      const overview = await securityAlert.getSecurityOverview(7);
+      // 关键：不能返回一排 0——「零风险」与「数据不可用」是相反结论。
+      expect(overview).toEqual({ degraded: true, period: expect.stringContaining('7') });
+      expect(overview.criticalAlerts).toBeUndefined();
+    } finally {
+      // mockRestore 必须在 finally 里：断言失败时间谍也要归还，否则泄漏给同 worker 后续套件
+      spy.mockRestore();
+    }
   });
 
   test('retries once after a non-2xx delivery response', async () => {
@@ -136,14 +140,18 @@ describe('securityAlert delivery and failure guards', () => {
     // 本已成功的导出返 500。pre-fix（裸 await create）→ 本用例 rejects → 红。
     process.env.SECURITY_ALERT_WEBHOOK_ALLOWLIST = 'alerts.example.com';
     const spy = jest.spyOn(AuditLog, 'create').mockRejectedValue(new Error('db down'));
-    await expect(
-      securityAlert.checkBulkExport('bulkexport-fail-user', 'alice', 999, 'report_export_alarms')
-    ).resolves.toBeUndefined();
-    // 告警通知仍应尽力投递（fire-and-forget，flush 两个宏任务让 postJson 落地）
-    await new Promise((r) => setImmediate(r));
-    await new Promise((r) => setImmediate(r));
-    expect(postJson).toHaveBeenCalledTimes(1);
-    spy.mockRestore();
+    try {
+      await expect(
+        securityAlert.checkBulkExport('bulkexport-fail-user', 'alice', 999, 'report_export_alarms')
+      ).resolves.toBeUndefined();
+      // 告警通知仍应尽力投递（fire-and-forget，flush 两个宏任务让 postJson 落地）
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+      expect(postJson).toHaveBeenCalledTimes(1);
+    } finally {
+      // mockRestore 挪入 finally：断言失败也不能把 AuditLog 的假实现漏给后续套件
+      spy.mockRestore();
+    }
   });
 });
 

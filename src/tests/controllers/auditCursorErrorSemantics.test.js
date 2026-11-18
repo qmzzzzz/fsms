@@ -34,7 +34,9 @@ describe('审计日志游标的 400/500 分界', () => {
     const Permission = require('../../models/Permission');
     const AuditLog = require('../../models/AuditLog');
 
-    // 幂等播种：code 有 unique 索引，并行套件也会播同一条
+    // 幂等播种：现行拓扑为每个测试文件独立空库（setup.js 追加文件级后缀），
+    // 不存在并行套件共享同一内存库；upsert 仅防同一文件重复执行时
+    // 撞 'security:audit' code 的 unique 索引
     const auditPerm = await Permission.findOneAndUpdate(
       { code: 'security:audit' },
       {
@@ -155,14 +157,14 @@ describe('审计日志游标的 400/500 分界', () => {
     const next = await query(cursor);
     expect(next.status).toBe(200);
     expect(next.body.meta.total).toBeNull();
-    // 这里的判据不能假设库里只有我那两条夹具：全量并发时同一集合被其它套件追加，
-    // 精确「剩 0 条」乃至「hasNext=false」都不成立（实测首版就红在剩 0 条）。
-    // 确定性成立的是位置关系——续翻页必须严格排在锚点之后
-    // （时间不晚于锚点、且不重复锚点自己）。
-    const anchorAt = new Date(docs[0].timestamp).getTime();
-    for (const row of next.body.data) {
-      expect(new Date(row.timestamp).getTime()).toBeLessThanOrEqual(anchorAt);
-      expect(String(row._id)).not.toBe(String(docs[0]._id));
-    }
+    // 现行拓扑：每个测试文件拥有独立空库（setup.js 文件级后缀），本集合只含
+    // beforeAll 播种的 2 条夹具。本文件各 GET 触发的全局审计留痕
+    // （act=security_audit-logs）时间戳为「现在」（2026-11），晚于锚点
+    // （2026-06-02），在时间降序续翻页中被游标排除，不构成污染。
+    // 故续翻页可恢复精确断言：恰好剩 1 条，且顺序/内容确定——
+    // 时间降序下锚点（06-02 login_failed）之后只剩 06-01 的 login_success。
+    expect(next.body.data).toHaveLength(1);
+    expect(next.body.data[0].action).toBe('login_success');
+    expect(new Date(next.body.data[0].timestamp).toISOString()).toBe('2026-06-01T10:00:00.000Z');
   });
 });

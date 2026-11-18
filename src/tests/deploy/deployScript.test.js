@@ -706,7 +706,9 @@ describe('Top-2 部署前置：告警接收端未注入即拒绝（fail-closed�
   });
 
   test('整条链断开（一个接收端都没有）同样拒绝', () => {
-    const none = 'receivers:/n  - name: ops-critical\n';
+    // 有接收端条目但没有任何 webhook 投递配置 ⇒ 提取不到 url，整条链按断开判。
+    // 修正笔误：原先写成 '/n'，实际产出单行乱串，碰巧仍命中同一判据。
+    const none = 'receivers:\n  - name: ops-critical\n';
     const r = checkAlertingEndpoint({}, fakeFs({ ...fullSecrets(), [AM_PATH]: none }));
     expect(r.errors.length).toBe(1);
     expect(r.errors[0]).toMatch(/未发现任何 webhook 接收端|断开/);

@@ -9,11 +9,11 @@
  * 导出集比可见集宽，等于把范围闸从后门拆掉。
  */
 const mongoose = require('mongoose');
-const jwt = require('jsonwebtoken');
 const request = require('supertest');
 const ExcelJS = require('exceljs');
 
 const { randomPassword } = require('./helpers/buildLoginEnvelope');
+const { signTestToken } = require('./helpers/signTestToken');
 const { AUDIT_CATEGORIES } = require('../constants/audit');
 
 const DEPT_A = 'ZZEX-A';
@@ -26,7 +26,12 @@ describe('GET /api/reports/export?type=audit 的数据范围', () => {
   let deptToken;
   let allToken;
 
-  const rowOf = async (token) => {
+  // 审计导出表第 4 列是「操作类型」action（列契约见 constants/reportExportColumns.js）。
+  // 夹具每行的 action = `${stamp}_act_${n}` 互不相同，取它做行业务键。
+  const ACTION_COLUMN = 4;
+
+  /** 导出 xlsx，返回数据行 action 业务键的有序集合（第 1 行是表头） */
+  const exportedActions = async (token) => {
     const res = await request(app)
       .get('/api/reports/export')
       .query({ type: 'audit' })
@@ -36,8 +41,11 @@ describe('GET /api/reports/export?type=audit 的数据范围', () => {
     const wb = new ExcelJS.Workbook();
     await wb.xlsx.load(res.body);
     const ws = wb.worksheets[0];
-    // 第 1 行是表头
-    return ws.rowCount - 1;
+    const actions = [];
+    for (let row = 2; row <= ws.rowCount; row += 1) {
+      actions.push(ws.getRow(row).getCell(ACTION_COLUMN).value);
+    }
+    return actions.sort();
   };
 
   beforeAll(async () => {
@@ -72,14 +80,8 @@ describe('GET /api/reports/export?type=audit 的数据范围', () => {
     const memberA = await mkUser(`${stamp}_ma`, [], DEPT_A);
     const memberB = await mkUser(`${stamp}_mb`, [], DEPT_B);
 
-    const sign = (u) =>
-      jwt.sign(
-        { userId: String(u._id), username: u.username, tokenVersion: u.tokenVersion ?? 0 },
-        process.env.JWT_SECRET,
-        { expiresIn: '24h' }
-      );
-    deptToken = sign(opA);
-    allToken = sign(await User.findOne({ username: `${stamp}_all` }));
+    deptToken = signTestToken(opA);
+    allToken = signTestToken(await User.findOne({ username: `${stamp}_all` }));
 
     const mkLog = (user, n) =>
       AuditLog.create({
@@ -107,11 +109,21 @@ describe('GET /api/reports/export?type=audit 的数据范围', () => {
     if (mongoose.connection.readyState !== 0) await mongoose.connection.close();
   });
 
-  test('department 档只导出本部门成员的审计行', async () => {
-    expect(await rowOf(deptToken)).toBe(3);
+  test('department 档导出的正是本部门成员的那 3 行（行集合相等，不是只数行数）', async () => {
+    expect(await exportedActions(deptToken)).toEqual([
+      `${stamp}_act_1`,
+      `${stamp}_act_2`,
+      `${stamp}_act_3`,
+    ]);
   });
 
-  test('反向对照：all 档仍是全量（不得把导出一律收成空表）', async () => {
-    expect(await rowOf(allToken)).toBe(5);
+  test('反向对照：all 档导出的正是全量那 5 行（不得把导出一律收成空表）', async () => {
+    expect(await exportedActions(allToken)).toEqual([
+      `${stamp}_act_1`,
+      `${stamp}_act_2`,
+      `${stamp}_act_3`,
+      `${stamp}_act_4`,
+      `${stamp}_act_5`,
+    ]);
   });
 });

@@ -27,10 +27,15 @@ describe('ConsentRecord ip/userAgent 落库闸（P3）', () => {
   });
 
   afterAll(async () => {
-    await ConsentRecord.deleteMany({ username: /^p3consent_/ }).catch(() => {});
-    await User.deleteMany({ username: /^p3consent_/ }).catch(() => {});
-    if (mongoose.connection.readyState !== 0) {
-      await mongoose.connection.close();
+    // append-only 模型清库必须两参显式 bypass（NODE_ENV=test 契约）；不吞错——
+    // 护栏若拒绝，这里当场红，而不是静默留库。User 无 append-only 护栏，原样清理。
+    try {
+      await ConsentRecord.deleteMany({ username: /^p3consent_/ }, { bypassAppendOnly: true });
+      await User.deleteMany({ username: /^p3consent_/ }).catch(() => {});
+    } finally {
+      if (mongoose.connection.readyState !== 0) {
+        await mongoose.connection.close();
+      }
     }
   });
 

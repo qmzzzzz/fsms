@@ -76,7 +76,19 @@ describe('审计链：定长截断不得产出落盘会被改写的码元', () =
   });
 
   afterAll(async () => {
-    if (mongoose.connection.readyState !== 0) await mongoose.connection.close();
+    try {
+      // 清理本文件写入真库的审计行（含恶意 user-agent/body）：审计链是 append-only，
+      // 删除必须显式 bypassAppendOnly，且过滤条件钉住本文件自造的那条（TRACE /csp-report
+      // 组合在本套件里唯一），失败路径也不残留伪影记录。
+      if (AuditLog) {
+        await AuditLog.deleteMany(
+          { action: 'malformed_request_blocked', method: 'TRACE', path: '/csp-report' },
+          { bypassAppendOnly: true }
+        );
+      }
+    } finally {
+      if (mongoose.connection.readyState !== 0) await mongoose.connection.close();
+    }
   });
 
   test('奇数边界劈开的半个代理项被归一成 U+FFFD，偶数边界与 BMP 文本逐字节不变', () => {

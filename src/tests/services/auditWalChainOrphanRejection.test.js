@@ -49,6 +49,9 @@
  * 【够不着的一处，写明而非静默】utils/auditWriteFailure.js:37 的
  * `err && err.message ? err.message : err` 本身就是裸读——它是全总化的**唯一实现**，
  * 短路条件就是它的护栏。全仓推广这条结构闸时它必须进豁免名单，豁免理由即此句。
+ *
+ * 注：本文件含源码文本闸与精确计数棘轮（errText 站点恰好 12、`.catch((e) =>` 恰好 6、
+ * `.catch(` 恰好 9），重构时需同步更新切片/计数。
  */
 const fs = require('fs');
 const os = require('os');

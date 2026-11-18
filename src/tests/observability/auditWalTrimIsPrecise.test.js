@@ -90,7 +90,11 @@ describe('审计 WAL 精确裁剪：只裁自己已落库的行（F-97）', () =
     insertSpy.mockRestore();
     intervalSpy.mockRestore();
     if (appendSpy) appendSpy.mockRestore();
-    await AuditLog.deleteMany({ username: /^precise_/ }).catch(() => {});
+    // append-only 集合：清理必须显式带 bypassAppendOnly（insertMany 已 mock，
+    // 本文件实际不落库；此处与仓内 append-only 清理契约对齐，防钩子静默拦截）
+    await AuditLog.deleteMany({ username: /^precise_/ }, { bypassAppendOnly: true }).catch(
+      () => {}
+    );
   });
 
   afterAll(async () => {

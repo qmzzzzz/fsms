@@ -58,7 +58,7 @@ describe('授权与会话加固回归', () => {
     }
   });
 
-  /** 幂等播种权限（多套件并行共享内存库） */
+  /** 幂等播种权限（每测试文件独立空库，见 setup.js；upsert 仅防同文件重复播种） */
   const seedPerm = (code, module = 'system') =>
     Permission.findOneAndUpdate(
       { code },

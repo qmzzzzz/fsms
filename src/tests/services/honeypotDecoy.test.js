@@ -95,9 +95,11 @@ describe('蜜罐影子数据面（P1）：改道判定、合成数据与留痕',
   });
 
   afterAll(async () => {
+    // 只清本套件写下的探测行：decoytrap（主诱饵账户）与 xfftrap（F1 归因用例的独立账户），
+    // 不再按 action 全量删（共享库上会扫掉别的套件的 honeypot_probe 行）
     await mongoose.connection
       .collection('auditlogs')
-      .deleteMany({ action: 'honeypot_probe' })
+      .deleteMany({ action: 'honeypot_probe', username: { $in: [honeypotName, 'xfftrap'] } })
       .catch(() => {});
     for (const [key, value] of Object.entries(saved)) setEnv(key, value);
     honeypotWatch.__resetForTest();

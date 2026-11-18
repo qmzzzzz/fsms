@@ -413,25 +413,30 @@ describe('AuditLog 模型静态方法', () => {
 
       const metrics = require('../../utils/metrics');
       const alertSpy = jest.spyOn(metrics, 'incSecurityAlert').mockImplementation(() => {});
-      auditChain.getChainTail.mockRejectedValueOnce(new Error('chain tail read failed'));
-      const failed = await AuditLog.create({
-        action: 'a5_hash_failure',
-        category: 'system',
-        username: 'a5hashfail',
-        method: 'POST',
-        path: '/api/a5-hash',
-        ip: '::1',
-        statusCode: 200,
-        body: {},
-      });
-      // 盖章三件套与批量路径 handleHashFailure 逐字段一致
-      expect(failed.hash).toBeNull();
-      expect(failed.prevHash).toBeNull();
-      expect(failed.hashVersion).toBeNull();
-      expect(failed.hashFailure).toBe('chain tail read failed');
-      // 与批量路径同档进告警面
-      expect(alertSpy).toHaveBeenCalledWith('audit_hash_compute_failed', 'high');
-      alertSpy.mockRestore();
+      // spy 装上后必须保证 restore：中间任一 expect 失败若直接抛出而恢复被跳过，
+      // mock 会泄漏到同文件后续用例（incSecurityAlert 被换成空实现且无人恢复）。
+      try {
+        auditChain.getChainTail.mockRejectedValueOnce(new Error('chain tail read failed'));
+        const failed = await AuditLog.create({
+          action: 'a5_hash_failure',
+          category: 'system',
+          username: 'a5hashfail',
+          method: 'POST',
+          path: '/api/a5-hash',
+          ip: '::1',
+          statusCode: 200,
+          body: {},
+        });
+        // 盖章三件套与批量路径 handleHashFailure 逐字段一致
+        expect(failed.hash).toBeNull();
+        expect(failed.prevHash).toBeNull();
+        expect(failed.hashVersion).toBeNull();
+        expect(failed.hashFailure).toBe('chain tail read failed');
+        // 与批量路径同档进告警面
+        expect(alertSpy).toHaveBeenCalledWith('audit_hash_compute_failed', 'high');
+      } finally {
+        alertSpy.mockRestore();
+      }
 
       // 核验归类：缺口计数（不计 breaks），与 auditChainVerify.test.js 的归类断言同形
       const { verifyAuditChain } = require('../../services/auditChainVerify');

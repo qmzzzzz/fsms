@@ -33,6 +33,7 @@
 const request = require('supertest');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
+const { businessDayBounds } = require('../../constants/timezone');
 
 const stamp = `zst${Date.now()}`.slice(-12);
 const PASSWORD = 'Zz!pTg7mKq9xLd4nBv2Rf8sY';
@@ -111,7 +112,14 @@ describe('GET /security/stats 与 /overview 的全部聚合按数据范围收口
     noDeptToken = tokenFor(secNone);
 
     // 两个部门的主体各造 6 条失败：阈值 5 ⇒ 不带收口时两条都会出现在返回体里
-    const now = new Date();
+    // 异常检测样本用真实当前时刻：detectAnomalies 的窗口是「现在 − 60 分钟」的滚动窗，
+    // 与业务日无关，种子必须足够新才能落进窗口。
+    const anomalyTs = new Date();
+    // 计数面样本锚定在当前业务日正午：/stats 的「今日」窗口是 businessDayBounds()
+    // （业务时区零点起）。若用 new Date()，在业务时区午夜附近运行时种子与断言
+    // 可能落在两个业务日，计数全部落空的假红。取当日窗口中点，距两侧日界最远。
+    const dayBounds = businessDayBounds();
+    const countTs = new Date((dayBounds.start.getTime() + dayBounds.end.getTime()) / 2);
     const rows = [];
     for (const subj of [subjA, subjB]) {
       for (let i = 0; i < SEED_COUNT; i++) {
@@ -122,7 +130,7 @@ describe('GET /security/stats 与 /overview 的全部聚合按数据范围收口
           userId: subj._id,
           ip: `203.0.113.${subj === subjA ? 21 : 22}`,
           success: false,
-          timestamp: now,
+          timestamp: anomalyTs,
         });
       }
     }
@@ -134,7 +142,7 @@ describe('GET /security/stats 与 /overview 的全部聚合按数据范围收口
       username: subj.username,
       userId: subj._id,
       ip: `203.0.113.${subj === subjA ? 31 : 32}`,
-      timestamp: now,
+      timestamp: countTs,
       ...extra,
     });
     rows.push(countRow(subjA, { action: 'login_success', success: true, riskLevel: 'low' }));

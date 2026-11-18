@@ -14,8 +14,15 @@ const os = require('os');
 const path = require('path');
 const request = require('supertest');
 
+// 登记式回收：makeFixtureDist 每次调用都会在系统临时目录新建一个
+// dist-fixture-* 目录，本文件两个 describe 共调用 6 次。原先从不清理，
+// 目录（连同其中的测试产物）会一直留在 os.tmpdir()。这里登记全部目录，
+// 由根作用域 afterAll 统一删除（挂在根作用域，两个 describe 的用例都跑完后执行）。
+const fixtureDistDirs = [];
+
 function makeFixtureDist() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dist-fixture-'));
+  fixtureDistDirs.push(dir);
   fs.mkdirSync(path.join(dir, 'assets'));
   fs.writeFileSync(
     path.join(dir, 'index.html'),
@@ -25,6 +32,16 @@ function makeFixtureDist() {
   fs.writeFileSync(path.join(dir, 'assets', 'app-abc123.js'), 'console.log(1);');
   return dir;
 }
+
+afterAll(() => {
+  for (const dir of fixtureDistDirs) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch (_) {
+      /* 单个目录清理失败不拖垮套件：force 已忽略不存在，剩余交由系统临时目录策略兜底 */
+    }
+  }
+});
 
 function loadModule({ serve, distDir, nodeEnv = 'test' }) {
   const prev = {

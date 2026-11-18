@@ -16,6 +16,8 @@ describe('巡检执行人引用必须存在且启用', () => {
   let app;
   let User;
   let Inspection;
+  let Role;
+  let Permission;
   let token;
   let activeUserId;
   const stamp = `zzia${Date.now()}`.replace(/[^a-z0-9]/g, '').slice(0, 8);
@@ -26,12 +28,19 @@ describe('巡检执行人引用必须存在且启用', () => {
     }
     User = require('../models/User');
     Inspection = require('../models/Inspection');
-    const Permission = require('../models/Permission');
-    const Role = require('../models/Role');
+    Permission = require('../models/Permission');
+    Role = require('../models/Role');
     require('../models/AuditLog');
     require('../models/TokenBlacklist');
 
-    const perm = await Permission.create({ name: '通配', code: '*:*', module: 'system' });
+    // 与同目录其余 inspection 套件同款：upsert 而不是裸 create。
+    // `code` 上有唯一索引，裸 create 在共享通配权限已存在时撞 E11000；
+    // upsert 让"确保存在"的播种语义幂等，不依赖执行顺序。
+    const perm = await Permission.findOneAndUpdate(
+      { code: '*:*' },
+      { $setOnInsert: { name: '通配', code: '*:*', type: 'api', module: 'system' } },
+      { upsert: true, new: true }
+    );
     const role = await Role.create({
       name: `${stamp} 超级角色`,
       code: `ZZIA_${stamp}`.toUpperCase().replace(/[^A-Z0-9_]/g, '_'),
@@ -68,6 +77,9 @@ describe('巡检执行人引用必须存在且启用', () => {
   afterAll(async () => {
     await Inspection.deleteMany({ title: new RegExp(stamp) }).catch(() => {});
     await User.deleteMany({ username: new RegExp(`^${stamp}`) }).catch(() => {});
+    // 补回收本文件播种的角色与通配权限（对齐同目录其余 inspection 套件）
+    await Role.deleteMany({ code: new RegExp(`^ZZIA_${stamp}$`, 'i') }).catch(() => {});
+    await Permission.deleteMany({ code: '*:*' }).catch(() => {});
     if (mongoose.connection.readyState !== 0) {
       await mongoose.connection.close();
     }

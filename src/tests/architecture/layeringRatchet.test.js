@@ -173,3 +173,136 @@ describe('分层纪律棘轮（D-1a）', () => {
     expect(total).toBeLessThanOrEqual(TOTAL_BASELINE);
   });
 });
+
+// ── utils → services 反向依赖冻结（审计 2026-11-17 P3）───────────────────────────
+//
+// utils 是全仓最底层的纯工具层：它反向依赖 services，等于让业务层的任何改动波及
+// 全部工具模块，也让「utils 先于 services 加载」的启动顺序假设永久成立。现状有注释、
+// 无环（requireCycles.test.js 钉环），但不冻结就会边解释边新增，边永远收不掉。
+//
+// 2026-11-17 实测基线（与审计报告口径的差异如实记录）：审计原指 encryption.js:8 一处
+// 及 crashFlush/healthChecks 两处同型；现树 encryption.js 已无 services 依赖，
+// 实测全集为 5 文件 7 处（auditChain/loginCipher/healthChecks → sharedCache，
+// crashFlush → auditBuffer + forensicCapture，metricsAuditDrops → auditBuffer + auditWalCap）。
+// 既有站点全部列入显式豁免清单，口径与上方 controllers 棘轮一致：
+// 实测数必须**等于**申报值——多了是新增反向依赖（拦），少了是基线没跟着调低（同样拦）。
+const UTILS_DIR = path.join(__dirname, '../../utils');
+const SERVICES_DIR = path.join(__dirname, '../../services');
+
+const UTILS_SERVICES_EXEMPT = {
+  'auditChain.js': 1,
+  'crashFlush.js': 2,
+  'healthChecks.js': 1,
+  'loginCipher.js': 1,
+  'metricsAuditDrops.js': 2,
+};
+const UTILS_SERVICES_BASELINE = Object.values(UTILS_SERVICES_EXEMPT).reduce((a, b) => a + b, 0);
+
+// 口径与 countDirectModelRequires 同构：按文件位置解析相对 require，落点在
+// src/services/ 内才计数——引号形态、括号空白、嵌套深度全部归一，不数文本猜深度。
+const countDirectServiceRequires = (source, fileAbs) => {
+  const dir = path.dirname(fileAbs);
+  let count = 0;
+  const re = /require\(\s*(['"`])([^'"`]+)\1\s*\)/g;
+  let m;
+  while ((m = re.exec(source)) !== null) {
+    if (!m[2].startsWith('.')) continue;
+    const resolved = path.resolve(dir, m[2]);
+    if (resolved === SERVICES_DIR || resolved.startsWith(SERVICES_DIR + path.sep)) count += 1;
+  }
+  return count;
+};
+
+/** utils/ 下全部非测试 .js 的相对路径（'/' 分隔；该层目前无子目录，递归以备将来拆分） */
+function utilsFiles() {
+  const out = [];
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.name.endsWith('.js') && !entry.name.endsWith('.test.js')) {
+        out.push(path.relative(UTILS_DIR, full).replace(/\\/g, '/'));
+      }
+    }
+  };
+  walk(UTILS_DIR);
+  return out;
+}
+
+describe('utils → services 反向依赖冻结', () => {
+  test('豁免清单内的 utils 文件：services 依赖数必须等于申报基线（增减都红）', () => {
+    for (const [file, allowed] of Object.entries(UTILS_SERVICES_EXEMPT)) {
+      const full = path.join(UTILS_DIR, file);
+      if (!fs.existsSync(full)) continue; // 文件整体移除是好事
+      const count = countDirectServiceRequires(fs.readFileSync(full, 'utf8'), full);
+      expect({ file, measured: count, declared: allowed }).toEqual({
+        file,
+        measured: allowed,
+        declared: allowed,
+      });
+    }
+  });
+
+  test('未登记的 utils 文件禁止依赖 services（0 容忍）', () => {
+    for (const file of utilsFiles()) {
+      if (Object.prototype.hasOwnProperty.call(UTILS_SERVICES_EXEMPT, file)) continue;
+      const full = path.join(UTILS_DIR, file);
+      const count = countDirectServiceRequires(fs.readFileSync(full, 'utf8'), full);
+      expect({ file, count }).toEqual({ file, count: 0 });
+    }
+  });
+
+  test('全量 utils→services 依赖总数不超过基线', () => {
+    const total = utilsFiles().reduce((sum, file) => {
+      const full = path.join(UTILS_DIR, file);
+      return sum + countDirectServiceRequires(fs.readFileSync(full, 'utf8'), full);
+    }, 0);
+    expect(total).toBeLessThanOrEqual(UTILS_SERVICES_BASELINE);
+  });
+
+  test('计数口径自证：相对 require 按文件位置解析（正例各计 1，反例全为 0）', () => {
+    const topFile = path.join(UTILS_DIR, 'syntheticUtil.js');
+    // utils 现无子目录：合成"将来可能的嵌套文件"坐标，钉住深度按位置算而不是按字面量算
+    const nestedFile = path.join(UTILS_DIR, 'future/synthetic.js');
+    expect(
+      countDirectServiceRequires("const s = require('../services/sharedCache');", topFile)
+    ).toBe(1);
+    expect(countDirectServiceRequires('const s = require("../services");', topFile)).toBe(1);
+    expect(
+      countDirectServiceRequires('const s = require(`../services/auditBuffer`);', topFile)
+    ).toBe(1);
+    expect(
+      countDirectServiceRequires("const s = require('../../services/sharedCache');", nestedFile)
+    ).toBe(1);
+    // 反向对照：这些形态不是 utils→services 边，不得计数（否则基线虚高、门禁失真）
+    const counterExamples = [
+      ['同目录相对引入', "const h = require('./helpers');", topFile],
+      ['嵌套文件误写浅一层', "const s = require('../services/sharedCache');", nestedFile],
+      ['顶层文件误写深一层', "const s = require('../../services/sharedCache');", topFile],
+      ['依赖 models 不是 services', "const m = require('../models/User');", topFile],
+      ['裸模块名不是相对路径', "const s = require('services');", topFile],
+    ];
+    for (const [name, src, file] of counterExamples) {
+      expect({ form: name, n: countDirectServiceRequires(src, file) }).toEqual({
+        form: name,
+        n: 0,
+      });
+    }
+    // 前提自证：豁免清单与真实树对得上——清单里每个文件确实存在、实测非零，
+    // 且基线总数等于真实树实测总数（清单写多写少都会在这里现形）
+    const measuredByFile = new Map(
+      utilsFiles().map((file) => [
+        file,
+        countDirectServiceRequires(
+          fs.readFileSync(path.join(UTILS_DIR, file), 'utf8'),
+          path.join(UTILS_DIR, file)
+        ),
+      ])
+    );
+    for (const [file, allowed] of Object.entries(UTILS_SERVICES_EXEMPT)) {
+      expect(measuredByFile.get(file)).toBe(allowed);
+    }
+    const measuredTotal = [...measuredByFile.values()].reduce((a, b) => a + b, 0);
+    expect(measuredTotal).toBe(UTILS_SERVICES_BASELINE);
+  });
+});

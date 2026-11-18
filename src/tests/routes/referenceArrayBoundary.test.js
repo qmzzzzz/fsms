@@ -101,7 +101,9 @@ describe('写路径的引用数组与自由文本边界', () => {
   afterAll(async () => {
     if (mongoose.connection.readyState !== 0) {
       await User.deleteMany({ username: new RegExp(`^${stamp}`) }).catch(() => {});
-      await Role.deleteMany({ code: new RegExp(`^${stamp}`) }).catch(() => {});
+      // roleCode() 产出大写码（Role.code 形状要求 ^[A-Z_]+$），清理必须大小写不敏感，
+      // 否则 BADP/GOOD/ASG/KEEP/ASSIGN 等角色全部残留（审计 2026-11-17 主题 B）
+      await Role.deleteMany({ code: new RegExp(`^${stamp}`, 'i') }).catch(() => {});
       await Inspection.deleteMany({ title: new RegExp(`^${stamp}`) }).catch(() => {});
       await mongoose.connection.close();
     }

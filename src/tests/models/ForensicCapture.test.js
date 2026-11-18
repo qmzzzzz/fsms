@@ -144,22 +144,26 @@ describe('ForensicCapture 模型与保留期', () => {
       expect(policy.envKey).toBe('BUSINESS_RETENTION_DAYS_FORENSIC_CAPTURE');
 
       const prev = process.env.BUSINESS_RETENTION_DAYS_FORENSIC_CAPTURE;
-      delete process.env.BUSINESS_RETENTION_DAYS_FORENSIC_CAPTURE;
-      const off = resolveTtlIndexPlan('ForensicCapture');
-      expect(off.days).toBeNull();
-      expect(off.reason).toContain('BUSINESS_RETENTION_DAYS_FORENSIC_CAPTURE');
+      // 中途任一 expect 失败也必须把 env 还原：否则 '7'/'30' 的残留会泄漏给
+      // 同文件后续读取该变量的用例（isolateModules 不会替我们还原 process.env）
+      try {
+        delete process.env.BUSINESS_RETENTION_DAYS_FORENSIC_CAPTURE;
+        const off = resolveTtlIndexPlan('ForensicCapture');
+        expect(off.days).toBeNull();
+        expect(off.reason).toContain('BUSINESS_RETENTION_DAYS_FORENSIC_CAPTURE');
 
-      process.env.BUSINESS_RETENTION_DAYS_FORENSIC_CAPTURE = '30';
-      expect(resolveTtlIndexPlan('ForensicCapture')).toEqual({ days: 30, reason: null });
+        process.env.BUSINESS_RETENTION_DAYS_FORENSIC_CAPTURE = '30';
+        expect(resolveTtlIndexPlan('ForensicCapture')).toEqual({ days: 30, reason: null });
 
-      // 低于取证下限（30 天，用户 2026-10-31 书面确认）必须被拒绝，不能静默降级成更短保留
-      process.env.BUSINESS_RETENTION_DAYS_FORENSIC_CAPTURE = '7';
-      const tooShort = resolveTtlIndexPlan('ForensicCapture');
-      expect(tooShort.days).toBeNull();
-      expect(tooShort.reason).toContain('30');
-
-      if (prev === undefined) delete process.env.BUSINESS_RETENTION_DAYS_FORENSIC_CAPTURE;
-      else process.env.BUSINESS_RETENTION_DAYS_FORENSIC_CAPTURE = prev;
+        // 低于取证下限（30 天，用户 2026-10-31 书面确认）必须被拒绝，不能静默降级成更短保留
+        process.env.BUSINESS_RETENTION_DAYS_FORENSIC_CAPTURE = '7';
+        const tooShort = resolveTtlIndexPlan('ForensicCapture');
+        expect(tooShort.days).toBeNull();
+        expect(tooShort.reason).toContain('30');
+      } finally {
+        if (prev === undefined) delete process.env.BUSINESS_RETENTION_DAYS_FORENSIC_CAPTURE;
+        else process.env.BUSINESS_RETENTION_DAYS_FORENSIC_CAPTURE = prev;
+      }
     });
   });
 });

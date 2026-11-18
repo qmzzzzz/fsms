@@ -153,6 +153,9 @@ describe('批量审计写入：被哈希的形态必须等于落库的形态', (
   });
 
   describe('真实落库往返（insertMany 铸造后再读回）', () => {
+    // 本组用例经 insertMany 落库的记录（带 hash 链字段）：afterAll 按 _id 收口
+    const writtenIds = [];
+
     beforeAll(async () => {
       if (mongoose.connection.readyState === 0) {
         await mongoose.connect(process.env.MONGODB_URI);
@@ -160,7 +163,13 @@ describe('批量审计写入：被哈希的形态必须等于落库的形态', (
     });
 
     afterAll(async () => {
-      if (mongoose.connection.readyState !== 0) await mongoose.connection.close();
+      if (mongoose.connection.readyState !== 0) {
+        // 带哈希链的审计行是 append-only 集合的正式记录，清理必须带 bypassAppendOnly
+        await AuditLog.deleteMany({ _id: { $in: writtenIds } }, { bypassAppendOnly: true }).catch(
+          () => {}
+        );
+        await mongoose.connection.close();
+      }
     });
 
     it('clientInfo/location 多余子键被剥除后，读回文档重算仍等于落库 hash', async () => {
@@ -185,6 +194,7 @@ describe('批量审计写入：被哈希的形态必须等于落库的形态', (
       ];
       chainBatch(docs, null);
       const written = await AuditLog.insertMany(docs);
+      for (const doc of written) writtenIds.push(doc._id);
       const stored = await AuditLog.findById(written[0]._id).lean();
 
       expect(stored.clientInfo).toEqual({

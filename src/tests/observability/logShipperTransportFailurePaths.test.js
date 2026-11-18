@@ -57,12 +57,22 @@ const { waitFor, flushEventLoop } = require('../helpers/waitFor');
 // 127.0.0.1/localhost 的本地 dummy server 上——这些用例测的是"失败时传输层
 // 怎么表现"，不是目标门禁。显式放行回环（fail-closed 门禁的显式出口），
 // 目标门禁本身的行为由 logShipperSchemeAllowlist.test.js 钉住。
+// 先快照原值，afterAll 里三态还原：原先只在模块顶层覆写、从不还原，
+// 这两个放宽会泄漏给同 worker 后续加载的测试文件（如配置门禁类用例）。
+const savedLogShippingEnv = {
+  LOG_SHIPPING_ALLOW_PRIVATE_HOSTS: process.env.LOG_SHIPPING_ALLOW_PRIVATE_HOSTS,
+  LOG_SHIPPING_ALLOW_INSECURE: process.env.LOG_SHIPPING_ALLOW_INSECURE,
+};
 process.env.LOG_SHIPPING_ALLOW_PRIVATE_HOSTS = '127.0.0.1,localhost,::1';
 // 2026-10-24 起 http 端点需显式放宽（生产启动闸仍拒绝"明文 + Bearer"组合）
 process.env.LOG_SHIPPING_ALLOW_INSECURE = 'true';
 
 afterAll(() => {
   siSpy.mockRestore();
+  for (const [key, value] of Object.entries(savedLogShippingEnv)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
 });
 
 /**

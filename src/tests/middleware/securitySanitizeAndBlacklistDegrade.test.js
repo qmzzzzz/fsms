@@ -544,17 +544,44 @@ describe('security.js 分支补齐', () => {
 
   describe('auditLog 中间件：路径与跳过分支', () => {
     test('GET 敏感读取（2026-09-30 反转后默认审计）→ 包装响应并走审计', async () => {
-      const mw = auditLog();
-      const req = makeReq({ method: 'GET', originalUrl: '/api/users?page=1', path: '/api/users' });
-      const res = makeRes();
-      const next = jest.fn();
+      // 原断言 `expect(typeof res.json).toBe('function')` 恒真（包装与否该方法都是
+      // function），「走审计」则没有任何判据。现按被测中间件的真实行为改为可证伪判据：
+      //   1) 包装：中间件必须把 res.json 换成包装器（引用不同），且调用时把响应体
+      //      原样透传给原生实现（行为不被改变）；
+      //   2) 走审计：doLog 经 setImmediate → persistAuditRecord → auditBuffer.push
+      //      落一条该 GET 请求的审计（spy 点与下方 skipGlobalAudit 正反配对用例一致）。
+      const auditBuffer = require('../../services/auditBuffer');
+      const spyPush = jest.spyOn(auditBuffer, 'push');
+      spyPush.mockClear();
+      try {
+        const mw = auditLog();
+        const req = makeReq({
+          method: 'GET',
+          originalUrl: '/api/users?page=1',
+          path: '/api/users',
+        });
+        const res = makeRes();
+        const next = jest.fn();
+        const originalJson = res.json; // makeRes 的原生替身（包装前）
 
-      mw(req, res, next);
-      res.json({ success: true }); // 触发拦截
-      await new Promise((r) => setImmediate(r));
+        mw(req, res, next);
+        // 响应方法确实被包装（引用被替换），且透传行为不变
+        expect(res.json).not.toBe(originalJson);
 
-      expect(next).toHaveBeenCalled();
-      expect(typeof res.json).toBe('function');
+        res.json({ success: true }); // 触发拦截
+        await new Promise((r) => setImmediate(r));
+
+        expect(next).toHaveBeenCalled();
+        expect(originalJson).toHaveBeenCalledWith({ success: true });
+        // 审计确实发生：push 的某一条就是本请求（method/path 均对得上）。
+        // 用「存在匹配条目」而不是 Times(1)：文件内其他用例的迟到 setImmediate
+        // 回调可能泄进本用例的 spy 窗口（见上方豁免清单用例的注释），按内容匹配
+        // 既不受泄漏干扰，又能在「GET 不再审计」的回归下变红。
+        const pushed = spyPush.mock.calls.map((c) => c[0]);
+        expect(pushed.some((d) => d && d.method === 'GET' && d.path === '/api/users')).toBe(true);
+      } finally {
+        spyPush.mockRestore();
+      }
     });
 
     test('GET 命中豁免清单 → 直接放行，不包装响应', () => {

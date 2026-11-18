@@ -265,6 +265,18 @@ describe('控制器侧：事件分派与定向同步（真实 HTTP 驱动）', (
   afterAll(async () => {
     const mongoose = require('mongoose');
     if (mongoose.connection.readyState !== 0) {
+      // 本套件夹具收口：用户、HOTRELOAD_* 角色（含一个持有 *:* 超级权限的角色，必须回收）、
+      // hotreload:* 探针权限
+      await User.deleteMany({ username: /^hr_(admin|target)_/ }).catch(() => {});
+      // HOTRELOAD_BUILTIN_ROLE 带 isBuiltIn:true，Role 模型的删除护栏会拒绝
+      // 含内置角色的 deleteMany——角色回收走原生 collection（不经 ODM 钩子）
+      await mongoose.connection
+        .collection('roles')
+        .deleteMany({ code: /^HOTRELOAD_/ })
+        .catch(() => {});
+      await Permission.deleteMany({
+        code: { $in: ['hotreload:read', 'hotreload:write'] },
+      }).catch(() => {});
       await mongoose.connection.close();
     }
   });

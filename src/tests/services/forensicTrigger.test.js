@@ -176,52 +176,60 @@ describe('P1 取证触发标记表：基本口径', () => {
       });
       return ft;
     };
-    const off = fresh('false');
-    expect(off.getForensicTriggerStats().enabled).toBe(false);
-    expect(off.markForensicTarget('203.0.113.215', { reason: 'x', source: 'y' })).toBe(false);
-    expect(off.isForensicTarget('203.0.113.215')).toBe(false);
-    const upper = fresh('FALSE');
-    expect(upper.getForensicTriggerStats().enabled).toBe(true);
-    if (prev === undefined) delete process.env.FORENSIC_TRIGGER_ENABLED;
-    else process.env.FORENSIC_TRIGGER_ENABLED = prev;
+    try {
+      const off = fresh('false');
+      expect(off.getForensicTriggerStats().enabled).toBe(false);
+      expect(off.markForensicTarget('203.0.113.215', { reason: 'x', source: 'y' })).toBe(false);
+      expect(off.isForensicTarget('203.0.113.215')).toBe(false);
+      const upper = fresh('FALSE');
+      expect(upper.getForensicTriggerStats().enabled).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env.FORENSIC_TRIGGER_ENABLED;
+      else process.env.FORENSIC_TRIGGER_ENABLED = prev;
+    }
   });
 
   test('容量 LRU 淘汰（独立实例 MAX=6）：逐条淘汰最久未标记者、续期可保护、绝不整体清空', () => {
     const prev = process.env.FORENSIC_TRIGGER_MAX_IPS;
     process.env.FORENSIC_TRIGGER_MAX_IPS = '6';
     let ft;
-    jest.isolateModules(() => {
-      ft = require('../../services/forensicTrigger');
-    });
-    if (prev === undefined) delete process.env.FORENSIC_TRIGGER_MAX_IPS;
-    else process.env.FORENSIC_TRIGGER_MAX_IPS = prev;
+    try {
+      jest.isolateModules(() => {
+        ft = require('../../services/forensicTrigger');
+      });
 
-    const t0 = 1700000200000;
-    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(t0);
-    const mark = (n, opts = {}) =>
-      ft.markForensicTarget('203.0.113.' + n, { reason: 'cap', source: 'unit', ...opts });
-    for (let i = 220; i <= 225; i += 1) mark(i);
+      // 容量参数为判据时现读：标记与断言期间 env 必须保持为 '6'，
+      // 因此复位放在断言之后的 finally（而非 require 之后立刻复位）。
+      const t0 = 1700000200000;
+      const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(t0);
+      const mark = (n, opts = {}) =>
+        ft.markForensicTarget('203.0.113.' + n, { reason: 'cap', source: 'unit', ...opts });
+      for (let i = 220; i <= 225; i += 1) mark(i);
 
-    nowSpy.mockReturnValue(t0 + 1000);
-    mark(220); // 续期：最旧序号但最近被标记 —— LRU 不得先动它
-    mark(226); // 第一次溢出：只淘汰最久未标记的一条（221）
+      nowSpy.mockReturnValue(t0 + 1000);
+      mark(220); // 续期：最旧序号但最近被标记 —— LRU 不得先动它
+      mark(226); // 第一次溢出：只淘汰最久未标记的一条（221）
 
-    expect(ft.isForensicTarget('203.0.113.221')).toBe(false);
-    expect(ft.isForensicTarget('203.0.113.222')).toBe(true);
-    expect(ft.isForensicTarget('203.0.113.220')).toBe(true);
-    expect(ft.getForensicTriggerStats().evictions).toBe(1);
+      expect(ft.isForensicTarget('203.0.113.221')).toBe(false);
+      expect(ft.isForensicTarget('203.0.113.222')).toBe(true);
+      expect(ft.isForensicTarget('203.0.113.220')).toBe(true);
+      expect(ft.getForensicTriggerStats().evictions).toBe(1);
 
-    mark(227);
-    mark(228); // 再淘汰两条：222、223
-    expect(ft.isForensicTarget('203.0.113.222')).toBe(false);
-    expect(ft.isForensicTarget('203.0.113.223')).toBe(false);
-    // 不整体清空：多个原始条目仍在（220/224/225），而非全灭
-    expect(ft.isForensicTarget('203.0.113.224')).toBe(true);
-    expect(ft.isForensicTarget('203.0.113.225')).toBe(true);
-    const s = ft.getForensicTriggerStats();
-    expect(s.markedIps).toBe(6);
-    expect(s.evictions).toBe(3);
-    expect(s.lastEvictionAt).toBe(t0 + 1000);
+      mark(227);
+      mark(228); // 再淘汰两条：222、223
+      expect(ft.isForensicTarget('203.0.113.222')).toBe(false);
+      expect(ft.isForensicTarget('203.0.113.223')).toBe(false);
+      // 不整体清空：多个原始条目仍在（220/224/225），而非全灭
+      expect(ft.isForensicTarget('203.0.113.224')).toBe(true);
+      expect(ft.isForensicTarget('203.0.113.225')).toBe(true);
+      const s = ft.getForensicTriggerStats();
+      expect(s.markedIps).toBe(6);
+      expect(s.evictions).toBe(3);
+      expect(s.lastEvictionAt).toBe(t0 + 1000);
+    } finally {
+      if (prev === undefined) delete process.env.FORENSIC_TRIGGER_MAX_IPS;
+      else process.env.FORENSIC_TRIGGER_MAX_IPS = prev;
+    }
   });
 
   test('异常 fail-visible：内部异常被吞掉、计数与 lastError 可见、绝不外抛', () => {

@@ -19,6 +19,21 @@ const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 
 const QUEUE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'fsms-upgrade-http-'));
+
+// 审计 2026-11-17（主题 D）：下面 5 个 env 在模块顶层覆盖，且 config/upgrade 在 require
+// 期读取它们，赋值必须先于 beforeAll 里的 require。原值快照也因此必须取在这里（进
+// beforeAll 时原值已被本模块覆盖），afterAll 按三态还原，否则泄漏到同 worker 的后续
+// 文件（尤其 UPGRADE_QUEUE_DIR 指向本文件 afterAll 里删掉的临时目录）。
+const OVERRIDDEN_ENV_KEYS = [
+  'UPGRADE_QUEUE_DIR',
+  'UPGRADE_ENABLED',
+  'HOT_UPGRADE_REGISTRY_ALLOWLIST',
+  'UPGRADE_AGENT_STALE_SECONDS',
+  'HMAC_SECRET',
+];
+const originalEnv = {};
+for (const key of OVERRIDDEN_ENV_KEYS) originalEnv[key] = process.env[key];
+
 process.env.UPGRADE_QUEUE_DIR = QUEUE_DIR;
 process.env.UPGRADE_ENABLED = 'true';
 process.env.HOT_UPGRADE_REGISTRY_ALLOWLIST = 'ghcr.io/fsms-test/';
@@ -132,6 +147,12 @@ describe('升级端点', () => {
       await mongoose.connection.close();
     }
     fs.rmSync(QUEUE_DIR, { recursive: true, force: true });
+
+    // 三态还原：原值未设置（undefined）则删除键，否则恢复原值（审计主题 D）
+    for (const key of OVERRIDDEN_ENV_KEYS) {
+      if (originalEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = originalEnv[key];
+    }
   });
 
   beforeEach(() => {

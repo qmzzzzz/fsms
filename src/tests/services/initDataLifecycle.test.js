@@ -113,7 +113,18 @@ describe('initData 启动播种与安全对账', () => {
     } = require('../../services/initData'));
   });
 
+  // 三态保存/恢复：多个用例会改写 SUPER_ADMIN_USERNAME / ADMIN_INITIAL_PASSWORD /
+  // ADMIN_INITIAL_EMAIL。beforeEach 首次执行时快照进程初值并清空，afterAll 统一还原，
+  // 保证断言失败时也不把本文件改写的 env 泄漏给同 worker 的后续测试文件。
+  const adminEnvKeys = ['SUPER_ADMIN_USERNAME', 'ADMIN_INITIAL_PASSWORD', 'ADMIN_INITIAL_EMAIL'];
+  const adminEnvSnapshot = {};
+
   afterAll(async () => {
+    for (const key of adminEnvKeys) {
+      const value = adminEnvSnapshot[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
     if (mongoose.connection.readyState !== 0) {
       await mongoose.connection.close();
     }
@@ -121,9 +132,10 @@ describe('initData 启动播种与安全对账', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    delete process.env.SUPER_ADMIN_USERNAME;
-    delete process.env.ADMIN_INITIAL_PASSWORD;
-    delete process.env.ADMIN_INITIAL_EMAIL;
+    for (const key of adminEnvKeys) {
+      if (!(key in adminEnvSnapshot)) adminEnvSnapshot[key] = process.env[key];
+      delete process.env[key];
+    }
   });
 
   /**

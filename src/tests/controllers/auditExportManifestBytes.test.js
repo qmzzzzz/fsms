@@ -81,8 +81,11 @@ class SinkRes extends Writable {
     return this;
   }
 
+  // JSON 错误出口的载荷落到**独立属性** jsonPayload：
+  // 不得写成 this.body = payload——那会用实例属性遮蔽原型上的 body() 方法，
+  // 后续复用本桩测 JSON 错误分支时 res.body() 直接 TypeError
   json(payload) {
-    this.body = payload;
+    this.jsonPayload = payload;
     return this;
   }
 

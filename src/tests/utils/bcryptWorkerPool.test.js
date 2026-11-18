@@ -38,6 +38,9 @@ describe('bcryptWorkerPool', () => {
     });
     await expect(poolPromise).resolves.toBe(false);
     expect(compareMock).toHaveBeenCalledWith('candidate', '$2a$12$invalid');
+    // 用完即解除注册：doMock 会留在本文件的 mock 注册表里，随机序下会泄进
+    // 后续用例的 isolateModules 沙箱（此前防御落在 G-01 那条"受害"用例上）
+    jest.dontMock('bcryptjs');
   });
 
   test('BCRYPT_WORKER_THREADS=0 显式关闭：同样回退进程内', async () => {
@@ -51,6 +54,8 @@ describe('bcryptWorkerPool', () => {
     });
     await expect(hashPromise).resolves.toBe('$2a$04$hashed');
     expect(hashMock).toHaveBeenCalledWith('secret', 4);
+    // 同上：解除注册，不把本用例的 mock 泄给后续 isolateModules 沙箱
+    jest.dontMock('bcryptjs');
   });
 
   test('强制 worker 模式：跨线程真实 hash/compare 语义一致', async () => {

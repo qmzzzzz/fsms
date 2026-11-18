@@ -228,6 +228,7 @@ describe('还原路径：PROXY 头消费后全链路取到真实客户端', () =
 
   test('逐字节分片到达（TCP 分段极端形态）→ 还原不丢不乱', async () => {
     const p = await startProbe();
+    let probeTimeout;
     try {
       const payload = `${V1_HEADER}GET /probe HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n`;
       const sock = net.connect(p.port, '127.0.0.1');
@@ -236,7 +237,7 @@ describe('还原路径：PROXY 头消费后全链路取到真实客户端', () =
         sock.on('data', (c) => chunks.push(c));
         sock.on('close', () => resolve(Buffer.concat(chunks).toString('utf8')));
         sock.on('error', reject);
-        setTimeout(() => {
+        probeTimeout = setTimeout(() => {
           sock.destroy();
           reject(new Error('byte-by-byte probe timeout'));
         }, 4000);
@@ -252,6 +253,8 @@ describe('还原路径：PROXY 头消费后全链路取到真实客户端', () =
       expect(resp).toContain('200');
       expect(resp).toContain('198.51.100.7');
     } finally {
+      // 成功路径也要清掉 4 秒探针超时，否则句柄挂到 jest 收尾（对齐 probe() 助手做法）
+      clearTimeout(probeTimeout);
       await stopProbe(p);
     }
   });
@@ -391,6 +394,7 @@ describe('监听与关闭语义', () => {
     const front = createProxyProtocolFrontServer(inner, {});
     await new Promise((resolve) => front.listen(0, '::1', resolve));
     const port = front.address().port;
+    let probeTimeout;
     try {
       const r = await new Promise((resolve, reject) => {
         const sock = net.connect(port, '::1');
@@ -398,7 +402,7 @@ describe('监听与关闭语义', () => {
         sock.on('data', (c) => chunks.push(c));
         sock.on('close', () => resolve(Buffer.concat(chunks).toString('utf8')));
         sock.on('error', reject);
-        setTimeout(() => {
+        probeTimeout = setTimeout(() => {
           sock.destroy();
           reject(new Error('ipv6 probe timeout'));
         }, 4000);
@@ -413,6 +417,8 @@ describe('监听与关闭语义', () => {
       expect(r).toContain('200');
       expect(r).toContain('2001:db8::99');
     } finally {
+      // 成功路径也要清掉 4 秒探针超时，否则句柄挂到 jest 收尾（对齐 probe() 助手做法）
+      clearTimeout(probeTimeout);
       await new Promise((resolve) => front.close(() => resolve()));
     }
   });

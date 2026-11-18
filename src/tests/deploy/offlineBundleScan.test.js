@@ -46,8 +46,19 @@ const manifestOf = (overrides = {}) => ({
   ],
 });
 
+// 登记式临时目录回收：makeRoot() 建出的 fsms-bundles-* 临时根（含"封顶"用例
+// 批量写入的包目录）在每个用例结束后整棵删除，不再向 os.tmpdir() 泄漏。
+const tempRoots = [];
+afterEach(() => {
+  for (const dir of tempRoots.splice(0)) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 function makeRoot() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'fsms-bundles-'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fsms-bundles-'));
+  tempRoots.push(root);
+  return root;
 }
 
 /**

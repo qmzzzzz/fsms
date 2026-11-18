@@ -229,6 +229,18 @@ describe('批次C 基础设施加固回归', () => {
   describe('/30 API 文档出口治理', () => {
     const swagger = require('../../config/swagger');
 
+    // 本 describe 的用例跑在 blacklistToken 用例的 jest.resetModules() 之后，
+    // 其间 require('mongoose') 拿到的是全新实例——与文件顶部及子 Router
+    // describe 里连接并关闭的不是同一个；若不在此收尾，该连接会一直泄漏到
+    // worker 退出（表现为 "A worker process has failed to exit gracefully"）。
+    // 对齐全仓 mongooseTeardown 纪律：readyState 非 0 才关，不误关他人连接。
+    afterAll(async () => {
+      const mongoose = require('mongoose');
+      if (mongoose.connection.readyState !== 0) {
+        await mongoose.connection.close();
+      }
+    });
+
     /**
      * 临时启用 API 文档并创建应用实例。
      *
@@ -390,18 +402,28 @@ describe('批次C 基础设施加固回归', () => {
     test('超出配额后返回 429（真实请求验证限流生效）', async () => {
       const express = require('express');
       const probe = express();
-      // 用独立 app 验证限流器本身，避免污染主 app 的计数桶
+      // 本用例用的是**文件加载期**缓存进 `swagger` 的那份 docsLimiter；前面两个
+      // 走主 app 的限流用例（CSP、401→429 顺序）经 withDocsEnabled 在
+      // jest.resetModules() 之后拿到的是**新副本**，两者的计数桶互不相通
+      // （实测两实例 `!==`）。因此这里的桶从零开始：第 1 发必须是 2xx，429 只能
+      // 来自本用例自己的超量请求。首发断言守住这一点——若日后桶被共享（如测试
+      // 环境启用 Redis 共享存储）残留了前序用例的计数，这里会直接红，用例不会再
+      // "首发即 429" 地空转通过。
       probe.use('/api-docs', swagger.docsLimiter, (req, res) => res.send('ok'));
 
       const max = Number(process.env.DOCS_RATE_LIMIT_MAX) || 30;
       let sawTooMany = false;
+      const statuses = [];
       for (let i = 0; i < max + 5; i += 1) {
         const res = await request(probe).get('/api-docs/');
+        statuses.push(res.status);
         if (res.status === 429) {
           sawTooMany = true;
           break;
         }
       }
+      // 首发即 429 = 桶里已有残留计数，循环并未真正验证"从放行到超限"的过程
+      expect(statuses[0]).toBe(200);
       expect(sawTooMany).toBe(true);
     });
   });

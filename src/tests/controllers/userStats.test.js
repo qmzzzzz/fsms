@@ -1,6 +1,10 @@
 /**
  * /api/users/stats 统计缓存集成测试
  * 覆盖：首次查询写缓存、二次命中、缓存键隔离、数据变更主动失效、缓存降级
+ *
+ * ⚠️ 本文件直接触达 statsCache._store（仓内「仅供用例使用的内部细节」下划线惯例，
+ * 受 testHookConsumerGate 门禁钉死——不得再新增同类钩子）。键巡检与缓存层故障注入
+ * 都依赖它：statsCache 的存储结构重构时必须同步检查本文件。
  */
 
 const request = require('supertest');
@@ -81,7 +85,8 @@ describe('/api/users/stats 统计缓存', () => {
     // 自包含前置：统计缓存是进程内共享 Map，其他用例可能已写入本用户的缓存。
     // 本条验证的是「冷缓存首次请求 → 单次聚合 → 写缓存」路径，
     // 必须显式把本用户缓存清空，而不是依赖随机执行顺序恰好落在冷缓存上
-    cacheKeysOfAdmin().forEach((k) => statsCache._store.delete(k));
+    // 删除走公开 API del()（连 lastAccess 一起清）；_store 只用于键巡检
+    cacheKeysOfAdmin().forEach((k) => statsCache.del(k));
 
     const countSpy = jest.spyOn(User, 'countDocuments');
     const aggSpy = jest.spyOn(User, 'aggregate');
@@ -272,6 +277,9 @@ describe('/api/users/stats 统计缓存', () => {
   });
 
   test('缓存模块异常时接口降级为直查数据库', async () => {
+    // 故障注入必须打在 store.get（Map 实例方法）上：statsCache.get 的降级
+    // try/catch 在模块内部，只有让底层 Map 抛错才能真实走到「异常 → {hit:false}
+    // → 控制器直查库」这条链。经 _store 触达（见文件头门禁注记），用完即还原。
     const originalGet = statsCache._store.get;
     statsCache._store.get = () => {
       throw new Error('mock stats cache failure');

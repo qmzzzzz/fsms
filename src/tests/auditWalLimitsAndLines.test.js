@@ -35,7 +35,10 @@ function startWal() {
 afterEach(() => {
   wal.disable();
   wal.resetCounters();
-  delete process.env.AUDIT_WAL_MAX_BYTES;
+  // saved.max 快照了原值就必须三态恢复（与 saved.interval 同款）：
+  // 原值 undefined 则删除，否则还原——不能无条件 delete 抹掉运行环境的原配置。
+  if (saved.max === undefined) delete process.env.AUDIT_WAL_MAX_BYTES;
+  else process.env.AUDIT_WAL_MAX_BYTES = saved.max;
   if (saved.interval === undefined) delete process.env.AUDIT_WAL_STAT_INTERVAL;
   else process.env.AUDIT_WAL_STAT_INTERVAL = saved.interval;
   if (dir) fs.rmSync(dir, { recursive: true, force: true });

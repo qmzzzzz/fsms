@@ -5,7 +5,9 @@
  * 明文兼容轨、register 密文轨、changePassword 双字段密文轨。
  * mfaDisable 的密文轨与 changePassword 走同一解密入口，不在本文件重复覆盖。
  *
- * 注意 loginLimiter 限 10 次/15min：本文件登录请求总数控制在 6 次以内。
+ * 注意 loginLimiter 限 10 次/15min：本文件实际发出 12 次 POST /api/auth/login，
+ * 已超出该阈值，依赖用例间 unblockIP 解封 IP 维度失败计数缓解封禁；
+ * 新增登录用例时须同步评估限流余量，勿按旧的「6 次以内」口径估算。
  */
 
 const request = require('supertest');
@@ -48,7 +50,7 @@ describe('登录口令加密传输（密文轨）', () => {
     SystemConfig.invalidateRegistrationCache();
 
     // 注册图形验证码**默认开启**（src/config/index.js:115 顶层 registerCaptchaEnabled，
-    // models/SystemConfig.js:208 的 fallback 也读顶层；全仓无任何地方设 REGISTER_CAPTCHA_ENABLED=false）。
+    // models/SystemConfig.js:214 的 fallback 也读顶层；全仓无任何地方设 REGISTER_CAPTCHA_ENABLED=false）。
     // 本文件的 register 用例测的是「密文轨 + 解密后补做的强度校验」，与验证码前置层无关：
     // 验证码若开着，弱口令与合规口令会**同样**被 400 拦在验证码层 ——
     // 那会让 :150 的 `weakRes.status===400` 退化成"被验证码拦下"的假绿，

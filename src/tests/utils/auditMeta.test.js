@@ -271,16 +271,23 @@ describe('auditMeta（审计元数据派生）', () => {
     const { readMounts, readNestedMounts, makePrefixOf } = require('../helpers/routeMounts');
     const prefixOf = makePrefixOf(readMounts(), readNestedMounts());
 
+    // 路由路径字面量抽取正则（唯一事实来源：collectActions 与下面的脏样本自检共用；
+    // 带 /g 的正则有 lastIndex 状态，故用工厂每次现造，避免两次使用互相串位）。
+    const makeRouteRe = () => /router\.(get|post|put|delete|patch)\(\s*\n?\s*(['"`])([^'"`\n]+)\2/g;
+
     const collectActions = () => {
       const actions = new Set();
       const methods = ['get', 'post', 'put', 'delete', 'patch'];
       for (const file of collectRouteFiles()) {
         const src = fs.readFileSync(path.join(__dirname, '../../routes', file), 'utf8');
-        // 匹配 router.get(\n  '/xxx' 与 router.get('/xxx' 两种写法
-        const routeRe = /router\.(get|post|put|delete|patch)\(\s*\n?\s*'([^']+)'/g;
+        // 匹配 router.get(\n  '/xxx'、router.get("/xxx") 与 router.get(`/xxx`) 三种写法。
+        // 2026-11-17：原先只认单引号字面量，双引号/反引号路径会被静默漏采——门禁方向
+        // fail-closed：宁可多采、交由计数闸/白名单闸暴露，不可漏采。反引号里的 ${...}
+        // 插值不是字面量，但同样采出（真出现时计数闸变红，即"逐条核对"的触发点）。
+        const routeRe = makeRouteRe();
         let m;
         while ((m = routeRe.exec(src)) !== null) {
-          const [, method, routePath] = m;
+          const [, method, , routePath] = m;
           if (!methods.includes(method)) continue;
           // 挂载前缀（解析自 app.js 与嵌套 router.use，不再靠文件名巧合）
           const prefix = prefixOf(file.replace(/\.js$/, ''));
@@ -339,6 +346,19 @@ describe('auditMeta（审计元数据派生）', () => {
       // 合法更新：路由派生 action 增删后本数 +1/-1 并在上方补一行变更事由（事件型不计入）；
       // 改数前先过 auditActionReconciliation / auditActionReachability 两闸，确认派生面无第二处漂移
       expect(collectActions().size).toBe(110);
+    });
+
+    test('抽取正则脏样本自检：单引号/双引号/反引号字面量路径都必须被采到', () => {
+      // 防止抽取正则退回"只认单引号"的旧口径：三种引号形态缺一不可。
+      // 若正则漏采某种写法，本闸先红；即使没人注意到，计数闸也会因基数骤降而红。
+      const sample = [
+        "router.get('/a', handler);",
+        'router.post("/b", handler);',
+        'router.put(`/c`, handler);',
+        "router.delete(\n  '/d',\n  handler\n);",
+      ].join('\n');
+      const paths = [...sample.matchAll(makeRouteRe())].map((m) => m[3]);
+      expect(paths).toEqual(['/a', '/b', '/c', '/d']);
     });
 
     test('全部路由派生型 action 均在 AUDIT_LOG_ACTIONS 白名单内', () => {

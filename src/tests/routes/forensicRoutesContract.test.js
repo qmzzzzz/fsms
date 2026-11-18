@@ -266,10 +266,6 @@ describe('取证溯源接口契约（T5/T6）', () => {
       { cidr: HALF, reason: `位置复核 ${stamp}` },
       '10.0.0.5'
     );
-    if (issued.status !== 200) {
-      // 临时诊断（乱序复现期）：打印拒绝原因后即删
-      console.error('8d-issued-debug', JSON.stringify(issued.body));
-    }
     expect(issued.status).toBe(200);
 
     // 确认时换到 192.0.2.7：它落在 128.0.0.0/1 里（该段覆盖 128.0.0.0–255.255.255.255）

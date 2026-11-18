@@ -14,7 +14,17 @@ const manifest = require('../../services/forensicManifest');
 const REPO = path.resolve(__dirname, '../../..');
 const MANIFEST_PATH = path.join(REPO, 'src/services/forensicManifest.js');
 const AT = '2026-11-01T02:00:00.000Z';
-const tmpdir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'mlock-'));
+// mkdtemp 目录登记表：文件级 afterAll 统一回收。写入目录内的 _child1.js/_child2.js
+// 子进程脚本随目录一并删除，不遗留临时产物（测试卫生）。
+const tmpDirs = [];
+const tmpdir = () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mlock-'));
+  tmpDirs.push(dir);
+  return dir;
+};
+afterAll(() => {
+  for (const dir of tmpDirs) fs.rmSync(dir, { recursive: true, force: true });
+});
 
 const childScript = (dir, seq) =>
   [

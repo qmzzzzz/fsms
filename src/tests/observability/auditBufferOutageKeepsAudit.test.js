@@ -116,7 +116,9 @@ describe('审计缓冲：不可归因于内容的失败一律不丢审计（F-96
     insertSpy.mockRestore();
     discardSpy.mockRestore();
     intervalSpy.mockRestore();
-    await AuditLog.deleteMany({ username: /^outage_/ }).catch(() => {});
+    // append-only 集合：清理必须显式带 bypassAppendOnly，否则钩子拦截后
+    // 只会被下面的 .catch(() => {}) 静默吞掉，残留数据跨用例传播
+    await AuditLog.deleteMany({ username: /^outage_/ }, { bypassAppendOnly: true }).catch(() => {});
   });
 
   afterAll(async () => {

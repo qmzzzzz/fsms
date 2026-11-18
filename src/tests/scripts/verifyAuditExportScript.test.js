@@ -172,3 +172,78 @@ describe('verify-audit-export.js', () => {
     expect(result.output).toContain('未找到 manifest');
   });
 });
+
+/**
+ * 2026-11-17 审计（可测化）：脚本原在模块顶层无条件执行 main()，判据函数无法单测。
+ * 现已加 require.main 守卫并导出判据函数——本块直接 require 脚本模块逐个验证。
+ */
+describe('verify-audit-export.js 可测化：require 守卫与判据函数', () => {
+  // 这行 require 本身就是守卫判据：main() 若仍在模块级无条件执行，
+  // parseArgs([]) 会因缺 CSV 路径 process.exit(2)，下面的断言永远走不到。
+  const scriptModule = require('../../../scripts/verify-audit-export');
+
+  test('require 不触发执行；判据函数与交付格式常量可导入', () => {
+    for (const fn of [
+      'parseArgs',
+      'splitExport',
+      'parseCsv',
+      'verifyFileDigest',
+      'verifyChainDigest',
+      'verifySignature',
+      'verifyGeneratedAt',
+    ]) {
+      expect(typeof scriptModule[fn]).toBe('function');
+    }
+    expect(scriptModule.EXPECTED_HEADER).toBe(EXPORT_CSV_HEADER);
+  });
+
+  test('parseCsv：CRLF 的 CR 不入内容；引号转义与字段内换行按 RFC 4180', () => {
+    expect(scriptModule.parseCsv('a,b\r\nc,d\r\n')).toEqual([
+      ['a', 'b'],
+      ['c', 'd'],
+    ]);
+    expect(scriptModule.parseCsv('"x""y",z')).toEqual([['x"y', 'z']]);
+    expect(scriptModule.parseCsv('"p\nq",r')).toEqual([['p\nq', 'r']]);
+  });
+
+  test('splitExport：从尾行切出 manifest；csvPart 不含 manifest 行；无尾行返回 null', () => {
+    const raw = Buffer.from(`h1\n${MANIFEST_LINE_PREFIX}{"a":1}\n`, 'utf8');
+    const split = scriptModule.splitExport(raw);
+    expect(split.manifest).toEqual({ a: 1 });
+    expect(split.csvPart.toString('utf8')).toBe('h1\n');
+    expect(scriptModule.splitExport(Buffer.from('no manifest here\n', 'utf8'))).toBeNull();
+  });
+
+  test('verifyGeneratedAt：签发时间在未来超过 5 分钟 ⇒ exit 1（stub 取证，不真退进程）', () => {
+    const exitSpy = jest.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit:${code}`);
+    });
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect(() =>
+        scriptModule.verifyGeneratedAt({
+          generatedAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+        })
+      ).toThrow(/process\.exit:1/);
+      expect(exitSpy).toHaveBeenCalledWith(1);
+    } finally {
+      exitSpy.mockRestore();
+      errSpy.mockRestore();
+    }
+  });
+
+  test('parseArgs：未知参数与缺文件路径都以 exit 2 拒绝', () => {
+    const exitSpy = jest.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit:${code}`);
+    });
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect(() => scriptModule.parseArgs(['--bogus'])).toThrow(/process\.exit:2/);
+      expect(() => scriptModule.parseArgs([])).toThrow(/process\.exit:2/);
+      expect(exitSpy).toHaveBeenCalledWith(2);
+    } finally {
+      exitSpy.mockRestore();
+      errSpy.mockRestore();
+    }
+  });
+});

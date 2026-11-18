@@ -73,3 +73,71 @@ describe('getRecoveryPepper', () => {
     }
   });
 });
+
+describe('hashRecoveryCode：pepper 缺失的退化信号（审计 2026-11-17 P3）', () => {
+  // isolateModules 会换掉模块注册表，mfaService 拿到的 logger 必须一并 doMock，
+  // 否则间谍装在外层 logger 实例上，听不见隔离实例的 warn。
+  const loadIsolated = (hmacSecret) => {
+    const warn = jest.fn();
+    jest.doMock('../../utils/logger', () => ({
+      warn,
+      error: jest.fn(),
+      info: jest.fn(),
+      debug: jest.fn(),
+    }));
+    jest.doMock('../../config', () => ({ hmacSecret }));
+    jest.doMock('../../models/User', () => ({}));
+    jest.doMock('../../models/AuditLog', () => ({}));
+    const isolated = require('../../services/mfaService');
+    return { isolated, warn };
+  };
+
+  const restoreMocks = () => {
+    jest.dontMock('../../utils/logger');
+    jest.dontMock('../../config');
+    jest.dontMock('../../models/User');
+    jest.dontMock('../../models/AuditLog');
+  };
+
+  test('pepper 缺失 ⇒ 退化为无盐 sha256（功能行为不变），但必须发出运行时告警且只发一次', () => {
+    const previous = process.env.HMAC_SECRET;
+    delete process.env.HMAC_SECRET;
+    try {
+      jest.isolateModules(() => {
+        const crypto = require('crypto');
+        const { isolated, warn } = loadIsolated('');
+        const code = 'ABCD-EFGH';
+        const sha256 = crypto.createHash('sha256').update(code, 'utf8').digest('hex');
+        // 摘要结果与无盐 sha256 完全一致：修复只加"可见性"，不改退化路径的产出
+        expect(isolated.hashRecoveryCode(code)).toBe(sha256);
+        expect(isolated.hashRecoveryCode(code)).toBe(sha256);
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(String(warn.mock.calls[0][0])).toContain('pepper 缺失');
+      });
+    } finally {
+      restoreMocks();
+      if (previous === undefined) delete process.env.HMAC_SECRET;
+      else process.env.HMAC_SECRET = previous;
+    }
+  });
+
+  test('pepper 在位 ⇒ 走 HMAC-SHA256，不发退化告警', () => {
+    const previous = process.env.HMAC_SECRET;
+    delete process.env.HMAC_SECRET;
+    try {
+      jest.isolateModules(() => {
+        const crypto = require('crypto');
+        const { isolated, warn } = loadIsolated('pepper-in-place');
+        const code = 'ABCD-EFGH';
+        expect(isolated.hashRecoveryCode(code)).toBe(
+          crypto.createHmac('sha256', 'pepper-in-place').update(code, 'utf8').digest('hex')
+        );
+        expect(warn).not.toHaveBeenCalled();
+      });
+    } finally {
+      restoreMocks();
+      if (previous === undefined) delete process.env.HMAC_SECRET;
+      else process.env.HMAC_SECRET = previous;
+    }
+  });
+});

@@ -14,6 +14,8 @@
 const mongoose = require('mongoose');
 
 describe('userPermissionService 缓存生命周期', () => {
+  // 夹具用户名 stamp 化：避免固定名在残留库/复跑场景下撞唯一键
+  const stamp = Date.now().toString(36);
   let service;
   let User;
 
@@ -27,6 +29,8 @@ describe('userPermissionService 缓存生命周期', () => {
     // 关联模型已注册，否则抛 MissingSchemaError
     require('../../models/Role');
     require('../../models/Permission');
+    // 预清理：残留的同前缀夹具先清掉，再创建本套件的用户
+    await User.deleteMany({ username: /^permcache_/ }).catch(() => {});
   });
 
   beforeEach(() => {
@@ -88,8 +92,8 @@ describe('userPermissionService 缓存生命周期', () => {
         // 真实用户 → 30 秒 TTL 条目（保持新鲜方）
         await service.getPermissions(missingId);
         realUser = await User.create({
-          username: 'permcache_survivor',
-          email: 'permcache_survivor@example.com',
+          username: `permcache_survivor_${stamp}`,
+          email: `permcache_survivor_${stamp}@example.com`,
           password: 'Qz7#Lm42vTx9',
         });
         await service.getPermissions(realUser._id);
@@ -119,7 +123,7 @@ describe('userPermissionService 缓存生命周期', () => {
         findByIdSpy.mockRestore();
         siSpy.mockRestore();
         service.stopCleanup();
-        if (realUser) await User.deleteMany({ username: 'permcache_survivor' });
+        if (realUser) await User.deleteMany({ username: `permcache_survivor_${stamp}` });
       }
     }, 15000);
   });
@@ -130,8 +134,8 @@ describe('userPermissionService 缓存生命周期', () => {
 
     beforeAll(async () => {
       realUser = await User.create({
-        username: 'permcache_remote',
-        email: 'permcache_remote@example.com',
+        username: `permcache_remote_${stamp}`,
+        email: `permcache_remote_${stamp}@example.com`,
         password: 'Qz7#Lm42vTx9',
       });
     });
@@ -145,7 +149,7 @@ describe('userPermissionService 缓存生命周期', () => {
     });
 
     afterAll(async () => {
-      await User.deleteMany({ username: 'permcache_remote' });
+      await User.deleteMany({ username: `permcache_remote_${stamp}` });
     });
 
     test('本前缀用户级失效：仅重查该用户', async () => {

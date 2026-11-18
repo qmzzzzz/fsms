@@ -19,6 +19,7 @@ describe('巡检数组入参的长度上限', () => {
   let request;
   let User;
   let Inspection;
+  let Role;
   let token;
   const stamp = `ac${Date.now()}`.replace(/[^a-z0-9]/g, '').slice(0, 8);
   const LIMIT = 200;
@@ -32,7 +33,7 @@ describe('巡检数组入参的长度上限', () => {
     User = require('../models/User');
     Inspection = require('../models/Inspection');
     const Permission = require('../models/Permission');
-    const Role = require('../models/Role');
+    Role = require('../models/Role');
     require('../models/AuditLog');
     require('../models/TokenBlacklist');
 
@@ -66,6 +67,8 @@ describe('巡检数组入参的长度上限', () => {
   afterAll(async () => {
     await Inspection.deleteMany({ title: new RegExp(stamp) }).catch(() => {});
     await User.deleteMany({ username: new RegExp(`^${stamp}`) }).catch(() => {});
+    // 补回收本文件创建的 Role（对齐同目录其余 inspection 套件的 afterAll）
+    await Role.deleteMany({ name: new RegExp(`^${stamp} `) }).catch(() => {});
     if (mongoose.connection.readyState !== 0) {
       await mongoose.connection.close();
     }

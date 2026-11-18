@@ -21,6 +21,9 @@ describe('upgradeService（应用侧队列）', () => {
   let upgradeService;
   let signature;
   let upgradeConfig;
+  // 本套件会注入 HMAC_SECRET（签名验签需要）；三态快照：未设过 ⇒ 收尾删除，
+  // 设过 ⇒ 收尾还原原值。泄漏到同 worker 的后续套件会污染它们的密钥相关断言。
+  let originalHmacSecret;
 
   beforeAll(() => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fsms-upgrade-'));
@@ -29,7 +32,8 @@ describe('upgradeService（应用侧队列）', () => {
     process.env.HOT_UPGRADE_REGISTRY_ALLOWLIST = 'ghcr.io/fsms-test/';
     process.env.UPGRADE_AGENT_STALE_SECONDS = '600';
     process.env.UPGRADE_REQUEST_TTL_SECONDS = '1800';
-    process.env.HMAC_SECRET = process.env.HMAC_SECRET || 'test-hmac-secret-0123456789abcdef';
+    originalHmacSecret = process.env.HMAC_SECRET;
+    process.env.HMAC_SECRET = originalHmacSecret || 'test-hmac-secret-0123456789abcdef';
 
     // config/upgrade 在 require 时读环境变量：先清缓存再加载，避免与其他套件的
     // 模块实例混用（同进程内 jest 按文件隔离，但 reset 让本文件自证不依赖加载顺序）
@@ -59,6 +63,9 @@ describe('upgradeService（应用侧队列）', () => {
     delete process.env.HOT_UPGRADE_REGISTRY_ALLOWLIST;
     delete process.env.UPGRADE_AGENT_STALE_SECONDS;
     delete process.env.UPGRADE_REQUEST_TTL_SECONDS;
+    // 三态还原：原值存在则复原，原本未设则删除（不许把本套件的测试密钥漏给后续套件）
+    if (originalHmacSecret === undefined) delete process.env.HMAC_SECRET;
+    else process.env.HMAC_SECRET = originalHmacSecret;
   });
 
   const writeHeartbeat = (lastSeenAt = new Date()) =>
@@ -74,6 +81,15 @@ describe('upgradeService（应用侧队列）', () => {
     expect(upgradeService.isJobId('../../etc/passwd')).toBe(false);
     expect(upgradeService.isJobId('550e8400')).toBe(false);
     expect(upgradeService.isJobId(null)).toBe(false);
+  });
+
+  test('readJob 自身拒绝非法 id（纵深防御：不依赖调用方先校验）', () => {
+    // readJob 把 id 直接拼进文件路径；即使未来新增调用方漏过 isJobId 闸，
+    // 本函数也必须按「查无此任务」快速失败，而不是拿畸形 id 去拼路径读文件。
+    expect(upgradeService.readJob('../../etc/passwd')).toBeNull();
+    expect(upgradeService.readJob('550e8400')).toBeNull();
+    expect(upgradeService.readJob(null)).toBeNull();
+    expect(upgradeService.readJob(undefined)).toBeNull();
   });
 
   test('就绪判据逐条返回原因：开关/白名单/目录/心跳缺一不可', () => {

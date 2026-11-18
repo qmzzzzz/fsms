@@ -63,6 +63,16 @@ const RULES = [
 
 const EOL = /\r?\n/;
 
+/** 回查原文件里与代码视图行同文的全部行号（1-based）。
+ *  只取首个匹配会把失败诊断指向错误的重复行——同文多行时必须全部列出并标注歧义。 */
+const matchingLineNumbers = (rawLines, trimmed) => {
+  const hits = [];
+  rawLines.forEach((l, i) => {
+    if (l.trim() === trimmed) hits.push(i + 1);
+  });
+  return hits;
+};
+
 function walkFiles(dir, acc = []) {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name);
@@ -93,12 +103,13 @@ function scanSites(rel, raw) {
         for (const m of line.matchAll(re)) {
           const literal = m[2];
           const trimmed = line.trim();
-          const idx = rawLines.findIndex((l) => l.trim() === trimmed);
+          const lines = matchingLineNumbers(rawLines, trimmed);
           sites.push({
             file: rel,
             kind,
             literal,
-            line: idx >= 0 ? idx + 1 : null,
+            line: lines.length > 0 ? lines[0] : null,
+            lines,
             snippet: trimmed,
             order: i,
           });
@@ -108,7 +119,14 @@ function scanSites(rel, raw) {
   return sites;
 }
 
-const format = (s) => `${s.file}:${s.line ?? '?'} [${s.kind}] ${JSON.stringify(s.literal)}`;
+const format = (s) => {
+  // 同文多行时全部列出：只报首个行号会把人指到错误的重复行（仅影响诊断，不改判定）
+  const where =
+    s.lines && s.lines.length > 1
+      ? `${s.line}（同文行共 ${s.lines.length} 处：${s.lines.join(',')}）`
+      : String(s.line ?? '?');
+  return `${s.file}:${where} [${s.kind}] ${JSON.stringify(s.literal)}`;
+};
 
 const violationsOf = (sites) =>
   sites

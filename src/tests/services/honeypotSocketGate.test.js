@@ -9,6 +9,7 @@
  *  2. 投影闸：握手读的用户字段集必须含 isHoneypot（少取一个字段就等于少一条判据）；
  *  3. 行为闸：拒绝与真实失败**同形**（同一条 auth-error + disconnect），审计落 honeypot_probe、
  *     风险等级 critical（建通道是主动行为），告警每账户每日一次。
+ * 注：本文件含源码文本闸，重构时需同步更新切片/计数。
  */
 
 'use strict';
@@ -125,13 +126,16 @@ describe('蜜罐会话 WS 入口：不绑定身份、不建通道、留痕', () 
 
   test('开关闸（fail-closed）：HONEYPOT_ENABLED 关闭也不放诱饵进推送面——WS 判据只看 DB 标志', () => {
     setEnv('HONEYPOT_ENABLED', 'false');
-    const socket = makeSocket();
-    expect(
-      honeypotWatch.isHoneypotSocket({ username: honeypotName, isHoneypot: true }, socket)
-    ).toBe(true);
-    expect(socket.emitted).toHaveLength(1);
-    expect(socket.disconnected).toBe(true);
-    setEnv('HONEYPOT_ENABLED', 'true');
+    try {
+      const socket = makeSocket();
+      expect(
+        honeypotWatch.isHoneypotSocket({ username: honeypotName, isHoneypot: true }, socket)
+      ).toBe(true);
+      expect(socket.emitted).toHaveLength(1);
+      expect(socket.disconnected).toBe(true);
+    } finally {
+      setEnv('HONEYPOT_ENABLED', 'true');
+    }
   });
 
   test('留痕：WS 探测落 honeypot_probe / critical / method=WS，告警每账户每日一次', async () => {

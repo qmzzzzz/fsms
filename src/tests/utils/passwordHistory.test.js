@@ -19,6 +19,10 @@
  * 本仓已有同形先例：`services/mfaService.hashRecoveryCode`（HMAC + pepper，
  * 未配密钥时退化 sha256）。两者威胁模型不同，此处与那处的差别已在
  * utils/passwordHistory.js 文件头写明。
+ *
+ * 【有意取舍】接线门禁钉的是**精确表达式/精确锚点**，而不是宽松的"出现过某函数名"：
+ * 宽松判据在实现等价改写时要么漏报（换写法后静默失明）要么误报。钉精确式让重构
+ * 多花一步同步测试，换来"漏接线必红、红处即缺口"——改这些断言前先确认改的动机。
  */
 
 const mongoose = require('mongoose');

@@ -452,7 +452,8 @@ describe('批次F 工具与密码学加固回归', () => {
       expect(names).toContain('username_1'); // 承重点：不得先删
       expect(names).toContain('email_1');
       // 收尾：恢复 schema 定义的索引形态，避免影响同 worker 的后续用例
-      await coll.dropCollection?.();
+      // （真正的清理是下一行对连接的 dropCollection；Collection 上没有 dropCollection
+      // 方法，原先那行 `coll.dropCollection?.()` 是恒空转的死代码，已删）
       await mongoose.connection.dropCollection('users').catch(() => {});
       await User.syncIndexes();
     });

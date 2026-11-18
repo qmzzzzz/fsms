@@ -213,14 +213,17 @@ describe('蜜罐账户（honeypot）：物化、诱饵登录与枚举面排除',
       roles: [],
     });
     setEnv('HONEYPOT_USERNAMES', realName);
-    honeypotWatch.__resetForTest();
-    await honeypotWatch.init();
-    const status = honeypotWatch.getStatus();
-    expect(status.configErrors.join(' ')).toContain('已被真实账户占用');
-    expect(status.provisioned).toEqual([]);
-    const occupied = await User.findByUsername(realName);
-    expect(occupied.isHoneypot).not.toBe(true);
-    setEnv('HONEYPOT_USERNAMES', honeypotName);
+    try {
+      honeypotWatch.__resetForTest();
+      await honeypotWatch.init();
+      const status = honeypotWatch.getStatus();
+      expect(status.configErrors.join(' ')).toContain('已被真实账户占用');
+      expect(status.provisioned).toEqual([]);
+      const occupied = await User.findByUsername(realName);
+      expect(occupied.isHoneypot).not.toBe(true);
+    } finally {
+      setEnv('HONEYPOT_USERNAMES', honeypotName);
+    }
   });
 
   test('诱饵口令命中：按成功路径放行（零角色会话）+ 审计 + 告警一次；重复登录审计逐条、告警仍一次', async () => {
@@ -309,12 +312,15 @@ describe('蜜罐账户（honeypot）：物化、诱饵登录与枚举面排除',
 
   test('总开关关闭：库里有标志位账户也不放行（fail-closed）', async () => {
     setEnv('HONEYPOT_ENABLED', 'false');
-    const result = await authService.loginUser(
-      { username: honeypotName, password: 'admin@123456' },
-      ctx('10.30.0.4')
-    );
-    expect(result.outcome).toBe('INVALID_CREDENTIALS');
-    setEnv('HONEYPOT_ENABLED', 'true');
+    try {
+      const result = await authService.loginUser(
+        { username: honeypotName, password: 'admin@123456' },
+        ctx('10.30.0.4')
+      );
+      expect(result.outcome).toBe('INVALID_CREDENTIALS');
+    } finally {
+      setEnv('HONEYPOT_ENABLED', 'true');
+    }
   });
 
   test('诱饵旁路不覆盖 MFA：开了二段的标志位账户不会被口令直接放行', () => {

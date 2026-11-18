@@ -39,6 +39,8 @@
  *   只修任一层都测不出另一层，实测（第 21 轮台账 V1/V2）两层各修一次才都变红。
  *   同时"全总化"在本文件不再自带副本：唯一实现是 `utils/auditWriteFailure.js` 的 `errText`
  *   （本仓已有第三份副本 loggerFlush.js:215 的 errText 是 console 兜底路径，够不着这里）。
+ *
+ * 注：本文件含源码文本闸与精确计数棘轮（站点数/形参集合/errText 计数逐字钉死），重构时需同步更新切片/计数。
  */
 const fs = require('fs');
 const path = require('path');

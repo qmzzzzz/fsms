@@ -189,7 +189,8 @@ describe('permission/user 控制器零散分支补齐', () => {
 
   afterAll(async () => {
     if (mongoose.connection.readyState !== 0) {
-      const rx = new RegExp(`^upb(super|sec|out)${stamp}$`);
+      // low：updateUser「改他人状态缺 user:lock」用例创建的 inScope 用户也要回收
+      const rx = new RegExp(`^upb(super|sec|out|low)${stamp}$`);
       await User.deleteMany({ username: rx }).catch(() => {});
       await Role.deleteMany({ code: new RegExp(`^UPB_(SEC|L10)_${stamp}$`) }).catch(() => {});
       // 批次期间创建的权限/目标用户等按前缀清理。
