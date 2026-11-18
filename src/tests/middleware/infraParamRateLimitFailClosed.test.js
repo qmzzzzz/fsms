@@ -411,6 +411,13 @@ describe('批次C 基础设施加固回归', () => {
       // "首发即 429" 地空转通过。
       probe.use('/api-docs', swagger.docsLimiter, (req, res) => res.send('ok'));
 
+      // 跨文件顺序（随机顺序门禁 777001 实测）：同 worker 的前序文件可能已消耗
+      // 文件加载期单例的计数桶。先按本用例的请求 IP 清零，再验证"从放行到超限"。
+      if (typeof swagger.docsLimiter?.resetKey === 'function') {
+        await swagger.docsLimiter.resetKey('api-docs:::ffff:127.0.0.1');
+        await swagger.docsLimiter.resetKey('api-docs:127.0.0.1');
+      }
+
       const max = Number(process.env.DOCS_RATE_LIMIT_MAX) || 30;
       let sawTooMany = false;
       const statuses = [];

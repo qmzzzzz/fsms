@@ -260,7 +260,11 @@ jobs:
           fail=0
           for seed in 20260917 31337 777001; do
             echo "::group::jest --randomize --seed=$seed (file seed=$seed)"
-            JEST_FILE_SEED="$seed" npx jest --randomize --seed="$seed" --forceExit || fail=1
+            # --testTimeout=120000：随机顺序下多个 worker 满载并发，DB 建库/同步索引的
+            # 30s 钩子超时会成片误报（2026-11-18 实测 31337 单种子 271 个超时类失败，
+            # 默认顺序全绿）。放宽的是 jest 层超时，不改变任何判据；真实顺序耦合
+            # 依旧以断言失败的形式被抓到。
+            JEST_FILE_SEED="$seed" npx jest --randomize --seed="$seed" --forceExit --testTimeout=120000 || fail=1
             echo "::endgroup::"
           done
           exit "$fail"
