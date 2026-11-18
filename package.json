@@ -51,6 +51,7 @@
     "security"
   ],
   "license": "MIT",
+  "private": true,
   "dependencies": {
     "@sentry/node": "~7.120.4",
     "@socket.io/redis-adapter": "^8.3.0",
