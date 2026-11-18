@@ -1,5 +1,20 @@
 'use strict';
 
+/**
+ * configDriftYaml 的词法层：标量判型、注释剥离、键切分与流式集合解析。
+ *
+ * 支持的形态（与 configDriftYaml 的能力边界一致，细节见其文件头）：
+ *   · 标量：单/双引号（含转义）、js-yaml core 口径的布尔/整数/浮点/null，其余为字符串；
+ *   · 行内注释：仅「`#` 前是空白或行首」才算，引号内的 # 是内容；
+ *   · 流式集合：[...] / {...}，可跨行续接（按引号外括号配平判断是否完整）。
+ * 不支持（交由上层抛错或直接不识别）：
+ *   · 锚点/别名、多文档、复杂键；
+ *   · 流式映射里的重复键——本层沿用「后值覆盖前值」的对象字面量语义，**不做**重复键检测
+ *     （docker-compose.yml 的安全面全部以块映射形态出现，块映射层已 fail-loud；
+ *      流式集合只用于 healthcheck.test 这类值位置，不在漂移抽面的键路径上）。
+ * 所有函数均为纯函数：不碰文件系统、不读 env、不打印。
+ */
+
 const NULL_WORDS = new Set(['~', 'null', 'Null', 'NULL']);
 const TRUE_WORDS = new Set(['true', 'True', 'TRUE']);
 const FALSE_WORDS = new Set(['false', 'False', 'FALSE']);

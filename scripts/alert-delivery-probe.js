@@ -86,6 +86,9 @@ function buildProbeAlert(correlationId, now = new Date()) {
   ];
 }
 
+/** 响应体累积上限（比照 scripts/hotUpgrade.js 的 maxBuffer 做法）：响应只用于错误信息的前 300 字符，64KB 封顶防无界累积 */
+const MAX_RESPONSE_BYTES = 64 * 1024;
+
 /** POST 到 Alertmanager（零依赖：内置 http/https） */
 function postAlerts(target, body, timeoutMs) {
   return new Promise((resolve) => {
@@ -111,7 +114,12 @@ function postAlerts(target, body, timeoutMs) {
       },
       (res) => {
         const chunks = [];
-        res.on('data', (c) => chunks.push(c));
+        let received = 0;
+        res.on('data', (c) => {
+          // 超限后继续 drain 但不再累积：探针面向的是不可信目标，响应体可以是任意大
+          received += c.length;
+          if (received <= MAX_RESPONSE_BYTES) chunks.push(c);
+        });
         res.on('end', () => {
           const text = Buffer.concat(chunks).toString('utf8');
           resolve({

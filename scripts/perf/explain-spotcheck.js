@@ -41,6 +41,9 @@ require('../../src/models/Inspection');
 require('../../src/models/FireDevice');
 require('../../src/models/AuditLog');
 
+// 生产库守卫复用同族脚本的库名解析（纯函数）；守卫本身在 main() 内、connect 之前执行
+const { dbNameFromUri } = require('../destructiveGuard');
+
 const PAGE_SIZE = 20;
 // explain 在缺索引或集合很大时可能跑很久；单条查询的上界必须显式给，
 // 否则一个 COLLSCAN 会拖住整次抽查，看起来像脚本挂死。
@@ -157,6 +160,16 @@ async function main() {
   const uri = process.env.MONGODB_URI;
   if (!uri) throw new Error('缺少 MONGODB_URI（.env 或环境变量）');
 
+  // 生产库守卫必须在 connect **之前**：connect 一旦执行就完成了对目标库的 TCP + 鉴权握手，
+  // 「被拒绝的执行」不该向目标库暴露任何连接痕迹（对齐同族脚本的护栏顺序口径，
+  // 见 src/tests/destructiveGuardOrder.test.js 的顺序判据）。
+  if (process.env.NODE_ENV === 'production' && process.env.ALLOW_EXPLAIN_PROD !== 'true') {
+    throw new Error(
+      `目标库「${dbNameFromUri(uri)}」处于生产模式：本脚本会执行重查询，` +
+        '如确认只读抽查，请显式设置 ALLOW_EXPLAIN_PROD=true 后重试'
+    );
+  }
+
   let connected = false;
   let collscan = 0;
   let inconclusive = 0;
@@ -171,12 +184,6 @@ async function main() {
     connected = true;
 
     const dbName = mongoose.connection.name;
-    if (process.env.NODE_ENV === 'production' && process.env.ALLOW_EXPLAIN_PROD !== 'true') {
-      throw new Error(
-        `目标库「${dbName}」处于生产模式：本脚本会执行重查询，` +
-          '如确认只读抽查，请显式设置 ALLOW_EXPLAIN_PROD=true 后重试'
-      );
-    }
     console.log(`目标库：${dbName}\n`);
 
     for (const c of cases) {

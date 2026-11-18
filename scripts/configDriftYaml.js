@@ -1,5 +1,25 @@
 'use strict';
 
+/**
+ * 仓内零依赖 YAML 子集解析器（config-drift-check.js 的解析底座）。
+ *
+ * 为什么自己写：js-yaml 是传递依赖，`npm ci --omit=dev` 的运行镜像里没有它，
+ * 而漂移检测必须能在**只有生产依赖**的容器里解析 docker-compose.yml。
+ *
+ * 能力边界（支持）：
+ *   · 单文档；块映射 / 块序列 / 流式集合（[...] {...}，可跨行）；
+ *   · 块标量 `|` 与 `>`（含 chomping `-`）；行内注释（引号内的 # 不算）；
+ *   · 标量类型口径对齐 js-yaml core（布尔/整数/浮点/null，其余一律字符串）；
+ *   · `!override` / `!reset` 等标签——由调用方剥掉标签 token 后再进来（compose 特有）。
+ * 不支持的形态一律**抛错**（fail-closed，由调用方按「配置面不可解析」拒绝），不静默给错账面：
+ *   · 锚点/别名（&a / *a）、多文档（--- 分隔的后续文档）、复杂键（? 显式键）；
+ *   · 序列内映射项（`- key: value`）；
+ *   · **重复的映射键**：YAML 规范本身禁止，而漂移检测按「键 → 值」抽面，重复键若按
+ *     「后者覆盖前者」静默处理，等于把其中一份配置移出账面（改前值而闸不红）。故改为
+ *     报错并附键名与行号（2026-11-17 审计：先扫过现有 docker-compose.yml 确认无重复键，
+ *     本改动不改变任何现存文件的解析结果）。
+ */
+
 const {
   parseScalar,
   stripInlineComment,
@@ -72,9 +92,17 @@ function parseBlockMap(lines, i) {
     const { indent: ind, text } = splitIndent(lines[cursor]);
     if (ind < indent) break;
     if (ind > indent) throw new Error(`意外的缩进（第 ${cursor + 1} 行）：${text.slice(0, 60)}`);
+    const keyLine = cursor; // 0 基行号（splitKey 的报错口径是 +1，这里保持一致）
     const { key, rest } = splitKey(text, cursor);
     cursor += 1;
     const parsed = parseValue(lines, cursor, indent, rest);
+    // 重复键 fail-loud：静默覆盖会让「改掉被覆盖的那份」在漂移账面上不可见（见文件头）。
+    if (Object.prototype.hasOwnProperty.call(obj, key)) {
+      throw new Error(
+        `重复的映射键「${key}」（第 ${keyLine + 1} 行起）：后者会静默覆盖前者，` +
+          '漂移检测按「键 → 值」抽面，重复键等于把其中一份配置移出账面——请合并重复键后再解析'
+      );
+    }
     obj[key] = parsed.value;
     cursor = parsed.i;
   }

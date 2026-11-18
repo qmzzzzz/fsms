@@ -154,7 +154,9 @@ const randomTmpName = (base) =>
   `${base}.${process.pid}-${crypto.randomBytes(6).toString('hex')}.tmp`;
 
 const assertPathAbsent = (file) => {
-  // lstat 不跟随链接：悬空符号链接也算已占用；writeFileSync 会跟随链接，写入前必须拒绝
+  // lstat 不跟随链接：悬空符号链接也算已占用；writeFileSync 会跟随链接，写入前必须拒绝。
+  // 主流程已改用 openSync 'wx' 原子创建（见 main 内注释）；本函数保留为独立判据（测试引用），
+  // 供任何仍走「先检查后写」路径的调用方复用。
   let st = null;
   try {
     st = fs.lstatSync(file);
@@ -217,16 +219,29 @@ const main = async () => {
     return;
   }
 
-  // 原子替换：先写同目录临时文件再 rename，中途断电/被杀不会留下半截数据
-  const tmp = randomTmpName(TARGET); // 临时名带 pid+随机数：固定 .tmp 会被并发覆写或被预置成符号链接；写入前 lstat 拒链
-  assertPathAbsent(tmp);
-  fs.writeFileSync(tmp, buffer);
+  // 原子替换：先写同目录临时文件再 rename，中途断电/被杀不会留下半截数据。
+  // openSync 'wx' 原子创建（2026-11-17 审计）：原先「assertPathAbsent 检查后 writeFileSync」
+  // 留有 TOCTOU 窗口——窗口内路径被预置成符号链接时，writeFileSync 会跟随链接把数据写到
+  // 指向处；'wx' 在内核侧独占创建，路径已存在（含悬空软链）即 EEXIST，检查与写入合一，窗口消失。
+  // 0600：临时文件落盘从紧（与 resignLedger / hotUpgradeQueue 的敏感落盘口径一致）。
+  const tmp = randomTmpName(TARGET); // 临时名带 pid+随机数：固定 .tmp 会被并发覆写或被预置成符号链接
+  const fd = fs.openSync(tmp, 'wx', 0o600);
+  try {
+    fs.writeFileSync(fd, buffer);
+  } finally {
+    fs.closeSync(fd);
+  }
   fs.renameSync(tmp, TARGET);
   if (!result.ok) {
     const next = { ...pin, bytes: result.actual.bytes, sha256: result.actual.sha256 };
     const tmpPin = randomTmpName(CHECKSUM_FILE);
-    assertPathAbsent(tmpPin);
-    fs.writeFileSync(tmpPin, `${JSON.stringify(next, null, 2)}\n`);
+    // 锚文件同口径收口 TOCTOU；不带 mode，保持该仓库文件既有落盘形态不变
+    const pinFd = fs.openSync(tmpPin, 'wx');
+    try {
+      fs.writeFileSync(pinFd, `${JSON.stringify(next, null, 2)}\n`);
+    } finally {
+      fs.closeSync(pinFd);
+    }
     fs.renameSync(tmpPin, CHECKSUM_FILE);
     console.log(`内容锚已更新：${result.actual.bytes} 字节 / ${result.actual.sha256}`);
   }

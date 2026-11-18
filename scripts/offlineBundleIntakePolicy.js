@@ -75,8 +75,23 @@ const REQUIRED_ENTRIES = ['manifest.json', 'manifest.sig', 'SHA256SUMS'];
  */
 const ALLOWED_TYPE_BITS = new Set(['-', 'd']);
 
-/** verbose 行的形态：`<类型位+权限> owner/group size date time name（可选 -> target）` */
-const VERBOSE_LINE_RE = /^([-dlhbcps])([rwxsStT-]{9})\s+\S+\s+\d+\s+\S+\s+\S+\s+(.*)$/;
+/**
+ * verbose 行的形态。同一份判据要跑在两种 tar 实现上，行布局不同：
+ *   GNU tar 1.35          ：`-rw-r--r-- root/root 1234 2026-11-17 10:00 name`
+ *                           （owner/group 合写一个 token，日期为 ISO `YYYY-MM-DD HH:MM`）
+ *   bsdtar（macOS/部分容器）：`-rw-r--r--  1 user group 1234 Nov 17 10:00 name`
+ *                           （多一列硬链接数，owner/group 分写，日期为 ls 风格 `Mon D HH:MM`；
+ *                            更老的文件带年份：`Nov 17 2025 10:00`，或只有年份没有时分）
+ * 【已知边界】原正则按 GNU 布局写死（owner/group 合写 + ISO 日期），bsdtar 的清单行会
+ * 整行认不出而 fail-closed（方向安全——不会误解包，但会把好包误报成「缺少必需条目」）。
+ * 现按上述两种布局兼容：中间的元数据 token（硬链接数/属主/属组/大小）两侧列数不同，
+ * 故只按「可选数字列 + 两个非空白 token + 数字大小」粗匹配，用**日期时间形态**锚定条目名的起点。
+ * 安全关键位只有行首类型位：无论哪种实现它都在第一列，链接/设备在这里被拒（见 ALLOWED_TYPE_BITS）；
+ * 条目名即使被异常布局带偏，下游也会以「必需条目缺失」fail-closed，不会误解包。
+ * `@`/`+` 是 macOS bsdtar 对带扩展属性/ACL 文件的附加标记，不改变类型位语义，予以放行。
+ */
+const VERBOSE_LINE_RE =
+  /^([-dlhbcps])([rwxsStT-]{9})[@+]?\s+(?:\d+\s+)?\S+(?:\s+\S+)?\s+\d+\s+(?:\d{4}-\d{2}-\d{2}|[A-Za-z]{3}\s+\d{1,2})(?:\s+\d{4})?(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?\s+(.*)$/;
 
 /**
  * 解析 `tar -tvzf` 的输出。
@@ -294,10 +309,7 @@ function assertPlainDirName(name) {
   return text;
 }
 
-/**
- * 从条目列表里挑出**文件条目**（用于解包），丢弃目录条目。
- *
- /** 解析命令行（与其它脚本同口径：未知参数报错而不是忽略） */
+/** 解析命令行（与其它脚本同口径：未知参数报错而不是忽略） */
 const FLAGS = ['inbox', 'bundle-root', 'pubkey-file', 'allowlist', 'apply', 'dry-run', 'help'];
 
 /** 不取值的开关：`--apply=false` 必须真的得到 false，而不是被当真值吞掉（2026-11-14 审计） */

@@ -382,15 +382,11 @@ function main() {
     if (baseline) {
       const verdict = evaluate(baseline, current.files);
       if (!verdict.ok) {
-        const details = [
-          ...verdict.regressions.map((r) => `回归 ${r.file}: ${r.base} → ${r.now}`),
-          ...verdict.newFilesOverCap.map(
-            (r) => `新文件超密度上限 ${r.file}: ${(r.ratio * 100).toFixed(1)}%`
-          ),
-          ...verdict.stale.map((f) => `清单残留 ${f}（文件已删除/改名，需同批更新基线）`),
-          ...(verdict.totalRegressed ? [`总量回归：上限 ${baseline.total.comment} 行`] : []),
-        ];
-        process.stderr.write(`拒绝收紧基线：\n  ${details.join('\n  ')}\n`);
+        // 拒绝明细与 --check 共用 refusalDetails()：两处各写一套必然漂移（措辞/顺序不一致
+        // 会让「同一违规在两个模式下长得不一样」，复核与脚本都难以按串匹配）。
+        process.stderr.write(
+          `拒绝收紧基线：\n  ${refusalDetails(verdict, baseline).join('\n  ')}\n`
+        );
         process.exit(1);
       }
     }

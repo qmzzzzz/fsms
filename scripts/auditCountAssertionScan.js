@@ -26,9 +26,6 @@
 const fs = require('fs');
 const path = require('path');
 
-/** 断言窗口：查询调用之后多少行内出现的 expect 视为"在断言这个查询的结果" */
-const ASSERT_WINDOW = 15;
-
 /** 断言链开窗长度（字符）：覆盖 `expect(x)\n  .toHaveLength(0)` 这类换行写法 */
 const ASSERT_CHAIN_CHARS = 240;
 
@@ -269,8 +266,13 @@ function zeroForSite(source, inlineAt, bound) {
 
 /**
  * 找出文件里"对 AuditLog 的查询"及其断言形态。
- * asserted：该查询所在行之后 ASSERT_WINDOW 行内出现了 expect（覆盖 `await` 后直接 toBe 的写法）；
- * zero    ：该窗口里出现了零值断言（toBe(0) / toHaveLength(0) / toEqual([]) / toBeFalsy()）。
+ * asserted：该查询被某条 expect 断言。绑定按**字符开窗**（ASSERT_CHAIN_CHARS）判定，
+ *           不再按"查询之后 N 行"开窗——行开窗会把隔着一条无关语句的 expect 误当成
+ *           断言对象。两条绑定路径：
+ *           ① 内联——查询本身写在某个 expect( 实参里（含 `await` 后直接 toBe 与
+ *              `expect(x)\n  .toHaveLength(0)` 的换行链式写法）；
+ *           ② 绑定——查询结果赋给变量后，该变量出现在某个 expect 链里。
+ * zero    ：绑定的断言链里出现了零值断言（toBe(0) / toHaveLength(0) / toEqual([]) / toBeFalsy()）。
  * @param {string} source 已剥注释的源码
  * @returns {{aliases: string[], sites: {line:number, method:string, asserted:boolean, zero:boolean}[]}}
  */
@@ -437,6 +439,5 @@ module.exports = {
   MATCHER_RE,
   firstArgumentText,
   QUERY_METHODS,
-  ASSERT_WINDOW,
   ASSERT_CHAIN_CHARS,
 };

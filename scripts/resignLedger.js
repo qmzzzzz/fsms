@@ -92,8 +92,12 @@ function appendResignLedger(
     result,
   });
   fs.mkdirSync(path.dirname(ledgerPath), { recursive: true });
-  const fd = fs.openSync(ledgerPath, 'a');
+  // 显式 0600：留痕记录「谁、何时、凭什么放行」，不该被同机其他用户读到。
+  // openSync 'a' 不指定 mode 时新文件落地 0644（2026-11-17 审计）；mode 只在**创建时**生效，
+  // 已存在的文件靠 fchmod 兜底收紧（对齐 generate-secrets.js 的「写入即 0600 + chmod 兜底」惯例）。
+  const fd = fs.openSync(ledgerPath, 'a', 0o600);
   try {
+    fs.fchmodSync(fd, 0o600);
     fs.appendFileSync(fd, separator + line + '\n', { encoding: 'utf8' });
     fs.fsyncSync(fd);
   } finally {

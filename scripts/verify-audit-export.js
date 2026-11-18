@@ -237,4 +237,20 @@ function main() {
   if (manifest.chainCoverageIncomplete) console.log('  注意：并非所有导出记录都带有链 hash');
 }
 
-main();
+// 可被 require 的脚本不在模块级跑副作用（对齐 resign-audit-hmac.js / lint-ratchet.js 同族口径）：
+// 判据函数要能被单测直接取走，而 require 时不触发「读 argv → 读文件 → process.exit」。
+if (require.main === module) {
+  main();
+}
+
+module.exports = {
+  EXPECTED_HEADER,
+  sha256,
+  parseArgs,
+  splitExport,
+  parseCsv,
+  verifyFileDigest,
+  verifyChainDigest,
+  verifySignature,
+  verifyGeneratedAt,
+};
