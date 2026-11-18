@@ -296,7 +296,9 @@ import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 
 import { ElMessageBox } from 'element-plus/es/components/message-box/index.mjs'
 import { usePermission } from '@/composables/usePermission'
-import { apiClient, isCanceledError, isHandledApiError } from '@/utils/api'
+// 走 api.js 具名封装层（不再裸调 apiClient）：URL/动词集中在 api.js 一处维护，
+// 与全站视图的调用口径一致
+import { api, isCanceledError, isHandledApiError } from '@/utils/api'
 import { useLatestRequest } from '@/composables/useLatestRequest'
 import GlassSegmented from '@/components/GlassSegmented.vue'
 
@@ -410,7 +412,7 @@ const handleQuery = async () => {
   querySubmitting.value = true
   querying.value = true
   try {
-    const res = await apiClient.get('/security/ip-list/query', { params: { ip } })
+    const res = await api.security.queryIPList(ip)
     queryResult.value = res?.data?.data || null
     queryMode.value = true
     loadError.value = false
@@ -495,8 +497,10 @@ const loadData = async () => {
   loading.value = true
   try {
     // 后端在同一响应内返回分页列表、分页总数与黑/白名单计数，无需再发一次全量请求
-    const res = await apiClient.get('/security/ip-list', {
-      params: { type: listType.value, page: page.current, limit: page.size },
+    const res = await api.security.getIPList({
+      type: listType.value,
+      page: page.current,
+      limit: page.size,
     })
     if (!isCurrent()) return
     const payload = res?.data?.data || {}
@@ -613,7 +617,7 @@ const handleAdd = async () => {
     if (typedConfirmTarget.value === ip && typedConfirmText.value.trim()) {
       body.typedConfirm = typedConfirmText.value.trim()
     }
-    await apiClient.post('/security/ip-list', body)
+    await api.security.saveIPEntry(body)
     // P3：security.added 已改为完整插值句（原「已将」是残缺句靠拼接凑数）
     ElMessage.success(
       t('security.added', {
@@ -668,7 +672,7 @@ const handleRemove = async (row) => {
       t('messages.confirmTitle'),
       { type: 'warning' }
     )
-    await apiClient.delete(`/security/ip-list/${row._id}`)
+    await api.security.removeIPEntry(row._id)
     ElMessage.success(t('messages.deleteSuccess'))
     // 查询模式下保持结果视图，重新查询以同步判定与命中列表
     if (queryMode.value) {
@@ -769,7 +773,7 @@ const handleSwitchList = async (row) => {
       // 恢复白名单只写白名单：typedConfirm 是"封段"语义的字段，沿 ...payload 传过去既是
       // 语义错位（靠后端 type!=='black' 短路才没出事），也会让"确认过"这件事看起来发生过。
       const { typedConfirm: _ignored, ...whiteOnly } = payload
-      await apiClient.post('/security/ip-list', {
+      await api.security.saveIPEntry({
         ...whiteOnly,
         type: 'white',
         reason: switchReason(row, 'white'),
@@ -795,7 +799,7 @@ const handleSwitchList = async (row) => {
    */
   const submitBlackWithTypedConfirm = async () => {
     try {
-      await apiClient.post('/security/ip-list', payload)
+      await api.security.saveIPEntry(payload)
     } catch (e) {
       if (refusalReasonOf(e) !== 'typed_confirmation_required') throw e
       // **不许**自动回填 row.ip 当确认串：那等于替用户签字。逐字确认的全部意义在于
@@ -806,16 +810,16 @@ const handleSwitchList = async (row) => {
       // 老后端不回带 expected 时退回 row.ip 原文。
       const typed = await promptTypedConfirm(typedConfirmExpectationOf(e, row.ip))
       if (typed === null) throw e
-      await apiClient.post('/security/ip-list', { ...payload, typedConfirm: typed })
+      await api.security.saveIPEntry({ ...payload, typedConfirm: typed })
     }
   }
 
   try {
     if (targetType === 'white') {
-      await apiClient.post('/security/ip-list', payload)
+      await api.security.saveIPEntry(payload)
     } else {
       try {
-        await apiClient.delete(`/security/ip-list/${row._id}`)
+        await api.security.removeIPEntry(row._id)
       } catch (e) {
         // 网络错误或 5xx 时删除结果可能未知：先恢复白名单再结束，避免出现放行窗口。
         if (!e?.response || e.response.status >= 500) await restoreOriginalWhitelist()
@@ -976,46 +980,7 @@ onMounted(() => {
   margin-top: var(--xf-spacing-lg);
   font-family: var(--xf-font-mono);
 }
-
-/* ===== Apple 风格增量（交互手感层：只叠反馈与过渡，不改布局） ===== */
-
-/* 可交互元素按压即时反馈（pointer-down，非松开） */
-.el-button:active {
-  transform: scale(0.97);
-  transition: transform 100ms ease-out;
-}
-
-/* 卡片 hover 轻浮起（可中断阴影过渡，无弹跳，克制） */
-.el-card {
-  transition: box-shadow 280ms cubic-bezier(0.32, 0.72, 0, 1);
-}
-.el-card:hover {
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.08);
-}
-
-/* 表格行背景平滑渐变，避免斑马纹/状态色跳变 */
-:deep(.el-table .el-table__row td.el-table__cell) {
-  transition: background-color 150ms ease;
-}
-
-/* 标签（el-tag）hover 轻微加深，仅提示可读性 */
-:deep(.el-tag) {
-  transition: opacity 150ms ease;
-}
-
-/* 无障碍降级：本页新增动效全部纳入 reduced-motion */
-@media (prefers-reduced-motion: reduce) {
-  .el-button:active {
-    transform: none !important;
-  }
-  .el-card {
-    transition: opacity 150ms ease !important;
-  }
-  .el-card:hover {
-    box-shadow: none !important;
-  }
-  :deep(.el-table .el-table__row td.el-table__cell) {
-    transition: none !important;
-  }
-}
 </style>
+
+<!-- Apple 风格增量已收敛为共享样式（A-DRY，五处逐字拷贝收敛）：scoped 外链引入，:deep 语义不变 -->
+<style scoped src="@/assets/styles/apple-increment.css"></style>

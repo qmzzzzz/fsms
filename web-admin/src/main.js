@@ -16,7 +16,7 @@ import 'element-plus/theme-chalk/dark/css-vars.css'
 import 'element-plus/theme-chalk/el-message.css'
 import 'element-plus/theme-chalk/el-message-box.css'
 import 'element-plus/theme-chalk/el-notification.css'
-import i18n from './i18n'
+import i18n, { initialLocaleReady } from './i18n'
 import { useAppStore, useAuthStore } from './store'
 import { initSessionSync } from './utils/sessionSync'
 import { initErrorHandling } from './utils/errorReporter'
@@ -80,8 +80,15 @@ initSessionSync((event) => {
 app.use(router)
 app.use(i18n)
 
-// 挂载应用
-app.mount('#app')
+// P2-2：词表懒加载后，首帧渲染前必须等默认语言词表就位，否则登录页会闪现裸键。
+// 加载失败也要挂载（宁可短暂显示键名也不白屏），错误已在 setLocale 链路留痕。
+initialLocaleReady
+  .catch((error) => console.error('[i18n] 初始词表加载失败:', error))
+  .finally(() => {
+    // 挂载应用。下方 PROD 的 SW 注册/版本探测不依赖已挂载的 DOM，
+    // 在词表加载的空档先装配不改变行为。
+    app.mount('#app')
+  })
 
 // —— 升级（2026-10-30）——
 // 两条来源汇到同一处 updateNotice，界面由 UpdateNoticeBar 消费：

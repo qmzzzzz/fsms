@@ -123,7 +123,18 @@
           <template #header>
             <span class="card-header">{{ $t('alarm.stats') }}</span>
           </template>
-          <div ref="alarmTypeChart" class="chart-box" />
+          <div class="chart-wrap">
+            <div ref="alarmTypeChart" class="chart-box" />
+            <!-- D：加载失败必须有持久痕迹——空白画布与「真的没有数据」不可区分。
+                 失败块覆盖在画布上（画布 DOM 保持挂载，echarts 实例无需重建），
+                 点重试复跑 loadChartData，成功后自动退场。 -->
+            <div v-if="chartLoadFailed" class="chart-failed" data-test="chart-failed">
+              <span>{{ $t('messages.loadFailed') }}</span>
+              <button type="button" class="glass-btn glass-btn--sm" @click="retryCharts">
+                {{ $t('common.retry') }}
+              </button>
+            </div>
+          </div>
         </el-card>
       </el-col>
       <el-col :xs="24" :md="12">
@@ -131,7 +142,15 @@
           <template #header>
             <span class="card-header">{{ $t('device.status') }}</span>
           </template>
-          <div ref="deviceStatusChart" class="chart-box" />
+          <div class="chart-wrap">
+            <div ref="deviceStatusChart" class="chart-box" />
+            <div v-if="chartLoadFailed" class="chart-failed" data-test="chart-failed">
+              <span>{{ $t('messages.loadFailed') }}</span>
+              <button type="button" class="glass-btn glass-btn--sm" @click="retryCharts">
+                {{ $t('common.retry') }}
+              </button>
+            </div>
+          </div>
         </el-card>
       </el-col>
     </el-row>
@@ -301,6 +320,16 @@ const deviceStatusChart = ref(null)
 let aChart = null
 let dChart = null
 
+// D：图表数据加载失败标记。两个图表一次并行加载，一败俱败；失败时以覆盖块
+// 给出「加载失败 + 重试」，不再让空白画布冒充「真的没有数据」。
+const chartLoadFailed = ref(false)
+// 重试入口：先摘失败块再复跑加载（成功则画布接管，失败则失败块回场）。
+// 画布 DOM 始终挂载，echarts 实例无需重建。
+const retryCharts = () => {
+  chartLoadFailed.value = false
+  loadChartData()
+}
+
 // 报警类型颜色映射（与 FireAlarm 模型 alarmType 枚举一致）
 const alarmTypeColors = {
   smoke: '#e63946',
@@ -386,6 +415,8 @@ const loadChartData = async () => {
       api.reports.getDevices(),
     ])
     if (!isCurrent()) return
+    // 走到这里说明两个图表数据都拿到了：先摘失败态再渲染（重试成功后失败块退场）
+    chartLoadFailed.value = false
     const alarmData = alarmRes?.data?.data || {}
     const byType = alarmData.byType || []
 
@@ -502,13 +533,12 @@ const loadChartData = async () => {
         ],
       })
     }
-  } catch {
-    // P2-3：本次加载失败一律静默——提示由 api.js 响应拦截器统一负责（取消错误
-    // ERR_CANCELED 拦截器本就不提示）。此前组件这里再弹一条泛化的 messages.loadFailed，
-    // 同一次失败会弹两条：拦截器的具体原因 + 组件的泛化文案。
-    // 已知边界（非本次引入）：图表卡没有常驻失败态，失败时画布保持空白，与「真的
-    // 没有数据」在视觉上不可区分；拦截器 toast 是唯一线索，且会自行消失。
-    // 本 catch 仅用于吞掉 rejection（避免未处理拒绝），不产生副作用。
+  } catch (e) {
+    // FE-L1：路由切换 abort 的在途请求不算失败（用户已离开本页），不置失败态。
+    // 其余失败不再完全静默：置持久失败态（失败块 + 重试入口），空白画布不再
+    // 冒充「无数据」。toast 仍归 api.js 响应拦截器统一负责（P2-3，组件不重复弹）。
+    if (isCanceledError(e)) return
+    chartLoadFailed.value = true
   }
 }
 
@@ -874,45 +904,23 @@ onUnmounted(() => {
   width: 100%;
 }
 
-/* ===== Apple 风格增量（交互手感层：只叠反馈与过渡，不改布局） ===== */
-
-/* 可交互元素按压即时反馈（pointer-down，非松开） */
-.el-button:active {
-  transform: scale(0.97);
-  transition: transform 100ms ease-out;
+/* 图表失败态覆盖层：画布保持挂载（echarts 实例免重建），失败块盖在其上 */
+.chart-wrap {
+  position: relative;
 }
-
-/* 卡片 hover 轻浮起（可中断阴影过渡，无弹跳，克制） */
-.el-card {
-  transition: box-shadow 280ms cubic-bezier(0.32, 0.72, 0, 1);
-}
-.el-card:hover {
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.08);
-}
-
-/* 表格行背景平滑渐变，避免斑马纹/状态色跳变 */
-:deep(.el-table .el-table__row td.el-table__cell) {
-  transition: background-color 150ms ease;
-}
-
-/* 标签（el-tag）hover 轻微加深，仅提示可读性 */
-:deep(.el-tag) {
-  transition: opacity 150ms ease;
-}
-
-/* 无障碍降级：本页新增动效全部纳入 reduced-motion */
-@media (prefers-reduced-motion: reduce) {
-  .el-button:active {
-    transform: none !important;
-  }
-  .el-card {
-    transition: opacity 150ms ease !important;
-  }
-  .el-card:hover {
-    box-shadow: none !important;
-  }
-  :deep(.el-table .el-table__row td.el-table__cell) {
-    transition: none !important;
-  }
+.chart-failed {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--xf-spacing-sm);
+  color: var(--xf-text-secondary);
+  font-family: var(--xf-font-body);
 }
 </style>
+
+<!-- A-DRY：Apple 交互增量收敛到共享样式（assets/styles/apple-increment.css），
+     经 scoped 外链引入保持与原内联块完全相同的作用域语义与视觉 -->
+<style scoped src="@/assets/styles/apple-increment.css"></style>

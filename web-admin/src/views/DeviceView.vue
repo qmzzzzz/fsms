@@ -438,7 +438,9 @@ const { t } = useI18n()
 
 const loading = ref(false)
 const filters = reactive({ name: '', status: '' })
-const page = reactive({ current: 1, size: 10, total: 0 })
+// 不设 total：分页总数由 list（useListLoadState）托管，本文件从未读写 page.total，
+// 留着只会诱导后续代码把当前页长度写进来顶替总数（P1④ 口径）。
+const page = reactive({ current: 1, size: 10 })
 const formRef = ref(null)
 
 const tableData = ref([])
@@ -659,7 +661,9 @@ const handleDelete = async (row) => {
     ElMessage.success(t('messages.deleteSuccess'))
     loadData()
   } catch (e) {
-    if (e !== 'cancel') {
+    // 对齐同文件 handleChangeStatus/handleScrap 的双判据：'cancel'（点取消）与
+    // 'close'（点右上角关闭）都是用户主动放弃，不算删除失败；其余错误已在拦截器统一提示
+    if (e !== 'cancel' && e !== 'close') {
       // 错误已在拦截器统一提示（2026-09-26 审计：泛化 toast 会双提示并覆盖具体语义）
     }
   }
@@ -1183,46 +1187,8 @@ onMounted(refreshAll)
   font-size: var(--xf-font-size-xs);
   color: var(--xf-warning);
 }
-
-/* ===== Apple 风格增量（交互手感层：只叠反馈与过渡，不改布局） ===== */
-
-/* 可交互元素按压即时反馈（pointer-down，非松开） */
-.el-button:active {
-  transform: scale(0.97);
-  transition: transform 100ms ease-out;
-}
-
-/* 卡片 hover 轻浮起（可中断阴影过渡，无弹跳，克制） */
-.el-card {
-  transition: box-shadow 280ms cubic-bezier(0.32, 0.72, 0, 1);
-}
-.el-card:hover {
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.08);
-}
-
-/* 表格行背景平滑渐变，避免斑马纹/状态色跳变 */
-:deep(.el-table .el-table__row td.el-table__cell) {
-  transition: background-color 150ms ease;
-}
-
-/* 标签（el-tag）hover 轻微加深，仅提示可读性 */
-:deep(.el-tag) {
-  transition: opacity 150ms ease;
-}
-
-/* 无障碍降级：本页新增动效全部纳入 reduced-motion */
-@media (prefers-reduced-motion: reduce) {
-  .el-button:active {
-    transform: none !important;
-  }
-  .el-card {
-    transition: opacity 150ms ease !important;
-  }
-  .el-card:hover {
-    box-shadow: none !important;
-  }
-  :deep(.el-table .el-table__row td.el-table__cell) {
-    transition: none !important;
-  }
-}
 </style>
+
+<!-- A-DRY：Apple 交互增量收敛到共享样式（assets/styles/apple-increment.css），
+     经 scoped 外链引入保持与原内联块完全相同的作用域语义与视觉 -->
+<style scoped src="@/assets/styles/apple-increment.css"></style>

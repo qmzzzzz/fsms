@@ -1135,46 +1135,7 @@ onUnmounted(() => {
     width: 120px;
   }
 }
-
-/* ===== Apple 风格增量（交互手感层：只叠反馈与过渡，不改布局） ===== */
-
-/* 可交互元素按压即时反馈（pointer-down，非松开） */
-.el-button:active {
-  transform: scale(0.97);
-  transition: transform 100ms ease-out;
-}
-
-/* 卡片 hover 轻浮起（可中断阴影过渡，无弹跳，克制） */
-.el-card {
-  transition: box-shadow 280ms cubic-bezier(0.32, 0.72, 0, 1);
-}
-.el-card:hover {
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.08);
-}
-
-/* 表格行背景平滑渐变，避免斑马纹/状态色跳变 */
-:deep(.el-table .el-table__row td.el-table__cell) {
-  transition: background-color 150ms ease;
-}
-
-/* 标签（el-tag）hover 轻微加深，仅提示可读性 */
-:deep(.el-tag) {
-  transition: opacity 150ms ease;
-}
-
-/* 无障碍降级：本页新增动效全部纳入 reduced-motion */
-@media (prefers-reduced-motion: reduce) {
-  .el-button:active {
-    transform: none !important;
-  }
-  .el-card {
-    transition: opacity 150ms ease !important;
-  }
-  .el-card:hover {
-    box-shadow: none !important;
-  }
-  :deep(.el-table .el-table__row td.el-table__cell) {
-    transition: none !important;
-  }
-}
 </style>
+
+<!-- Apple 风格增量已收敛为共享样式（A-DRY，五处逐字拷贝收敛）：scoped 外链引入，:deep 语义不变 -->
+<style scoped src="@/assets/styles/apple-increment.css"></style>

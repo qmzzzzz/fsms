@@ -702,8 +702,8 @@ const onRegister = async () => {
       return
     }
 
-    // 口令密文轨（FE-H1）：null 仅限 WebCrypto 不可用（设计内降级）；
-    // 「可用但失败」抛错时阻断提交并提示重试，不静默明文上行
+    // 口令密文轨（FE-H1）：加密不可用（返回 null / 抛错）一律阻断提交，
+    // 不存在明文回退轨；「可用但失败」提示重试（用户重试成本为零）
     const payload = {
       username: registerForm.username,
       email: registerForm.email,
@@ -722,8 +722,13 @@ const onRegister = async () => {
       ElMessage.error(encryptionErrorMessage(t, e))
       return
     }
-    if (enc) payload.encPassword = enc
-    else payload.password = registerForm.password
+    // H（G2 统一口径）：null = dev 非安全上下文加密不可用。与 ReportView 的导出
+    // 二次验证、UserView 建号同口径——报错中止，不再回退明文轨上行口令。
+    if (!enc) {
+      ElMessage.error(t('login.insecureContext'))
+      return
+    }
+    payload.encPassword = enc
 
     // 仅开启验证码时携带校验字段
     if (captchaEnabled.value) {

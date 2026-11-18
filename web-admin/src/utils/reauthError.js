@@ -1,4 +1,7 @@
 import { resolveErrorMessage } from '@/utils/api'
+// 票据错误码与 errorCode 读取下沉到零依赖叶子模块：api.js 与本模块各持一份的
+// 拷贝（且两模块间已有单向依赖、无法互相收敛）由此共用同一事实（B-DRY）。
+import { REAUTH_TICKET_ERROR_CODES, readErrorCodeFromData } from '@/utils/reauthCodes'
 
 /**
  * 二次验证（step-up）与 blob 错误体解包的共享工具（P3-15 收敛）
@@ -9,7 +12,8 @@ import { resolveErrorMessage } from '@/utils/api'
  * 包成 Blob，不解包就认不出票据 401、也拿不到真正的错误码。
  */
 
-export const REAUTH_TICKET_ERROR_CODES = ['REAUTH_TICKET_REQUIRED', 'REAUTH_TICKET_INVALID']
+// re-export：既有调用方（各视图）仍从本模块取码清单，引用面保持不变
+export { REAUTH_TICKET_ERROR_CODES }
 
 /** Blob → 解析后的 JSON 对象；非 Blob 或解析失败返回 null */
 export const readBlobJson = async (data) => {
@@ -22,12 +26,7 @@ export const readBlobJson = async (data) => {
 }
 
 /** 从错误响应体（含 blob 包裹的 JSON）里读 errorCode；读不到返回 '' */
-export const readReauthErrorCode = async (e) => {
-  const data = e?.response?.data
-  if (data?.errors?.errorCode) return data.errors.errorCode
-  const parsed = await readBlobJson(data)
-  return parsed?.errors?.errorCode || ''
-}
+export const readReauthErrorCode = async (e) => readErrorCodeFromData(e?.response?.data)
 
 /**
  * blob 响应中的后端错误文案：优先码化翻译（api.js resolveErrorMessage），

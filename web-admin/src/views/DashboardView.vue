@@ -100,8 +100,10 @@
         </el-col>
       </el-row>
 
-      <!-- 图表区（D-2 拆为 DashboardCharts 组件；P3-39：无 report:read 不渲染） -->
-      <DashboardCharts v-if="canShowCharts" ref="chartsRef" />
+      <!-- 图表区（D-2 拆为 DashboardCharts 组件；P3-39：无 report:read 不渲染）。
+           :key 随 chartsRetryTick 递增：echarts chunk 加载失败后由失败态的重试按钮
+           换 key 强制重建异步组件，重新触发 import()（defineAsyncComponent 自身无重试入口） -->
+      <DashboardCharts v-if="canShowCharts" :key="chartsRetryTick" ref="chartsRef" />
 
       <!-- 最近报警（D-2 拆为 RecentAlarmsCard 纯渲染组件；P3-39：无 alarm:read 不渲染） -->
       <RecentAlarmsCard
@@ -140,6 +142,9 @@ import { useLatestRequest } from '@/composables/useLatestRequest'
 import { useCountUp } from '@/composables/useCountUp'
 import { api, isCanceledError } from '@/utils/api'
 import { isPageHidden } from '@/utils/versionWatcher'
+// 异步图表 chunk 加载失败的降级上报（与 websocket/loginCipher 同一惯例：
+// reportDegradation 折叠上报，不弹用户 toast）
+import { reportDegradation } from '@/utils/errorReporter'
 // 类型/状态 → i18n 标签映射（O-1 抽取的单一事实来源，与 ReportView 共用）
 import { makeAlarmTypeLabels, makeAlarmStatusLabels } from '@/utils/labelMaps'
 // D-2：欢迎卡/图表区/最近报警拆为子组件（echarts 与图表数据加载随之迁出）
@@ -188,6 +193,13 @@ const canShowCharts = canReadReport
 const loadChartsComponent = () => import('@/components/DashboardCharts.vue')
 if (canShowCharts.value) loadChartsComponent()
 
+// 图表 chunk 加载失败的重试入口：递增 :key 强制重建异步组件，重新触发 import()。
+// defineAsyncComponent 本身不提供重试 API，换 key 重建是最小实现。
+const chartsRetryTick = ref(0)
+const retryDashboardCharts = () => {
+  chartsRetryTick.value += 1
+}
+
 const DashboardCharts = defineAsyncComponent({
   loader: loadChartsComponent,
   // 数据已就绪、echarts 仍在下载时用骨架占位，避免图表区塌陷造成布局抖动
@@ -197,6 +209,38 @@ const DashboardCharts = defineAsyncComponent({
         h(GlassSkeleton, { variant: 'chart' }),
         h(GlassSkeleton, { variant: 'chart' }),
       ]),
+  },
+  // D：chunk 加载失败（网络抖动/部署窗口）不得让图表区永久空白——
+  // 给轻量失败态 + 重试按钮。Vue 只把 { error } 传给 errorComponent、不透传
+  // attrs，故闭包引用 retryDashboardCharts（见下方模板 :key 注释）。
+  errorComponent: {
+    name: 'DashboardChartsError',
+    setup() {
+      return () =>
+        h('div', { class: 'charts-async-error' }, [
+          h('span', { class: 'charts-async-error__text' }, t('messages.loadFailed')),
+          h(
+            'button',
+            {
+              type: 'button',
+              class: 'glass-btn glass-btn--default glass-btn--sm',
+              onClick: retryDashboardCharts,
+            },
+            t('common.retry')
+          ),
+        ])
+    },
+  },
+  // 对齐现有降级惯例（websocket/loginCipher 同款 reportDegradation）：
+  // 只留可观测信号，不打扰用户；必须调 fail() 让加载立即落定进失败态，
+  // 否则该 Promise 永不 settle，图表区会一直停在加载中（Vue 源码语义）。
+  onError: (error, retry, fail, attempts) => {
+    reportDegradation('dashboard: echarts 图表 chunk 加载失败，图表区进入失败态', {
+      reason: 'charts-chunk-load-failed',
+      attempts,
+      message: error?.message,
+    })
+    fail()
   },
   delay: 0,
   timeout: 20000,
@@ -662,6 +706,19 @@ onUnmounted(() => {
   .charts-async-skeleton {
     grid-template-columns: 1fr;
   }
+}
+
+/* 异步图表失败态：轻量占位（失败文案 + 重试入口），与骨架同域等高，
+   不撑破图表卡片布局；色板走正文次级色，不抢统计卡的语义色 */
+.charts-async-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--xf-spacing-md);
+  min-height: 200px;
+  color: var(--xf-text-secondary);
+  font-family: var(--xf-font-body);
 }
 
 /* 无障碍降级：本页新增动效全部纳入 reduced-motion */

@@ -720,9 +720,12 @@
               <div v-if="detailDialog.data.responseBodySkipped" class="detail-hint">
                 {{ responseBodySkipText(detailDialog.data.responseBodySkipped) }}
               </div>
-              <pre v-else-if="traceValueText(detailDialog.data.responseBody)" class="json-preview">
-                {{ traceValueText(detailDialog.data.responseBody) }}
-              </pre>
+              <!-- 与上方其余 5 处 pre 同一写法：插值贴标签，避免 pre 按原样保留
+                   独立缩进行的换行与缩进（渲染出一段前导空白） -->
+              <pre
+                v-else-if="traceValueText(detailDialog.data.responseBody)"
+                class="json-preview"
+                >{{ traceValueText(detailDialog.data.responseBody) }}</pre>
               <div v-else class="detail-hint">
                 {{ $t(traceEmptyHint(detailDialog.data, 'responseBody')) }}
               </div>

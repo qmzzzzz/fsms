@@ -9,8 +9,11 @@ import { prefersReducedMotion } from '@/utils/motion'
 // - 源数组整体重建（语言切换）时同值跳过，不重复滚动。
 
 // reduced-motion 判定收口到 utils/motion（WF-14）：本模块只关心"是否减弱动效"，
-// matchMedia 的安全包装与查询串不该在这里再写一份
-const SKIP_ANIMATION = import.meta.env.MODE === 'test' || prefersReducedMotion()
+// matchMedia 的安全包装与查询串不该在这里再写一份。
+// 改为每次使用时现查（2026-11-17 审计 G 组）：模块加载时固化的话，会话中途
+// 开启「减弱动效」（系统设置/辅助工具切换）不生效。watch 只在数据变化时触发，
+// 现查的 matchMedia 开销可忽略；测试环境判定同为每次求值。
+const skipAnimation = () => import.meta.env.MODE === 'test' || prefersReducedMotion()
 
 export function useCountUp(statsRef, { duration = 600 } = {}) {
   const display = ref(statsRef.value.map((item) => item.value))
@@ -32,7 +35,7 @@ export function useCountUp(statsRef, { duration = 600 } = {}) {
       if (display.value.length > next.length) display.value.length = next.length
       next.forEach((item, i) => {
         const target = item.value
-        if (typeof target !== 'number' || !Number.isFinite(target) || SKIP_ANIMATION) {
+        if (typeof target !== 'number' || !Number.isFinite(target) || skipAnimation()) {
           cancelRaf(i)
           display.value[i] = target
           return

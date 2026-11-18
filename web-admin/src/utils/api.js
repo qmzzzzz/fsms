@@ -30,6 +30,12 @@ import {
   SessionStatusResponseSchema,
   formatIssues,
 } from '@/schemas'
+// B-DRY 下沉：API base 与二次验证票据错误码改由零依赖叶子模块提供。
+// reauthError.js 早已单向依赖本模块（取 resolveErrorMessage），本模块无法反向
+// import 它，两份票据错误码拷贝只能下沉到叶子才能共用；API base 同理由
+// loginCipher / versionWatcher 共用同一派生（原三处各写一份、口径靠自觉对齐）。
+import { API_BASE_URL } from '@/utils/apiBase'
+import { REAUTH_TICKET_ERROR_CODES, readErrorCodeFromData } from '@/utils/reauthCodes'
 
 // 后端错误码 → i18n key 映射（唯一翻译通道）
 // 后端注册表：src/utils/errorCodes.js（码的定义、状态码、中文文案的唯一事实来源）
@@ -350,11 +356,13 @@ const t = (key) => i18n.global.t(key)
 /**
  * API base（单一事实来源）。
  *
- * 导出是为了让不走 axios 的调用方复用同一口径：versionWatcher 的 /api/version
- * 探测原先自己用 BASE_URL 拼路径、忽略 VITE_API_BASE_URL ⇒ 分域或
- * VITE_API_BASE_URL='/sub/api' 的部署下静默 404（探测失败按纪律静默，无人发现）。
+ * 派生逻辑在 utils/apiBase.js（叶子模块）：本模块、loginCipher 的公钥请求、
+ * versionWatcher 的 /api/version 探测共用同一口径。导出是为了让不走 axios 的
+ * 调用方复用：versionWatcher 原先自己用 BASE_URL 拼路径、忽略 VITE_API_BASE_URL
+ * ⇒ 分域或 VITE_API_BASE_URL='/sub/api' 的部署下静默 404（探测失败按纪律静默，
+ * 无人发现）。
  */
-export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api'
+export { API_BASE_URL }
 
 // 创建 axios 实例
 const apiClient = axios.create({
@@ -374,24 +382,8 @@ const apiClient = axios.create({
 
 // 「需要二次验证」的两个 401 与「登录态失效」是不同语义：前者绝不能触发
 // 令牌刷新链或强制登出，否则一次票据过期就会把用户踢回登录页。
-const REAUTH_TICKET_ERROR_CODES = ['REAUTH_TICKET_REQUIRED', 'REAUTH_TICKET_INVALID']
-
-/**
- * 从错误响应体读 errorCode；导出类请求 responseType 为 blob，
- * 错误 JSON 也被包成 Blob —— 不先解包就既认不出票据 401，
- * 也看不清后端真正返回的错误码。
- */
-const readErrorCode = async (data) => {
-  if (data?.errors?.errorCode) return data.errors.errorCode
-  if (typeof Blob !== 'undefined' && data instanceof Blob) {
-    try {
-      return JSON.parse(await data.text())?.errors?.errorCode || ''
-    } catch (_) {
-      return ''
-    }
-  }
-  return ''
-}
+// 错误码清单与 blob 错误体解包统一来自 utils/reauthCodes.js（叶子模块）：
+// reauthError.js 与本模块各自持有一份的拷贝已收敛，新增票据码只改叶子一处。
 
 // ========== Token 自动刷新机制 ==========
 // 防止并发刷新：多个 401 请求同时触发时，只执行一次刷新，其余等待结果
@@ -406,9 +398,24 @@ let refreshPromise = null
  *   2. 体验：残留 refresh cookie 时要等满 10s 刷新超时才提示，用户以为卡死；
  *   3. 无意义：即使刷新成功，重发一次「密码错误」的请求结果仍然是错。
  *
- * 用 includes 而非全等：baseURL 前缀在不同部署下可能不同（/api、/api/v1）。
+ * 按路径段精确匹配而非裸 includes：includes 没有边界概念，'/auth/login' 会
+ * 误命中 '/auth/login-public-key' 这类以它为前缀的更长路径（该接口当前免鉴权
+ * 无实害，但口径漂移是隐患）。判据：倒数第二段是 auth 且最后一段是入口名——
+ * 既挡住前缀误伤，也兼容不同部署下 config.url 携带的 baseURL 前缀（/api、/api/v1）。
  */
-const AUTH_NO_REFRESH_PATHS = ['/auth/login', '/auth/register', '/auth/refresh']
+const AUTH_NO_REFRESH_ENTRIES = new Set(['login', 'register', 'refresh'])
+
+const isAuthEntryPointPath = (url) => {
+  const segments = String(url || '')
+    .split(/[?#]/, 1)[0]
+    .replace(/\/+$/, '')
+    .split('/')
+  if (segments.length < 2) return false
+  return (
+    segments[segments.length - 2] === 'auth' &&
+    AUTH_NO_REFRESH_ENTRIES.has(segments[segments.length - 1])
+  )
+}
 
 /**
  * 并发刷新败者的静默恢复等待窗口（毫秒）
@@ -746,7 +753,7 @@ apiClient.interceptors.response.use(
       // 不刷新令牌、不弹「登录已过期」、不跳登录页。
       // 票据被服务端拒绝（如重启换 HMAC 密钥后本地票据仍"未过期"）时清掉本地副本，
       // 否则页面以为还有票据而不会重新弹框。
-      const incomingErrorCode = await readErrorCode(data)
+      const incomingErrorCode = await readErrorCodeFromData(data)
       if (status === 401 && REAUTH_TICKET_ERROR_CODES.includes(incomingErrorCode)) {
         if (incomingErrorCode === 'REAUTH_TICKET_INVALID') clearReauthTicket()
         return Promise.reject(error)
@@ -781,9 +788,7 @@ apiClient.interceptors.response.use(
       // 要先等 doRefreshToken（超时 10s）跑完才弹「用户名或密码错误」，
       // 用户会以为系统卡死并反复点击（进而更快撞上登录限流）。
       // 即使刷新侥幸成功，重发一次「密码错误」的登录请求也毫无意义。
-      const isAuthEntryPoint = AUTH_NO_REFRESH_PATHS.some((p) =>
-        String(config?.url || '').includes(p)
-      )
+      const isAuthEntryPoint = isAuthEntryPointPath(config?.url)
       // 会话确认不可用：提示 + 清本地态 + 跳登录。两条路径共用（Qoder 轮7）：
       //   ① 刷新被服务端**明确拒绝**（401/403/REFRESH_TOKEN_MISSING；网络错误与 5xx
       //      不算——见下方 isRefreshSessionDead 的口径）；
@@ -1195,6 +1200,8 @@ export const api = {
       apiClient.put('/security/config/registerCaptchaEnabled', data),
     // IP 黑白名单管理
     getIPList: (params) => apiClient.get('/security/ip-list', { params }),
+    // IP 命中查询（IpListView 查询栏）：判定结果与黑白名单命中列表一次取回
+    queryIPList: (ip) => apiClient.get('/security/ip-list/query', { params: { ip } }),
     // 管理员重置用户两步验证（账户救济：清除 TOTP/恢复码并强制下线）。
     // 需操作者本人二次验证：data 为 { currentPassword | encCurrentPassword | mfaCode }。
     resetUserMfa: (userId, data) =>
@@ -1216,6 +1223,11 @@ export const api = {
     // 前端复算即第二份事实。当前无视图调用它；启用时照 IpListView 走两阶段（先不带 → 读回
     // 后端的打字确认原因码 → 再带），否则加黑网段必然被拒。
     addIPEntry: (data) => apiClient.post('/security/ip-list', data),
+    // IpListView 的写入通道（新增/黑白切换/白名单恢复共用），与 addIPEntry 同端点
+    // 同形状。之所以单列名字：addIPEntry 被「死通道」契约钉住（apiRequestPipeline
+    // 的死通道用例断言没有任何视图引用它，防止被当成已接线的接口误用）；本函数
+    // 才是视图入口，两阶段逐字确认的 typedConfirm 由调用方按需放进 data 原样透传。
+    saveIPEntry: (data) => apiClient.post('/security/ip-list', data),
     removeIPEntry: (id) => apiClient.delete(`/security/ip-list/${encodePathSegment(id)}`),
     // 举报对象候选（GET /security/report-targets?type=&keyword=）→ data { items }
     // 免权限码（举报对全员开放），但候选集已被服务端按**举报人数据范围**过滤，

@@ -3,6 +3,7 @@ import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { cancelAllPendingRequests } from '@/utils/api'
 import { useAuthStore } from '@/store'
 import { matchPermission } from '@/utils/permission'
+import { reportDegradation } from '@/utils/errorReporter'
 import { watch } from 'vue'
 import i18n from '@/i18n'
 
@@ -167,7 +168,18 @@ router.onError(async (error, to) => {
       sessionStorage.setItem(retryKey, String(Date.now()))
     }
   } catch (_) {}
-  if (Date.now() - lastRetryAt < ROUTE_RETRY_WINDOW_MS) return
+  if (Date.now() - lastRetryAt < ROUTE_RETRY_WINDOW_MS) {
+    // 15s 窗口内的二次失败：自动恢复已被证明无效（网络/服务端持续异常），
+    // 不能继续静默返回——那是一个既无留痕也无下一步的白屏死胡同。
+    // 走统一降级上报留痕（errorReporter 既有惯例），并给用户可执行的下一步：
+    // 复用既有 networkError 文案（不新增词条，locale 归主控收口）。
+    reportDegradation('路由 chunk 在重试窗口内二次加载失败，自动恢复已被抑制', {
+      url: target,
+      message: error?.message,
+    })
+    ElMessage.error(i18n.global.t('messages.networkError'))
+    return
+  }
 
   const [failedUrl] = error.message.match(/https?:\/\/\S+/) || []
   if (failedUrl) {

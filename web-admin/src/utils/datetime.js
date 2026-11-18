@@ -20,14 +20,18 @@ export const localDateStr = (d = new Date()) => {
  *  与后端 utils/dateFormat.js 的 toDisplayDate 口径必须一致（P1⑤）。 */
 const isBlankTime = (v) => v === null || v === undefined || v === '' || typeof v === 'boolean'
 
+/** 「YYYY-MM-DD HH:mm:ss」唯一拼装出口：formatTime 与 toLocalWallClock 共用，
+ *  避免两份 padStart 拼装各自演化后口径漂移（B-DRY）。 */
+const formatWallClock = (d) => {
+  const p = (n) => String(n).padStart(2, '0')
+  return `${localDateStr(d)} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+
 export const formatTime = (v) => {
   if (isBlankTime(v)) return '-'
   const d = new Date(v)
   if (Number.isNaN(d.getTime())) return '-'
-  const hh = String(d.getHours()).padStart(2, '0')
-  const mi = String(d.getMinutes()).padStart(2, '0')
-  const ss = String(d.getSeconds()).padStart(2, '0')
-  return `${localDateStr(d)} ${hh}:${mi}:${ss}`
+  return formatWallClock(d)
 }
 
 /**
@@ -47,6 +51,5 @@ export const toLocalWallClock = (v) => {
   if (isBlankTime(v)) return ''
   const d = v instanceof Date ? v : new Date(v)
   if (Number.isNaN(d.getTime())) return ''
-  const p = (n) => String(n).padStart(2, '0')
-  return `${localDateStr(d)} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+  return formatWallClock(d)
 }

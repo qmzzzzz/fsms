@@ -611,9 +611,10 @@ let exitTimer = null
 
 const handleCommand = (command) => {
   switch (command) {
+    // profile 与 password 两个命令当前行为完全一致：改密表单就在 /profile 页内，
+    // 故合并为一个分支（原先两段相同代码并排，会误导维护者以为行为不同）。
+    // 若未来拆出独立改密页，再在此处按命令分叉。
     case 'profile':
-      router.push('/profile')
-      break
     case 'password':
       router.push('/profile')
       break

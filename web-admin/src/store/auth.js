@@ -389,6 +389,10 @@ export const useAuthStore = defineStore('auth', {
       // 路由守卫的恢复探测会把刚被清掉的会话又「救」回来
       this.restoreFailed = true
       this.sessionVerified = false
+      // 深链目标属于「上一次会话」的导航意图，登出即作废：否则同页
+      // 「会话过期→登出→再登录」会把用户送回上次的深链，而非本次的默认落点。
+      // 正常用法不受影响——守卫拦下深链时会重新写入本字段。
+      this.postLoginRedirect = null
       // 票据是绑定账号+会话的短期凭证，登出后必须就地销毁（内存态，不落盘）
       clearReauthTicket()
       safeLocal.remove('currentUser')
@@ -434,6 +438,8 @@ export const useAuthStore = defineStore('auth', {
       // 身份已被覆盖/终止，禁止本页再探测恢复
       this.restoreFailed = true
       this.sessionVerified = false
+      // 旧会话的深链意图一并作废：新身份登录后不得复用上个会话的目标路径
+      this.postLoginRedirect = null
       // 旧会话的二次验证票据不能留给下一个身份使用
       clearReauthTicket()
       safeLocal.remove('currentUser')

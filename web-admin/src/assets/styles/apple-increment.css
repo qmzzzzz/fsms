@@ -1,0 +1,53 @@
+/* ============================================================
+   Apple 风格增量 · 列表页共享交互层（A-DRY 收敛）
+
+   此前这段「按压反馈 / 卡片浮起 / 行与标签过渡 / reduced-motion 降级」
+   在 AlarmView、DeviceView、InspectionView、ReportView（及 AboutView、
+   IpListView 等）逐字复制，改一处忘其余必漂移，故收敛为本文件。
+
+   ⚠️ 引入方式必须是视图内的 scoped 外链样式块：
+       <style scoped src="@/assets/styles/apple-increment.css"></style>
+   不能在 main.js 全局引入——这里的 :deep(...) 依赖 SFC 的 scoped 编译管道，
+   全局引入后 :deep() 不会被改写、选择器语义会变。
+   各视图接入后请删除自己那份逐字拷贝，勿再新增。
+   ============================================================ */
+
+/* 可交互元素按压即时反馈（pointer-down，非松开） */
+.el-button:active {
+  transform: scale(0.97);
+  transition: transform 100ms ease-out;
+}
+
+/* 卡片 hover 轻浮起（可中断阴影过渡，无弹跳，克制） */
+.el-card {
+  transition: box-shadow 280ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+.el-card:hover {
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.08);
+}
+
+/* 表格行背景平滑渐变，避免斑马纹/状态色跳变 */
+:deep(.el-table .el-table__row td.el-table__cell) {
+  transition: background-color 150ms ease;
+}
+
+/* 标签（el-tag）hover 轻微加深，仅提示可读性 */
+:deep(.el-tag) {
+  transition: opacity 150ms ease;
+}
+
+/* 无障碍降级：本页新增动效全部纳入 reduced-motion */
+@media (prefers-reduced-motion: reduce) {
+  .el-button:active {
+    transform: none !important;
+  }
+  .el-card {
+    transition: opacity 150ms ease !important;
+  }
+  .el-card:hover {
+    box-shadow: none !important;
+  }
+  :deep(.el-table .el-table__row td.el-table__cell) {
+    transition: none !important;
+  }
+}

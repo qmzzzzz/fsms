@@ -8,39 +8,13 @@
 import { ref, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useSystemLabels } from '@/i18n/systemLabels'
-
-// 模块图标映射
-const MODULE_ICONS = {
-  system: '⚙️',
-  device: '🔧',
-  alarm: '🚨',
-  inspection: '📋',
-  report: '📊',
-  security: '🛡️',
-}
-
-// 将后端权限树转换为模块列表
-// 关键：权限树存在"权限挂权限"的多级嵌套（子权限的 parent 是另一个权限而非模块），
-// 仅读取模块第一层 children 会丢失嵌套权限，导致已启用权限显示不全、也无法单独修改。
-// 这里递归展平树中所有层级的真实权限节点（合法 ObjectId），保证完整渲染。
-const flattenPermissionNodes = (nodes, acc = [], seen = new Set()) => {
-  ;(nodes || []).forEach((node) => {
-    if (!node) return
-    const id = node._id || ''
-    if (/^[0-9a-fA-F]{24}$/.test(id)) {
-      if (!seen.has(id)) {
-        seen.add(id)
-        acc.push(node)
-      }
-      // 继续下钻该权限自身的子权限
-      flattenPermissionNodes(node.children, acc, seen)
-    } else {
-      // 虚拟分组节点（module-xxx）：跳过自身但下钻其子级
-      flattenPermissionNodes(node.children, acc, seen)
-    }
-  })
-  return acc
-}
+// 模块图标/名称映射与权限树展平收口到共享目录（2026-11-17 审计 B-DRY）：
+// 与 usePrivilegeGrantOptions 的双实现已漂移，单一来源见 utils/permissionCatalog
+import {
+  permissionModuleIcon,
+  permissionModuleName,
+  flattenPermissionTree,
+} from '@/utils/permissionCatalog'
 
 export function useRolePermissions() {
   const { t } = useI18n()
@@ -60,17 +34,8 @@ export function useRolePermissions() {
   // 是否有未保存变更
   const hasUnsavedChanges = ref(false)
 
-  const MODULE_NAMES = computed(() => ({
-    system: t('nav.system'),
-    user: t('nav.users'),
-    role: t('nav.roles'),
-    permission: t('role.permissions'),
-    device: t('nav.devices'),
-    alarm: t('nav.alarms'),
-    inspection: t('nav.inspections'),
-    report: t('nav.reports'),
-    security: t('security.title'),
-  }))
+  // MODULE_NAMES computed 已删除（B-DRY）：模块名统一走 utils/permissionCatalog
+  // 的 permissionModuleName（渲染期在下方 getter 内求值，语言响应性不变）
 
   // 权限类型显示标签：取值集合与后端 Permission.type 的 mongoose enum
   // ['menu','button','api','data'] 一致（src/models/Permission.js:33、
@@ -88,12 +53,13 @@ export function useRolePermissions() {
   const buildModuleList = (tree) => {
     if (!Array.isArray(tree)) return []
     // 先滤掉 null/undefined 模块元素：后端返回的树若混入空洞，`mod.children`
-    // 会直接抛 TypeError 把整个权限面板打成白屏。与 flattenPermissionNodes
+    // 会直接抛 TypeError 把整个权限面板打成白屏。与共享 flattenPermissionTree
     // 的 `if (!node) return` 同一口径（该防御此前只存在于子节点层，模块层缺失）。
     return tree
       .filter((mod) => mod)
       .map((mod) => {
-        const permissions = flattenPermissionNodes(mod.children)
+        // 展平收口到共享实现：按 _id 去重（勾选集合的身份域是 ObjectId）
+        const permissions = flattenPermissionTree(mod.children)
         const activeCount = permissions.filter((p) => checkedPermIds.value.has(p._id)).length
         return {
           module: mod.module,
@@ -103,9 +69,9 @@ export function useRolePermissions() {
           // moduleList，页内切语言（不重载、不重建权限树）后模块名不跟随，
           // 直到下一次 setTree 才修正（实测复现）。
           get name() {
-            return MODULE_NAMES.value[mod.module] || mod.name || mod.module
+            return permissionModuleName(t, mod.module, mod.name)
           },
-          icon: MODULE_ICONS[mod.module] || '📦',
+          icon: permissionModuleIcon(mod.module),
           permissions,
           activeCount,
         }

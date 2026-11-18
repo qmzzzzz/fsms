@@ -606,12 +606,21 @@ function record(kind, message, stack = '', extra = {}) {
   }
 }
 
-function scheduleFlush() {
+// 上报失败的退避重试（P3）：失败后若无人再排程，待发批次会一直滞留在本页
+// （原实现只有「下一条错误进账」才顺带重试，错误停止后滞留变成无限期）。
+// 这里在失败路径按指数退避重新排程，封顶 5 分钟；任一次发送成功即复位。
+// 与 flush 并发锁不冲突：重试定时器触发时上一轮 fetch 已 settle（finally 已释放
+// 锁）；若极端情况下仍在途，flush 入口的 flushInFlight 短路兜底，不会并发发送。
+const FLUSH_RETRY_BASE_MS = 5000
+const FLUSH_RETRY_MAX_MS = 5 * 60 * 1000
+let flushRetryDelayMs = FLUSH_RETRY_BASE_MS
+
+function scheduleFlush(delay = FLUSH_INTERVAL_MS) {
   if (!reportUrl || flushTimer) return
   flushTimer = setTimeout(() => {
     flushTimer = null
     flush()
-  }, FLUSH_INTERVAL_MS)
+  }, delay)
 }
 
 // P3-67：并发锁。flush 可被三条路径同时触发（scheduleFlush 定时器、pagehide、
@@ -632,6 +641,7 @@ function flush() {
       : false
   if (sent) {
     pending = pending.slice(batch.length)
+    flushRetryDelayMs = FLUSH_RETRY_BASE_MS
     return
   }
   flushInFlight = true
@@ -643,9 +653,13 @@ function flush() {
   })
     .then(() => {
       pending = pending.slice(batch.length)
+      flushRetryDelayMs = FLUSH_RETRY_BASE_MS
     })
     .catch(() => {
-      // 收集端不可达时保留待下次重试，静默避免二次干扰
+      // 收集端不可达：保留待发批次（静默避免二次干扰），并按退避重新排程——
+      // 不能只靠「下一条错误进账」才重试，那会让滞留变成无限期
+      scheduleFlush(flushRetryDelayMs)
+      flushRetryDelayMs = Math.min(flushRetryDelayMs * 2, FLUSH_RETRY_MAX_MS)
     })
     .finally(() => {
       flushInFlight = false

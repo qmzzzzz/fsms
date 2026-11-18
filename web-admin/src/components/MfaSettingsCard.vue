@@ -355,12 +355,17 @@ const enrollMfa = async () => {
       return
     }
     const { data: resp } = await api.auth.mfaEnroll(credential)
-    if (resp.success && resp.data?.secret) {
-      mfa.secret = resp.data.secret
-      mfa.otpauthUri = resp.data.otpauthUri || ''
-      renderQrcode()
-      ElMessage.info(t('profile.mfaEnrolledTip'))
+    // 与 enable/disable/regenerate 三个写入口同口径（2026-11-17 审计 D 组）：
+    // HTTP 2xx 但 success:false、或响应缺 secret（登记的本质载荷）也必须提示失败。
+    // 此前静默返回，用户「点了没反应」会误以为已开始登记而卡在原地。
+    if (resp?.success !== true || !resp.data?.secret) {
+      ElMessage.error(resp?.message || t('common.failed'))
+      return
     }
+    mfa.secret = resp.data.secret
+    mfa.otpauthUri = resp.data.otpauthUri || ''
+    renderQrcode()
+    ElMessage.info(t('profile.mfaEnrolledTip'))
   } catch (_) {
     // 错误已在拦截器处理
   } finally {

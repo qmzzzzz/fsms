@@ -8,17 +8,18 @@
  */
 
 /**
- * 安全读写 sessionStorage（兼容隐私模式下的 Edge / Firefox / Chrome）
+ * createSafeStorage：safeStorage（sessionStorage）与 safeLocal（localStorage）
+ * 的五个方法本是同构拷贝，只有存储介质不同——收敛为一个工厂，介质由调用方注入
+ * （B-DRY）。行为契约只写一遍：缺失键回 fallback、介质抛错（隐私模式/配额满）
+ * 一律静默降级为 fallback 或空操作，绝不向上抛。
  *
- * 认证令牌已迁移至 httpOnly cookie（I-01）：login/refresh 由后端 Set-Cookie 下发
- * access_token(path=/) 与 refresh_token(path=/api/auth)，JS 完全不可读，
- * XSS 无法窃取。此处仅存放 currentUser/permissions 等非敏感界面状态，
- * 支撑刷新页面后的路由守卫与权限判断；真实鉴权始终由后端按 cookie 校验。
+ * 不导出工厂本身：模块导出面保持 safeStorage / safeLocal / readSessionState 不变。
+ * @param {Storage} backing 浏览器存储介质（sessionStorage / localStorage）
  */
-export const safeStorage = {
+const createSafeStorage = (backing) => ({
   get(key, fallback = null) {
     try {
-      const raw = sessionStorage.getItem(key)
+      const raw = backing.getItem(key)
       // 缺失键同样走 fallback：原实现只在「介质抛错」时用 fallback，
       // 调用方写 safeStorage.get(k, 默认值) 会静默拿到 null，参数形同虚设，
       // 与 getJSON 的「无值即 fallback」语义也不一致
@@ -29,17 +30,17 @@ export const safeStorage = {
   },
   set(key, value) {
     try {
-      sessionStorage.setItem(key, value)
+      backing.setItem(key, value)
     } catch (_) {}
   },
   remove(key) {
     try {
-      sessionStorage.removeItem(key)
+      backing.removeItem(key)
     } catch (_) {}
   },
   getJSON(key, fallback = null) {
     try {
-      const raw = sessionStorage.getItem(key)
+      const raw = backing.getItem(key)
       return raw ? JSON.parse(raw) : fallback
     } catch (_) {
       return fallback
@@ -47,10 +48,20 @@ export const safeStorage = {
   },
   setJSON(key, value) {
     try {
-      sessionStorage.setItem(key, JSON.stringify(value))
+      backing.setItem(key, JSON.stringify(value))
     } catch (_) {}
   },
-}
+})
+
+/**
+ * 安全读写 sessionStorage（兼容隐私模式下的 Edge / Firefox / Chrome）
+ *
+ * 认证令牌已迁移至 httpOnly cookie（I-01）：login/refresh 由后端 Set-Cookie 下发
+ * access_token(path=/) 与 refresh_token(path=/api/auth)，JS 完全不可读，
+ * XSS 无法窃取。此处仅存放 currentUser/permissions 等非敏感界面状态，
+ * 支撑刷新页面后的路由守卫与权限判断；真实鉴权始终由后端按 cookie 校验。
+ */
+export const safeStorage = createSafeStorage(sessionStorage)
 
 /**
  * 安全读写 localStorage
@@ -63,40 +74,7 @@ export const safeStorage = {
  *   两者作用域必须对齐，否则同一浏览器内的会话无法持久共享。
  * - 主题等偏好：localStorage
  */
-export const safeLocal = {
-  get(key, fallback = null) {
-    try {
-      const raw = localStorage.getItem(key)
-      // 与 safeStorage.get 同一契约：缺失键即 fallback（详见上方注释）
-      return raw === null ? fallback : raw
-    } catch (_) {
-      return fallback
-    }
-  },
-  set(key, value) {
-    try {
-      localStorage.setItem(key, value)
-    } catch (_) {}
-  },
-  remove(key) {
-    try {
-      localStorage.removeItem(key)
-    } catch (_) {}
-  },
-  getJSON(key, fallback = null) {
-    try {
-      const raw = localStorage.getItem(key)
-      return raw ? JSON.parse(raw) : fallback
-    } catch (_) {
-      return fallback
-    }
-  },
-  setJSON(key, value) {
-    try {
-      localStorage.setItem(key, JSON.stringify(value))
-    } catch (_) {}
-  },
-}
+export const safeLocal = createSafeStorage(localStorage)
 
 /**
  * 会话身份状态读取：localStorage 优先，回退读取旧版 sessionStorage 并就地迁移

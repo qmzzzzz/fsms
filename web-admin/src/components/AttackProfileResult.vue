@@ -543,6 +543,12 @@ const scrollTo = (id) => {
   margin-bottom: 12px;
   background: #fff;
 }
+
+/* 暗色主题：亮色保持 #fff 不变；暗色下硬编码白底会成刺眼白块，
+   与 el-dialog 暗色表面同口径改用 --xf-gray-50（ExitOverlay 等同款 html.dark 覆盖惯例） */
+html.dark .category-card {
+  background: var(--xf-gray-50);
+}
 .category-head {
   display: flex;
   justify-content: space-between;

@@ -17,6 +17,9 @@
  */
 import axios from 'axios'
 import { reportDegradation } from '@/utils/errorReporter'
+// API base 统一从叶子模块取（B-DRY）：与 api.js / versionWatcher 同一口径，
+// 避免三处各自 `VITE_API_BASE_URL || '/api'` 派生后口径漂移
+import { API_BASE_URL } from '@/utils/apiBase'
 
 let cachedKey = null // { keyObj, curve }，会话级缓存；服务端换钥后由 invalidate 清除
 
@@ -68,10 +71,9 @@ async function ensurePublicKey(force = false) {
   // router/element-plus 导入链），便于单测。
   // FE-M2：必须显式 timeout——axios 默认永久等待，公钥接口悬挂时
   // 登录/注册/改密提交全部无限期 pending
-  const { data: resp } = await axios.get(
-    (import.meta.env.VITE_API_BASE_URL || '/api') + '/auth/login-public-key',
-    { timeout: 10000 }
-  )
+  const { data: resp } = await axios.get(API_BASE_URL + '/auth/login-public-key', {
+    timeout: 10000,
+  })
   const pem = resp?.data?.publicKey
   // FE-I1：curve 白名单——非法值会让 importKey 抛错并入静默降级路径，
   // 在源头拒绝（sharedBits 分支只认 P-256/P-384）

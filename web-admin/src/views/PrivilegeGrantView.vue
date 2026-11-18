@@ -54,10 +54,16 @@
     </el-alert>
 
     <div v-if="summary || summaryFailed" class="summary-grid" aria-live="polite">
-      <button
+      <!-- A（口径一致）：可点击卡片 = 点击落地的筛选与卡片指标同口径
+           （待审批→pending、生效中→active、超期→专设弹窗）。「即将到期」「高敏生效中」
+           是 active 的子集，列表接口（GET /permissions/grants 仅支持 status/userId）
+           无法表达同口径筛选，故渲染为纯指标卡（div），不做「点了落到泛化 active」
+           的名实不符跳转；后端补子集筛选参数后可恢复可点击。 -->
+      <component
+        :is="card.clickable ? 'button' : 'div'"
         v-for="card in summaryCards"
         :key="card.key"
-        type="button"
+        v-bind="card.clickable ? { type: 'button' } : {}"
         class="summary-card"
         :class="summaryCardClass(card)"
         @click="handleSummaryCard(card)"
@@ -68,7 +74,7 @@
         </span>
         <span class="summary-label">{{ card.label }}</span>
         <span class="summary-hint">{{ card.hint }}</span>
-      </button>
+      </component>
     </div>
 
     <div v-if="summaryFailed" class="summary-failed" role="status">
@@ -84,7 +90,12 @@
       </button>
     </div>
 
-    <section v-if="creating" class="create-form" :aria-label="$t('privilegeGrant.requestTitle')">
+    <section
+      v-if="creating"
+      ref="createFormPanelRef"
+      class="create-form"
+      :aria-label="$t('privilegeGrant.requestTitle')"
+    >
       <header class="create-form__header">
         <div>
           <h2 class="create-form__title">{{ $t('privilegeGrant.requestTitle') }}</h2>
@@ -898,6 +909,9 @@ const {
 } = usePrivilegeGrantOptions({ hasPerm })
 
 const creating = ref(false)
+// A：授权面板的模板 ref——替代 document.querySelector('.create-form') 的全局
+// 类名定位（类名选择器会被页面其它同名类或样式重构误伤，ref 才是本组件自己的面板）
+const createFormPanelRef = ref(null)
 const submitting = ref(false)
 // 本次授权的幂等键（审计一-1）：重复提交会产出两条待审记录
 const submission = createSubmissionKey()
@@ -952,6 +966,7 @@ const summaryCards = computed(() => [
     tone: 'warning',
     icon: Timer,
     active: statusFilter.value === 'pending',
+    clickable: true,
     targetStatus: 'pending',
   },
   {
@@ -962,6 +977,7 @@ const summaryCards = computed(() => [
     tone: 'success',
     icon: Clock,
     active: statusFilter.value === 'active',
+    clickable: true,
     targetStatus: 'active',
   },
   {
@@ -972,7 +988,9 @@ const summaryCards = computed(() => [
     tone: 'warning',
     icon: Clock,
     active: false,
-    targetStatus: 'active',
+    // 指标是 active 的子集（expiresAt 落在即将到期窗口内），列表接口无法同口径
+    // 筛选：不可点击，避免「点了落到泛化 active」的名实不符（见模板注释）
+    clickable: false,
   },
   {
     key: 'highRiskActive',
@@ -982,7 +1000,8 @@ const summaryCards = computed(() => [
     tone: 'danger',
     icon: Lock,
     active: false,
-    targetStatus: 'active',
+    // 指标是 active ∧ highRisk 的子集，列表接口无法同口径筛选：不可点击（同上）
+    clickable: false,
   },
   {
     key: 'overdue',
@@ -992,6 +1011,8 @@ const summaryCards = computed(() => [
     tone: 'info',
     icon: Warning,
     active: false,
+    // 超期有专设的清单弹窗承接（overdueGrants），与卡片指标同源同口径
+    clickable: true,
     targetStatus: '',
   },
 ])
@@ -1176,7 +1197,7 @@ const rowClassName = ({ row }) =>
 const summaryCardClass = (card) => [
   'summary-card',
   'summary-card--' + card.tone,
-  { 'is-active': card.active },
+  { 'is-active': card.active, 'is-static': !card.clickable },
 ]
 const permissionOptionClass = (perm) => ({
   'is-selected': isCodeSelected(perm.code),
@@ -1204,6 +1225,9 @@ const handleSummaryCard = (card) => {
     overdueVisible.value = true
     return
   }
+  // 指标卡（即将到期/高敏生效中）不可点击：它们的指标是 active 的子集，
+  // 列表接口无法同口径筛选，点击只会落到泛化 active（见模板注释）。防御性兜底。
+  if (!card.clickable) return
   setStatus(card.targetStatus)
 }
 
@@ -1215,7 +1239,8 @@ const toggleCreate = () => {
   submission.renew()
   ensureOptions()
   nextTick(() => {
-    const panel = document.querySelector('.create-form')
+    // A：改用模板 ref 定位面板（原 document.querySelector 依赖全局类名，脆弱）
+    const panel = createFormPanelRef.value
     if (panel && typeof panel.scrollIntoView === 'function') {
       panel.scrollIntoView({ behavior: 'smooth', block: 'start' })
     }
@@ -1271,7 +1296,10 @@ const resetCreateForm = () => {
   createForm.reason = ''
   manualCodesText.value = ''
   permSearch.value = ''
-  userSearchFailed.value = false
+  // 不再直接复位 userSearchFailed：它是 usePrivilegeGrantOptions 的内部失败标记，
+  // 视图越权写 .value 会绕过该组合式函数的状态机。该标记只在授权面板展开时渲染，
+  // 而重开面板必经 ensureOptions() → loadUserOptions()，会按真实请求结果重置它。
+  // （正式的 reset API 应由 usePrivilegeGrantOptions 暴露——该文件不在本任务清单内，需主控协调。）
 }
 
 const handleCreate = async () => {
@@ -1527,3 +1555,17 @@ onUnmounted(() => {
 </script>
 
 <style scoped src="./PrivilegeGrantView.css"></style>
+
+<style scoped>
+/* 指标卡（不可点击的纯展示卡）：去指针手型与 hover 浮起，避免「看起来能点」。
+   基础 .summary-card 样式在 PrivilegeGrantView.css（scoped 外链），此处只做
+   不可点态的覆盖，类名与视觉节奏不变 */
+.summary-card.is-static {
+  cursor: default;
+}
+.summary-card.is-static:hover {
+  transform: none;
+  border-color: var(--xf-border-glass);
+  box-shadow: var(--xf-shadow-xs);
+}
+</style>

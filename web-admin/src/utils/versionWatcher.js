@@ -17,7 +17,8 @@
  *   3. 页面隐藏时不发请求；重新可见时补查一次。轮询只在用户真的在看页面时消耗配额。
  */
 
-import { API_BASE_URL } from '@/utils/api'
+// 与 api.js / loginCipher 同一叶子常量（B-DRY）：三处各自派生 API base 的写法收敛
+import { API_BASE_URL } from '@/utils/apiBase'
 
 export const DEFAULT_INTERVAL_MS = 5 * 60 * 1000
 
@@ -37,7 +38,7 @@ export function isComparableBuildId(id) {
 }
 
 /**
- * 版本接口地址：复用统一 API base（与 utils/api.js 同源，P2-8）。
+ * 版本接口地址：复用统一 API base（utils/apiBase.js 单一来源，P2-8）。
  *
  * 原实现用 BASE_URL 拼 `${BASE_URL}/api/version`，完全忽略 VITE_API_BASE_URL：
  * 独立 API 域或 VITE_API_BASE_URL='/sub/api' 的部署下探测会静默 404 ——

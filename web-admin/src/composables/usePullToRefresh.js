@@ -8,6 +8,9 @@
  */
 import { ref, onMounted, onUnmounted } from 'vue'
 import { haptic } from '@/utils/haptic'
+// 降级上报收口（2026-11-17 审计 D 组）：onRefresh 的同步抛错与异步拒绝此前被
+// 双层 catch 静默吞掉，页面只表现成「刷新了但数据没变」，现场无从排查
+import { reportDegradation } from '@/utils/errorReporter'
 
 const RESISTANCE = 0.55
 const TRIGGER_THRESHOLD = 80
@@ -76,11 +79,20 @@ export function usePullToRefresh(targetRef, onRefresh) {
       let refreshResult
       try {
         refreshResult = onRefresh?.()
-      } catch (_) {
+      } catch (error) {
+        // 同步抛错：上报留痕后按「无刷新结果」继续收口，指示条照常复位
+        reportDegradation('下拉刷新回调执行失败', {
+          error: error?.message || String(error),
+        })
         refreshResult = undefined
       }
       Promise.resolve(refreshResult)
-        .catch(() => {})
+        .catch((error) => {
+          // 异步拒绝：不再静默吞掉，至少进入降级留痕（失败可见）
+          reportDegradation('下拉刷新执行失败', {
+            error: error?.message || String(error),
+          })
+        })
         .finally(() => {
           y.value = 0
           refreshing.value = false

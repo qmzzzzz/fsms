@@ -108,7 +108,6 @@ const languageLabel = computed(() => (currentLang.value === 'en-US' ? 'English' 
 const onLanguageCommand = (lang) => {
   setLocale(lang)
   appStore.setLanguage(lang)
-  locale.value = lang
 }
 </script>
 

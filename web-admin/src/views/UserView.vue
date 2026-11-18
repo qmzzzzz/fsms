@@ -1157,7 +1157,9 @@ const handleSelectionChange = (rows) => {
   selectedUsers.value = rows
 }
 
-const handleBatchDelete = async () => {
+// 与同文件 handleDelete/submitForm 同一重入锁口径（withSyncLock）：确认框弹出
+// 需要一次渲染才挂上 :disabled，同一 tick 的连点会排队弹出两次确认框并重复发请求。
+const handleBatchDelete = withSyncLock(async () => {
   const ids = selectedUsers.value.map((row) => row._id || row.id)
   if (ids.length === 0) return
   try {
@@ -1179,7 +1181,7 @@ const handleBatchDelete = async () => {
   } catch (_) {
     // 失败提示归 api.js 响应拦截器（批量错误码均有 i18n 映射），组件不重复弹
   }
-}
+})
 
 const handleDelete = withSyncLock(async (row) => {
   try {
@@ -1353,8 +1355,13 @@ const submitForm = withSyncLock(async () => {
         return 'BLOCKED'
       })
       if (enc === 'BLOCKED') return
-      if (enc) payload.encPassword = enc
-      else payload.password = dialog.form.password
+      // H（G2 统一口径）：null = dev 非安全上下文加密不可用。与 ReportView 的导出
+      // 二次验证、本文件 doReveal 同口径——报错中止，不再回退明文轨上行口令。
+      if (!enc) {
+        ElMessage.error(t('login.insecureContext'))
+        return
+      }
+      payload.encPassword = enc
       await api.users.create(payload, { headers: dialog.submission.header() })
       ElMessage.success(t('messages.createSuccess'))
     } else {

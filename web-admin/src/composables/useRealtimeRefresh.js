@@ -20,12 +20,46 @@ import { reportDegradation } from '@/utils/errorReporter'
 
 export function useRealtimeRefresh({ rooms = [], subscriptions = [], label = 'realtime' } = {}) {
   let ws = null
+  // 记录「已实际加入的房间 / 已绑定的监听」：中途抛错时才能精确回滚，
+  // 不在共享连接上残留本页已不需要的房间订阅（重连后还会被自动重新 join）
+  const joinedRooms = new Set()
+  const boundHandlers = []
+
+  // 收口统一为一个幂等清理：挂载失败（部分加入）与正常卸载走同一条路，
+  // 卸载侧不再依赖 `if (!ws) return` 短路——catch 清理后 ws 虽为 null，
+  // 但不会漏掉任何已产生的副作用，重复调用也安全。
+  const cleanup = () => {
+    if (!ws) return
+    boundHandlers.splice(0).forEach(({ event, handler }) => {
+      try {
+        ws.off(event, handler)
+      } catch (_) {
+        // 单个解绑失败不阻断其余清理
+      }
+    })
+    joinedRooms.forEach((room) => {
+      try {
+        ws.leaveRoom(room)
+      } catch (_) {
+        // 单个退房失败不阻断其余清理
+      }
+    })
+    joinedRooms.clear()
+    releaseWebSocket()
+    ws = null
+  }
 
   onMounted(() => {
     try {
       ws = acquireWebSocket()
-      rooms.forEach((room) => ws.joinRoom(room))
-      subscriptions.forEach(({ event, handler }) => ws.on(event, handler))
+      rooms.forEach((room) => {
+        ws.joinRoom(room)
+        joinedRooms.add(room)
+      })
+      subscriptions.forEach(({ event, handler }) => {
+        ws.on(event, handler)
+        boundHandlers.push({ event, handler })
+      })
     } catch (error) {
       // 建连失败退化为手动刷新，不影响页面主流程；但必须上报，否则「实时推送
       // 从未生效」会以「页面一直要手动刷」的形态长期存在而无人发现。
@@ -33,19 +67,14 @@ export function useRealtimeRefresh({ rooms = [], subscriptions = [], label = 're
         error: error?.message || String(error),
         fallback: '手动刷新',
       })
-      // 与 usePermissionSync 同口径：只归还确实拿到手的那次引用
-      if (ws) releaseWebSocket()
-      ws = null
+      // 与 usePermissionSync 同口径：只归还确实拿到手的那次引用；
+      // 并回滚已加入的房间与已绑定的监听（2026-11-17 审计 D 组：
+      // 此前部分失败时已 join 的房间不退出，且 ws 置空会短路卸载清理）
+      cleanup()
     }
   })
 
-  onUnmounted(() => {
-    if (!ws) return
-    subscriptions.forEach(({ event, handler }) => ws.off(event, handler))
-    rooms.forEach((room) => ws.leaveRoom(room))
-    releaseWebSocket()
-    ws = null
-  })
+  onUnmounted(cleanup)
 }
 
 export default useRealtimeRefresh

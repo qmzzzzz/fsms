@@ -115,6 +115,13 @@ const resetForm = () => {
 
 const submit = async () => {
   if (!formRef.value || submitting.value) return
+  // 判空防护：父组件可传 device=null（prop 默认即 null），此时点确认会在
+  // props.device._id 处抛 TypeError。复用全仓通用键 messages.selectRequired 提示
+  // （不新增词表键），并直接返回，与组件「错误在本地拦截、请求错误交拦截器」风格一致。
+  if (!props.device?._id) {
+    ElMessage.warning(t('messages.selectRequired'))
+    return
+  }
   // 前置锁（G3）：validate 是 async，若在它之后才置位，确认窗口期里的第二次
   // 点击会并行跑进第二个 addMaintenance——同一设备同一内容重复登记。
   // 置位提前到第一个 await 之前，validate 失败由既有 finally 复位。

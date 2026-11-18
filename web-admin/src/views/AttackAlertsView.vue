@@ -43,6 +43,10 @@
     <div class="glass filter-card">
       <el-form :model="filters" label-position="top" class="filter-form">
         <el-form-item :label="$t('report.dateRange')" class="filter-item--wide">
+          <!-- E（双触发）：EP 的 onClear（time-picker/picker 源码）在清空时会先
+               emitChange(null) 再 emit('clear')，两个事件都会打到 handleSearch ⇒
+               同一次清空发两轮相同查询。change 已覆盖清空语义，故只绑 @change 不绑
+               @clear，与同页 el-select「只绑 @change 不绑 @clear，防双请求」的既有惯例对齐。 -->
           <el-date-picker
             v-model="filters.dateRange"
             type="daterange"
@@ -52,7 +56,6 @@
             value-format="YYYY-MM-DD"
             style="width: 100%"
             @change="handleSearch"
-            @clear="handleSearch"
           />
         </el-form-item>
         <el-form-item :label="$t('attackAlerts.sourceIp')">
@@ -98,7 +101,7 @@
             v-model="filters.action"
             clearable
             filterable
-            :data-test="'alerts-filter-action'"
+            data-test="alerts-filter-action"
             @change="handleSearch"
           >
             <el-option

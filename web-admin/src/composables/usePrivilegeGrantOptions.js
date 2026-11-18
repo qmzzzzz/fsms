@@ -3,11 +3,18 @@ import { useI18n } from 'vue-i18n'
 import { api, isCanceledError } from '@/utils/api'
 import { useLatestRequest } from '@/composables/useLatestRequest'
 import { isReservedCode } from '@/utils/privilegeGrant'
+// 模块图标/名称映射与权限树展平收口到共享目录（2026-11-17 审计 B-DRY）：
+// 与 useRolePermissions 的双实现已漂移，单一来源见 utils/permissionCatalog
+import {
+  permissionModuleIcon,
+  permissionModuleName,
+  flattenPermissionTree,
+} from '@/utils/permissionCatalog'
 
 /**
  * PrivilegeGrantView 的候选项加载域（P1-3 拆分）：表单所需的用户候选
  * （服务端搜索）与权限目录（权限树扁平化）收口在这里。
- * moduleName/permissionIcon 是目录分组的展示辅助，一并随迁。
+ * moduleName 是目录分组的展示辅助；图标/名称映射与展平实现见共享模块。
  */
 export function usePrivilegeGrantOptions({ hasPerm }) {
   const { t } = useI18n()
@@ -25,38 +32,8 @@ export function usePrivilegeGrantOptions({ hasPerm }) {
   const permissionGroups = ref([])
   const permissionMap = ref(new Map())
 
-  const permissionIcon = (module) =>
-    ({
-      system: '⚙️',
-      user: '👤',
-      role: '🔑',
-      permission: '🛡️',
-      device: '🔧',
-      alarm: '🚨',
-      inspection: '📋',
-      report: '📊',
-      security: '🛡️',
-      privilege: '🎫',
-      pii: '🔒',
-    })[module] || '📦'
-
-  const moduleName = (group) => {
-    const key = {
-      system: 'nav.system',
-      user: 'nav.users',
-      role: 'nav.roles',
-      permission: 'role.permissions',
-      device: 'nav.devices',
-      alarm: 'nav.alarms',
-      inspection: 'nav.inspections',
-      report: 'nav.reports',
-      security: 'security.title',
-      privilege: 'nav.privilegeGrants',
-      pii: 'privilegeGrant.modulePii',
-    }[group.module]
-    const translated = key ? t(key) : ''
-    return translated && translated !== key ? translated : group.name || group.module
-  }
+  // 模块名解析走共享映射；保留原签名（PrivilegeGrantView 解构使用）
+  const moduleName = (group) => permissionModuleName(t, group.module, group.name)
 
   /** 记住加载过的用户对象：远程搜索换页后，已选中的用户仍要显示姓名而不是裸 _id */
   const rememberUsers = (list) => {
@@ -117,19 +94,6 @@ export function usePrivilegeGrantOptions({ hasPerm }) {
     }
   }
 
-  const flattenPermissionNodes = (nodes, module, acc = [], seen = new Set()) => {
-    for (const node of nodes || []) {
-      if (!node) continue
-      const id = String(node._id || '')
-      if (/^[0-9a-fA-F]{24}$/.test(id) && node.code && !seen.has(node.code)) {
-        seen.add(node.code)
-        acc.push({ ...node, module: node.module || module })
-      }
-      flattenPermissionNodes(node.children, module, acc, seen)
-    }
-    return acc
-  }
-
   const loadPermissionCatalog = async () => {
     if (permissionState.value === 'loading' || permissionState.value === 'ready') return
     if (
@@ -146,8 +110,15 @@ export function usePrivilegeGrantOptions({ hasPerm }) {
       const rawGroups = (Array.isArray(tree) ? tree : []).filter(Boolean).map((mod) => ({
         module: mod.module,
         name: moduleName(mod),
-        icon: permissionIcon(mod.module),
-        permissions: flattenPermissionNodes(mod.children, mod.module),
+        icon: permissionModuleIcon(mod.module),
+        // 授权目录的身份域是 code：按 code 去重、无 code 不收录、补所属模块
+        // （与原私有实现同语义，实现收口到 utils/permissionCatalog）
+        permissions: flattenPermissionTree(mod.children, {
+          module: mod.module,
+          dedupeBy: 'code',
+          requireCode: true,
+          tagModule: true,
+        }),
       }))
       const map = new Map()
       rawGroups.forEach((group) => group.permissions.forEach((perm) => map.set(perm.code, perm)))

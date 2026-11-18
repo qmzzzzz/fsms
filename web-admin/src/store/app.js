@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { safeLocal } from './storage'
 import { prefersReducedMotion } from '@/utils/motion'
-import { readStoredLocale, setLocale, getLocale } from '@/i18n'
+import { setLocale, getLocale, resolveDefaultLocale } from '@/i18n'
 
 // P2-59 修复（2026-09-17）：initTheme 可能被重复调用（热重载、未来新增的
 // 重新初始化入口），原实现每次都新建 matchMedia 监听器且从不移除——
@@ -24,8 +24,10 @@ export const useAppStore = defineStore('app', {
       typeof window !== 'undefined' &&
       !!window.matchMedia?.('(prefers-color-scheme: dark)').matches,
     sidebarCollapsed: false,
-    // 语言偏好与主题同介质（localStorage，P3-08）：readStoredLocale 内部兼容旧 sessionStorage 值
-    language: readStoredLocale() || (navigator.language?.startsWith('zh') ? 'zh-CN' : 'en-US'),
+    // 语言偏好与主题同介质（localStorage，P3-08）。默认语言推断收口到 i18n 的
+    // resolveDefaultLocale（单一来源）：此前这里重复实现了一遍，且 navigator.language
+    // 为空时兜底成 en-US，与 i18n 实际生效的 zh-CN 口径不一致（审计「一致性」项）
+    language: resolveDefaultLocale(),
   }),
 
   getters: {
@@ -118,7 +120,8 @@ export const useAppStore = defineStore('app', {
 
     setLanguage(lang) {
       // 单一入口（P3-09）：i18n 侧的 locale、<html lang> 与 localStorage 持久化
-      // 都在 setLocale 内完成；store 只镜像实际生效的 locale（含白名单回落）
+      // 都在 setLocale 内同步完成；store 只镜像实际生效的 locale（含白名单回落）。
+      // P2-2 后 setLocale 仍同步切 locale，仅词表补载是异步的，镜像时机不变。
       setLocale(lang)
       this.language = getLocale()
     },

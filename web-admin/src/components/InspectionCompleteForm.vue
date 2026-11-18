@@ -222,10 +222,9 @@ const props = defineProps({
     type: String,
     required: true,
   },
-  inspectionTitle: {
-    type: String,
-    default: '',
-  },
+  // inspectionTitle prop 已删除（2026-11-17 审计 C 组）：组件从未消费该值，
+  // 属死契约。传入方 InspectionView.vue 的 :inspection-title 绑定需随本改动
+  // 一并由主控清理（该文件归另一批次所有）。
 })
 
 const emit = defineEmits(['update:modelValue', 'success'])
@@ -322,19 +321,20 @@ const rules = computed(() => ({
 }))
 
 // 验证至少有一个问题
+// 注意：本函数只被上方 rules 包装器在 form.result !== 'normal' 时调用
+// （normal 已在包装器提前 callback），因此旧实现里「normal 且无问题」的
+// 首分支不可达，已删除；剩余分支不再重复判断 result。
 function validateFindings(rule, value, callback) {
-  if (form.result === 'normal' && value.length === 0) {
-    callback()
-  } else if (form.result !== 'normal' && value.length === 0) {
+  if (value.length === 0) {
     callback(new Error(t('inspectionResult.issueRequiredMsg')))
+    return
+  }
+  // 检查每个问题是否完整
+  const isValid = value.every((item) => item.deviceId && item.issue)
+  if (isValid) {
+    callback()
   } else {
-    // 检查每个问题是否完整
-    const isValid = value.every((item) => item.deviceId && item.issue)
-    if (isValid) {
-      callback()
-    } else {
-      callback(new Error(t('inspectionResult.issueIncompleteMsg')))
-    }
+    callback(new Error(t('inspectionResult.issueIncompleteMsg')))
   }
 }
 
