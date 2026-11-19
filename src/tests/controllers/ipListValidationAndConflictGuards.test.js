@@ -250,9 +250,10 @@ describe('ipListController 分支补齐', () => {
     expect(res.body.errors.errorCode).toBe('FULL_RANGE_FORBIDDEN');
     // 标题里的"critical 越权审计"是本用例的主要判据：这条记录是安全概览
     // criticalAlerts 与风险评分的高危来源之一，删掉写入或降级都不会影响 403。
-    // 按 body.ip 精确认领：本文件另有「分片铺满」（128.0.0.0/1）的 POST 403 审核，只按
-    // method 轮询在随机顺序下可能先命中它而误判本用例；与调用方注释同一口径。
-    const audit = await findEscalationAudit('POST', { 'body.ip': '0.0.0.0/0' });
+    // 按 body.ip + body.type 精确认领：本文件另有「白名单 /0」用例（同 operator、
+    // 同 method、同 ip），fire-and-forget 审计在满载下落库次序会互换——只按 ip
+    // 轮询在随机顺序下可能先命中白名单用例的审计行而误判本用例；与调用方注释同一口径。
+    const audit = await findEscalationAudit('POST', { 'body.ip': '0.0.0.0/0', 'body.type': 'black' });
     expect(audit).not.toBeNull();
     expect({
       userId: String(audit.userId),
