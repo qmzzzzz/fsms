@@ -86,9 +86,12 @@ jobs:
     # 本 job 的 mongod 由 mongod-artifacts.json 的 ubuntu2204 条目供给（2404 包要求 glibc 2.39，
     # 22.04 的 2.35 跑不了）。回滚条件：MongoDB 8.0.35 发布并完成 digest/sha256 对账。
     runs-on: ubuntu-22.04
-    # 挂死的 job 会一直占着 runner（矩阵 2 个 Node × 覆盖率作业），
-    # 45 分钟是本仓全量 Jest + 覆盖率的上界；超时即失败，不静默耗资源。
-    timeout-minutes: 45
+    # 挂死的 job 会一直占着 runner（矩阵 3 个 Node × 覆盖率 + 随机顺序门禁），
+    # 超时即失败，不静默耗资源。45 分钟曾是全量 Jest + 覆盖率的上界，但随机
+    # 顺序门禁改为连跑 3 个种子的全量套件后（6425ece），实测 22.x 需 40 分钟
+    # （2026-11-19），24/26.x 在满载下撞线被取消（job 显示 cancelled、build
+    # 因 test 未成功而连带跳过）→ 放宽到 90 分钟留出余量。
+    timeout-minutes: 90
 
     strategy:
       matrix:
