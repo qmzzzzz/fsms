@@ -253,7 +253,10 @@ describe('ipListController 分支补齐', () => {
     // 按 body.ip + body.type 精确认领：本文件另有「白名单 /0」用例（同 operator、
     // 同 method、同 ip），fire-and-forget 审计在满载下落库次序会互换——只按 ip
     // 轮询在随机顺序下可能先命中白名单用例的审计行而误判本用例；与调用方注释同一口径。
-    const audit = await findEscalationAudit('POST', { 'body.ip': '0.0.0.0/0', 'body.type': 'black' });
+    const audit = await findEscalationAudit('POST', {
+      'body.ip': '0.0.0.0/0',
+      'body.type': 'black',
+    });
     expect(audit).not.toBeNull();
     expect({
       userId: String(audit.userId),
