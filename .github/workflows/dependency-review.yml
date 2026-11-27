@@ -68,7 +68,7 @@ jobs:
       # 即 v5.0.0）；上游再发版时须显式改这里，而非被动跟随移动的分支引用。
       - name: Dependency Review
         if: steps.graph.outputs.available == 'true'
-        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        uses: actions/dependency-review-action@bbc44d14a204704ccc493733616cd1e93a0321ec # v5.0.1
         with:
           # high / critical 直接判失败，阻断合入
           fail-on-severity: high
